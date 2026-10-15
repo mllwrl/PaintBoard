@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+pb-core = { path = "crates/pb-core" }
+pb-geom = { path = "crates/pb-geom" }
+pb-render = { path = "crates/pb-render" }
+pb-text = { path = "crates/pb-text" }
+pb-storage = { path = "crates/pb-storage" }
+pb-io = { path = "crates/pb-io" }
+pb-tools = { path = "crates/pb-tools" }
+pb-platform = { path = "crates/pb-platform" }
+pb-sync = { path = "crates/pb-sync" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.dev.package."*"]
+# Dependencies (wgpu, vello, ...) are much faster at runtime with optimizations,
+# and they rarely change, so this costs little compile time.
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
