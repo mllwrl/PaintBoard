@@ -7,10 +7,17 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # ttf-parser is unmaintained. It only comes in via winit -> sctk-adwaita (Wayland window
+    # decorations on Linux) and has no safe replacement yet. Revisit when bumping winit.
+    { id = "RUSTSEC-2026-0192", reason = "Linux-only transitive dep of winit, no alternative yet" },
+]
 
 [licenses]
 version = 2
 confidence-threshold = 0.9
+# The allow list covers licenses we accept in the future too, not only current ones.
+unused-allowed-license = "allow"
 allow = [
     "MIT",
     "MIT-0",

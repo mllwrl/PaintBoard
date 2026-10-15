@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 publish = false
 
 [workspace.dependencies]
@@ -18,6 +18,16 @@ pb-io = { path = "crates/pb-io" }
 pb-tools = { path = "crates/pb-tools" }
 pb-platform = { path = "crates/pb-platform" }
 pb-sync = { path = "crates/pb-sync" }
+
+kurbo = "0.13"
+vello = "0.11"
+winit = "0.30"
+log = "0.4"
+pollster = "1"
+env_logger = "0.11"
+wasm-bindgen-futures = "0.4"
+console_log = "1"
+console_error_panic_hook = "0.1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

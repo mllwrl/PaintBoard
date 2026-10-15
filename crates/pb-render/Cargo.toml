@@ -12,3 +12,5 @@ workspace = true
 pb-core.workspace = true
 pb-geom.workspace = true
 pb-text.workspace = true
+vello.workspace = true
+log.workspace = true
