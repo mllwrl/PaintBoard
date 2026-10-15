@@ -16,7 +16,10 @@ const WHEEL_PAN_STEP: f64 = 60.0;
 /// Tracks pointer state and turns input into camera moves. All positions are logical pixels.
 #[derive(Default)]
 pub struct Navigation {
+    /// Last pointer position. Kept after the pointer leaves the window, so a drag released
+    /// outside still ends where the pointer was last seen.
     cursor: Option<Point>,
+    cursor_inside: bool,
     pan_button: Option<MouseButton>,
     space_down: bool,
     modifiers: ModifiersState,
@@ -31,13 +34,19 @@ impl Navigation {
         self.modifiers
     }
 
-    /// Last known pointer position over the window, in logical pixels.
+    /// Last known pointer position, in logical pixels.
     pub fn cursor(&self) -> Option<Point> {
         self.cursor
     }
 
+    /// Pointer position, only while the pointer is over the window.
+    pub fn hovered_cursor(&self) -> Option<Point> {
+        self.cursor.filter(|_| self.cursor_inside)
+    }
+
     /// Returns true if the camera moved.
     pub fn cursor_moved(&mut self, camera: &mut Camera, pos: Point) -> bool {
+        self.cursor_inside = true;
         let previous = self.cursor.replace(pos);
         match (self.pan_button, previous) {
             (Some(_), Some(prev)) => {
@@ -49,7 +58,7 @@ impl Navigation {
     }
 
     pub fn cursor_left(&mut self) {
-        self.cursor = None;
+        self.cursor_inside = false;
     }
 
     /// Returns true if the event was consumed by navigation.
@@ -122,7 +131,7 @@ impl Navigation {
 
     /// Keyboard zoom centers on the cursor when it is over the canvas, otherwise on the viewport.
     fn zoom_anchor(&self, viewport: Size) -> Point {
-        self.cursor
+        self.hovered_cursor()
             .unwrap_or_else(|| (viewport.to_vec2() / 2.0).to_point())
     }
 

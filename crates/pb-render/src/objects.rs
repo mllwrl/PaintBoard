@@ -5,6 +5,7 @@ use vello::peniko::{Color, Fill};
 
 /// Draws one object. `transform` maps world to physical pixels.
 pub fn draw_object(scene: &mut Scene, transform: Affine, data: &ObjectData) {
+    let transform = transform * data.frame().transform();
     match data.kind {
         ObjectKind::Rectangle => {
             let shape = data.bounds;
@@ -28,10 +29,10 @@ pub fn draw_object(scene: &mut Scene, transform: Affine, data: &ObjectData) {
     }
 }
 
-/// World-space area an object paints, including its stroke.
+/// World-space axis-aligned area an object paints, including its stroke.
 pub fn painted_bounds(data: &ObjectData) -> Rect {
-    data.bounds
-        .inflate(data.style.stroke_width / 2.0, data.style.stroke_width / 2.0)
+    let pad = data.style.stroke_width / 2.0;
+    data.frame().aabb().inflate(pad, pad)
 }
 
 fn color(rgba: Rgba) -> Color {

@@ -2,6 +2,7 @@ use std::fmt;
 
 use kurbo::Rect;
 use loro::TreeID;
+use pb_geom::Frame;
 
 /// Stable identifier of a board object, unique across replicas.
 ///
@@ -101,9 +102,22 @@ impl Default for Style {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ObjectData {
     pub kind: ObjectKind,
-    /// Axis-aligned bounds in world coordinates, always normalized (`x0 <= x1`, `y0 <= y1`).
+    /// Unrotated bounds in world coordinates, always normalized (`x0 <= x1`, `y0 <= y1`).
     pub bounds: Rect,
+    /// Rotation around the center of `bounds`, in radians, clockwise on screen.
+    pub rotation: f64,
     pub style: Style,
+}
+
+impl ObjectData {
+    pub fn frame(&self) -> Frame {
+        Frame::new(self.bounds, self.rotation)
+    }
+
+    pub fn set_frame(&mut self, frame: Frame) {
+        self.bounds = frame.rect.abs();
+        self.rotation = frame.rotation;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

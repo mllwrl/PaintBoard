@@ -1,9 +1,14 @@
+use std::f64::consts::FRAC_PI_4;
+
 use pb_geom::kurbo::{Point, Rect, Vec2};
+use pb_geom::{Frame, rotate};
 
 use crate::CursorHint;
 
 /// Objects never get smaller than this (world units) when resized.
 const MIN_SIZE: f64 = 1.0;
+/// Distance of the rotation knob above the selection frame, in logical pixels.
+const KNOB_OFFSET: f64 = 24.0;
 
 /// A resize handle on the selection bounds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,19 +72,37 @@ impl Handle {
         Point::new(pick(x, bounds.x0, bounds.x1), pick(y, bounds.y0, bounds.y1))
     }
 
-    pub fn cursor(self) -> CursorHint {
-        match self {
-            Self::North | Self::South => CursorHint::ResizeNs,
-            Self::East | Self::West => CursorHint::ResizeEw,
-            Self::NorthWest | Self::SouthEast => CursorHint::ResizeNwse,
-            Self::NorthEast | Self::SouthWest => CursorHint::ResizeNesw,
+    /// Resize cursor for this handle on a frame rotated by `rotation`.
+    pub fn cursor(self, rotation: f64) -> CursorHint {
+        let sign = |edge| match edge {
+            Edge::Min => -1.0,
+            Edge::Max => 1.0,
+            Edge::Fixed => 0.0,
+        };
+        let (x, y) = self.edges();
+        let direction = rotate(Vec2::new(sign(x), sign(y)), rotation);
+        // Cursors are symmetric, so only the direction modulo 180 degrees matters.
+        let sector = (direction.atan2().rem_euclid(std::f64::consts::PI) / FRAC_PI_4).round();
+        match sector as u8 % 4 {
+            0 => CursorHint::ResizeEw,
+            1 => CursorHint::ResizeNwse,
+            2 => CursorHint::ResizeNs,
+            _ => CursorHint::ResizeNesw,
         }
     }
 }
 
+/// World position of the rotation knob: above the top edge, a fixed screen distance away.
+pub fn rotation_knob(frame: Frame, zoom: f64) -> Point {
+    let top = frame.to_world(Handle::North.position(frame.rect));
+    top + rotate(Vec2::new(0.0, -KNOB_OFFSET / zoom), frame.rotation)
+}
+
 /// The handle within `radius` of `point`; corners win over edges.
-pub fn handle_at(bounds: Rect, point: Point, radius: f64) -> Option<Handle> {
-    let near = |h: &Handle| (h.position(bounds) - point).hypot() <= radius;
+pub fn handle_at(frame: Frame, point: Point, radius: f64) -> Option<Handle> {
+    // Rotation preserves distances, so compare in the frame's local space.
+    let local = frame.to_local(point);
+    let near = |h: &Handle| (h.position(frame.rect) - local).hypot() <= radius;
     let (corners, edges): (Vec<_>, Vec<_>) = Handle::ALL.iter().partition(|h| h.is_corner());
     corners.into_iter().chain(edges).find(near)
 }
@@ -164,15 +187,36 @@ mod tests {
 
     #[test]
     fn corners_win_over_edges() {
+        let f = Frame::axis_aligned(R);
         assert_eq!(
-            handle_at(R, Point::new(1.0, 1.0), 5.0),
+            handle_at(f, Point::new(1.0, 1.0), 5.0),
             Some(Handle::NorthWest)
         );
         assert_eq!(
-            handle_at(R, Point::new(50.0, 49.0), 5.0),
+            handle_at(f, Point::new(50.0, 49.0), 5.0),
             Some(Handle::South)
         );
-        assert_eq!(handle_at(R, Point::new(50.0, 25.0), 5.0), None);
+        assert_eq!(handle_at(f, Point::new(50.0, 25.0), 5.0), None);
+    }
+
+    #[test]
+    fn handles_follow_rotation() {
+        use std::f64::consts::FRAC_PI_2;
+        // Rotated a quarter turn clockwise, the east handle points down.
+        let f = Frame::new(R, FRAC_PI_2);
+        let east = f.to_world(Handle::East.position(R));
+        assert!((east - Point::new(50.0, 75.0)).hypot() < 1e-9);
+        assert_eq!(handle_at(f, east, 1.0), Some(Handle::East));
+        assert_eq!(Handle::East.cursor(FRAC_PI_2), CursorHint::ResizeNs);
+        assert_eq!(Handle::East.cursor(0.0), CursorHint::ResizeEw);
+        assert_eq!(Handle::SouthEast.cursor(FRAC_PI_2), CursorHint::ResizeNesw);
+    }
+
+    #[test]
+    fn knob_sits_above_top_edge_at_any_zoom() {
+        let f = Frame::axis_aligned(R);
+        assert_eq!(rotation_knob(f, 1.0), Point::new(50.0, -KNOB_OFFSET));
+        assert_eq!(rotation_knob(f, 2.0), Point::new(50.0, -KNOB_OFFSET / 2.0));
     }
 
     #[test]

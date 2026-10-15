@@ -11,7 +11,7 @@ pub fn object_at(objects: &[Object], point: Point, tolerance: f64) -> Option<Obj
         .find(|o| match o.data.kind {
             ObjectKind::Rectangle => {
                 let pad = tolerance + o.data.style.stroke_width / 2.0;
-                o.data.bounds.inflate(pad, pad).contains(point)
+                o.data.frame().contains(point, pad)
             }
         })
         .map(|o| o.id)
@@ -21,7 +21,7 @@ pub fn object_at(objects: &[Object], point: Point, tolerance: f64) -> Option<Obj
 pub fn objects_in(objects: &[Object], area: Rect) -> impl Iterator<Item = ObjectId> + '_ {
     objects
         .iter()
-        .filter(move |o| o.data.bounds.overlaps(area))
+        .filter(move |o| o.data.frame().overlaps(area))
         .map(|o| o.id)
 }
 
@@ -36,11 +36,12 @@ mod tests {
         let ids = rects
             .iter()
             .map(|&bounds| {
-                doc.apply(Command::Create(ObjectData {
+                doc.apply(Command::Create(vec![ObjectData {
                     kind: ObjectKind::Rectangle,
                     bounds,
+                    rotation: 0.0,
                     style: Style::default(),
-                }))
+                }]))
                 .unwrap()
                 .created[0]
             })

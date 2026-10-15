@@ -53,8 +53,8 @@ pub struct View<'a> {
     pub objects: &'a [Object],
     /// Objects mid-gesture (moved, resized) that replace their stored state.
     pub overrides: &'a [Object],
-    /// Object being drawn by the active tool, shown on top.
-    pub preview: Option<ObjectData>,
+    /// Objects the active tool is about to create, shown on top.
+    pub previews: &'a [ObjectData],
     pub overlay: &'a Overlay,
 }
 
@@ -79,7 +79,7 @@ pub fn build_scene(scene: &mut Scene, view: &View<'_>) {
         .iter()
         .map(|o| overrides.get(&o.id).copied().unwrap_or(&o.data))
         .filter(|data| objects::painted_bounds(data).overlaps(visible));
-    for data in on_screen.chain(view.preview.as_ref()) {
+    for data in on_screen.chain(view.previews) {
         objects::draw_object(scene, transform, data);
     }
 

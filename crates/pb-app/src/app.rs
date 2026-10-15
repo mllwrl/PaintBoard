@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use pb_core::{Command, Document, Object};
+use pb_core::{Command, Document, Object, ZOrder};
 use pb_geom::Camera;
-use pb_geom::kurbo::{Point, Rect, Size, Vec2};
+use pb_geom::kurbo::{Point, Size, Vec2};
 use pb_render::vello::Scene;
 use pb_render::{Gpu, GridStyle, Overlay, Theme, View, build_scene};
-use pb_tools::{CursorHint, Pointer, ToolKind, Tools};
+use pb_tools::{Clipboard, CursorHint, Pointer, ToolKind, Tools, frame_of, rotation_knob};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
@@ -32,6 +32,7 @@ pub struct App {
     navigation: Navigation,
     document: Document,
     tools: Tools,
+    clipboard: Clipboard,
     shown_title: String,
 }
 
@@ -48,6 +49,7 @@ impl App {
             navigation: Navigation::default(),
             document: Document::new(),
             tools: Tools::default(),
+            clipboard: Clipboard::default(),
             shown_title: String::new(),
         }
     }
@@ -76,7 +78,8 @@ impl App {
         let scale = window.scale_factor();
         let size = window.inner_size().to_logical::<f64>(scale);
         let overrides = self.tools.overrides(&self.document);
-        let overlay = overlay(&self.document, &self.tools, &overrides);
+        let previews = self.tools.previews(&self.document);
+        let overlay = overlay(&self.document, &self.tools, &overrides, self.camera.zoom());
         build_scene(
             &mut self.scene,
             &View {
@@ -87,7 +90,7 @@ impl App {
                 theme: &self.theme,
                 objects: self.document.objects(),
                 overrides: &overrides,
-                preview: self.tools.preview(),
+                previews: &previews,
                 overlay: &overlay,
             },
         );
@@ -113,6 +116,7 @@ impl App {
             zoom: self.camera.zoom(),
             shift: self.navigation.modifiers().shift_key(),
             ctrl: self.navigation.modifiers().control_key(),
+            alt: self.navigation.modifiers().alt_key(),
         })
     }
 
@@ -166,12 +170,21 @@ impl App {
                 CursorHint::Default => CursorIcon::Default,
                 CursorHint::Crosshair => CursorIcon::Crosshair,
                 CursorHint::Move => CursorIcon::Move,
+                CursorHint::Copy => CursorIcon::Copy,
+                CursorHint::Rotate => CursorIcon::Grab,
                 CursorHint::ResizeNs => CursorIcon::NsResize,
                 CursorHint::ResizeEw => CursorIcon::EwResize,
                 CursorHint::ResizeNwse => CursorIcon::NwseResize,
                 CursorHint::ResizeNesw => CursorIcon::NeswResize,
             },
             icon => icon,
+        }
+    }
+
+    fn reorder(&mut self, to: ZOrder) {
+        let ids = self.tools.selection().ids().to_vec();
+        if !ids.is_empty() {
+            self.apply(Command::Reorder { ids, to });
         }
     }
 
@@ -215,6 +228,41 @@ impl App {
             KeyCode::KeyV if !ctrl => self.tools.set_active(ToolKind::Select),
             KeyCode::KeyR if !ctrl => self.tools.set_active(ToolKind::Rectangle),
             KeyCode::KeyA if ctrl => self.tools.select_all(&self.document),
+            KeyCode::KeyC if ctrl => {
+                self.clipboard.copy(&self.document, self.tools.selection());
+            }
+            KeyCode::KeyX if ctrl => {
+                if self.clipboard.copy(&self.document, self.tools.selection())
+                    && let Some(command) = self.tools.delete_selected()
+                {
+                    self.apply(command);
+                }
+            }
+            KeyCode::KeyV if ctrl => {
+                // Paste where the pointer is, like Miro; cascade when it is off the canvas.
+                let at = self
+                    .navigation
+                    .hovered_cursor()
+                    .map(|c| self.camera.screen_to_world(c));
+                if let Some(command) = self.clipboard.paste(at) {
+                    self.apply(command);
+                }
+            }
+            KeyCode::KeyD if ctrl => {
+                if let Some(command) = pb_tools::duplicate(&self.document, self.tools.selection()) {
+                    self.apply(command);
+                }
+            }
+            KeyCode::BracketRight if ctrl => self.reorder(if modifiers.shift_key() {
+                ZOrder::Front
+            } else {
+                ZOrder::Forward
+            }),
+            KeyCode::BracketLeft if ctrl => self.reorder(if modifiers.shift_key() {
+                ZOrder::Back
+            } else {
+                ZOrder::Backward
+            }),
             KeyCode::Delete | KeyCode::Backspace => {
                 if let Some(command) = self.tools.delete_selected() {
                     self.apply(command);
@@ -367,25 +415,30 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 /// Selection feedback, following objects mid-gesture.
-fn overlay(document: &Document, tools: &Tools, overrides: &[Object]) -> Overlay {
-    let bounds_of = |id| {
+fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) -> Overlay {
+    let data_of = |id| {
         overrides
             .iter()
             .find(|o| o.id == id)
             .or_else(|| document.get(id))
-            .map(|o| o.data.bounds)
+            .map(|o| &o.data)
     };
-    let selected: Vec<Rect> = tools
+    let selected: Vec<_> = tools
         .selection()
         .ids()
         .iter()
-        .filter_map(|&id| bounds_of(id))
+        .filter_map(|&id| data_of(id))
         .collect();
+    let selection = frame_of(selected.iter().copied());
+    let show_handles = tools.shows_handles();
     Overlay {
-        selection_bounds: selected.iter().copied().reduce(|a, b| a.union(b)),
-        selected,
-        show_handles: tools.shows_handles(),
-        hover: tools.hover().and_then(bounds_of),
+        selected: selected.iter().map(|d| d.frame()).collect(),
+        selection,
+        show_handles,
+        rotate_knob: selection
+            .filter(|_| show_handles)
+            .map(|f| rotation_knob(f, zoom)),
+        hover: tools.hover().and_then(data_of).map(|d| d.frame()),
         marquee: tools.marquee(),
     }
 }

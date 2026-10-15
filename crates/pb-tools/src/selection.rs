@@ -1,5 +1,5 @@
-use pb_core::{Document, ObjectId};
-use pb_geom::kurbo::Rect;
+use pb_core::{Document, ObjectData, ObjectId};
+use pb_geom::Frame;
 
 /// Selected objects in the order they were selected. View state, never stored in the document.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -46,12 +46,30 @@ impl Selection {
         self.ids.retain(|&id| doc.get(id).is_some());
     }
 
-    /// Union of the selected objects' bounds.
-    pub fn bounds(&self, doc: &Document) -> Option<Rect> {
-        self.ids
-            .iter()
-            .filter_map(|&id| doc.get(id))
-            .map(|o| o.data.bounds)
-            .reduce(|a, b| a.union(b))
+    /// The frame that resize and rotate handles attach to.
+    pub fn frame(&self, doc: &Document) -> Option<Frame> {
+        frame_of(
+            self.ids
+                .iter()
+                .filter_map(|&id| doc.get(id))
+                .map(|o| &o.data),
+        )
+    }
+}
+
+/// Selection frame of some objects: a single object's own (possibly rotated) frame, or the
+/// axis-aligned box around several.
+pub fn frame_of<'a>(mut objects: impl Iterator<Item = &'a ObjectData>) -> Option<Frame> {
+    let first = objects.next()?;
+    match objects.next() {
+        None => Some(first.frame()),
+        Some(second) => {
+            let aabb = [first, second]
+                .into_iter()
+                .chain(objects)
+                .map(|d| d.frame().aabb())
+                .reduce(|a, b| a.union(b))?;
+            Some(Frame::axis_aligned(aabb))
+        }
     }
 }
