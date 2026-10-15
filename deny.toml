@@ -11,6 +11,11 @@ ignore = [
     # ttf-parser is unmaintained. It only comes in via winit -> sctk-adwaita (Wayland window
     # decorations on Linux) and has no safe replacement yet. Revisit when bumping winit.
     { id = "RUSTSEC-2026-0192", reason = "Linux-only transitive dep of winit, no alternative yet" },
+    # Unmaintained (not vulnerable) crates pulled in by loro. Revisit when bumping loro.
+    { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill via loro -> postcard -> heapless" },
+    { id = "RUSTSEC-2026-0247", reason = "bitmaps via loro -> im" },
+    { id = "RUSTSEC-2026-0248", reason = "im via loro" },
+    { id = "RUSTSEC-2026-0251", reason = "sized-chunks via loro -> im" },
 ]
 
 [licenses]
@@ -30,6 +35,13 @@ allow = [
     "Unicode-3.0",
     "CC0-1.0",
     "BSL-1.0",
+]
+# MPL-2.0 is file-level copyleft: fine to ship unmodified in a closed-source app, as long as
+# the notices are kept and these crates' sources stay available. Allowed per crate, not globally.
+exceptions = [
+    { allow = ["MPL-2.0"], crate = "im" },
+    { allow = ["MPL-2.0"], crate = "sized-chunks" },
+    { allow = ["MPL-2.0"], crate = "bitmaps" },
 ]
 # Our own crates are unpublished and unlicensed until the project license is chosen.
 private = { ignore = true }

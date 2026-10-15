@@ -31,6 +31,11 @@ impl Navigation {
         self.modifiers
     }
 
+    /// Last known pointer position over the window, in logical pixels.
+    pub fn cursor(&self) -> Option<Point> {
+        self.cursor
+    }
+
     /// Returns true if the camera moved.
     pub fn cursor_moved(&mut self, camera: &mut Camera, pos: Point) -> bool {
         let previous = self.cursor.replace(pos);

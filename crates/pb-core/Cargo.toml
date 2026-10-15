@@ -9,3 +9,5 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+kurbo.workspace = true
+loro.workspace = true
