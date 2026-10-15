@@ -162,9 +162,12 @@ impl Document {
                     write_bounds(&self.tree.get_meta(self.nodes[&id])?, bounds)?;
                 }
             }
-            Command::SetBounds { id, bounds } => {
-                self.check_exist(&[id])?;
-                write_bounds(&self.tree.get_meta(self.nodes[&id])?, bounds.abs())?;
+            Command::SetBounds(changes) => {
+                let ids: Vec<_> = changes.iter().map(|(id, _)| *id).collect();
+                self.check_exist(&ids)?;
+                for (id, bounds) in changes {
+                    write_bounds(&self.tree.get_meta(self.nodes[&id])?, bounds.abs())?;
+                }
             }
         }
         self.doc.commit();
@@ -339,10 +342,10 @@ mod tests {
             doc.get(b).unwrap().data.bounds,
             Rect::new(21.0, 2.0, 31.0, 12.0)
         );
-        doc.apply(Command::SetBounds {
-            id: a,
-            bounds: Rect::new(0.0, 0.0, 50.0, 50.0),
-        })
+        doc.apply(Command::SetBounds(vec![(
+            a,
+            Rect::new(0.0, 0.0, 50.0, 50.0),
+        )]))
         .unwrap();
         assert_eq!(doc.get(a).unwrap().data.bounds.width(), 50.0);
         doc.apply(Command::Delete(vec![a])).unwrap();

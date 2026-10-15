@@ -12,10 +12,8 @@ pub enum Command {
         ids: Vec<ObjectId>,
         delta: Vec2,
     },
-    SetBounds {
-        id: ObjectId,
-        bounds: Rect,
-    },
+    /// Sets new bounds for several objects at once (e.g. resizing a multi-selection).
+    SetBounds(Vec<(ObjectId, Rect)>),
 }
 
 /// What a command produced, for callers that need to follow up (e.g. select new objects).

@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use pb_core::{Command, Document};
+use pb_core::{Command, Document, Object};
 use pb_geom::Camera;
-use pb_geom::kurbo::{Point, Size};
+use pb_geom::kurbo::{Point, Rect, Size, Vec2};
 use pb_render::vello::Scene;
-use pb_render::{Gpu, GridStyle, Theme, View, build_scene};
-use pb_tools::{Pointer, ToolKind, Tools};
+use pb_render::{Gpu, GridStyle, Overlay, Theme, View, build_scene};
+use pb_tools::{CursorHint, Pointer, ToolKind, Tools};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
@@ -75,6 +75,8 @@ impl App {
         };
         let scale = window.scale_factor();
         let size = window.inner_size().to_logical::<f64>(scale);
+        let overrides = self.tools.overrides(&self.document);
+        let overlay = overlay(&self.document, &self.tools, &overrides);
         build_scene(
             &mut self.scene,
             &View {
@@ -84,7 +86,9 @@ impl App {
                 grid: self.grid,
                 theme: &self.theme,
                 objects: self.document.objects(),
+                overrides: &overrides,
                 preview: self.tools.preview(),
+                overlay: &overlay,
             },
         );
         gpu.render(&self.scene, self.theme.background);
@@ -107,14 +111,19 @@ impl App {
         Some(Pointer {
             world: self.camera.screen_to_world(cursor),
             zoom: self.camera.zoom(),
-            constrain: self.navigation.modifiers().shift_key(),
+            shift: self.navigation.modifiers().shift_key(),
+            ctrl: self.navigation.modifiers().control_key(),
         })
     }
 
     fn apply(&mut self, command: Command) {
-        if let Err(err) = self.document.apply(command) {
-            log::error!("command failed: {err}");
+        match self.document.apply(command) {
+            // New objects get selected, like in Miro.
+            Ok(applied) if !applied.created.is_empty() => self.tools.select_only(applied.created),
+            Ok(_) => {}
+            Err(err) => log::error!("command failed: {err}"),
         }
+        self.tools.sync(&self.document);
     }
 
     fn undo(&mut self) {
@@ -122,6 +131,7 @@ impl App {
         if let Err(err) = self.document.undo() {
             log::error!("undo failed: {err}");
         }
+        self.tools.sync(&self.document);
     }
 
     fn redo(&mut self) {
@@ -129,6 +139,7 @@ impl App {
         if let Err(err) = self.document.redo() {
             log::error!("redo failed: {err}");
         }
+        self.tools.sync(&self.document);
     }
 
     /// Returns true if the view changed.
@@ -137,21 +148,42 @@ impl App {
             return false;
         };
         match state {
-            ElementState::Pressed => self.tools.pointer_down(pointer),
-            ElementState::Released => match self.tools.pointer_up(pointer) {
+            ElementState::Pressed => self.tools.pointer_down(&self.document, pointer),
+            ElementState::Released => match self.tools.pointer_up(&self.document, pointer) {
                 Some(command) => {
                     self.apply(command);
                     true
                 }
-                None => false,
+                // The gesture may still have changed the selection.
+                None => true,
             },
         }
     }
 
     fn cursor_icon(&self) -> CursorIcon {
         match self.navigation.cursor_icon() {
-            CursorIcon::Default if self.tools.active() != ToolKind::Select => CursorIcon::Crosshair,
+            CursorIcon::Default => match self.tools.cursor() {
+                CursorHint::Default => CursorIcon::Default,
+                CursorHint::Crosshair => CursorIcon::Crosshair,
+                CursorHint::Move => CursorIcon::Move,
+                CursorHint::ResizeNs => CursorIcon::NsResize,
+                CursorHint::ResizeEw => CursorIcon::EwResize,
+                CursorHint::ResizeNwse => CursorIcon::NwseResize,
+                CursorHint::ResizeNesw => CursorIcon::NeswResize,
+            },
             icon => icon,
+        }
+    }
+
+    fn nudge(&mut self, dx: f64, dy: f64) {
+        // Shift moves in bigger steps, like in Miro.
+        let step = if self.navigation.modifiers().shift_key() {
+            10.0
+        } else {
+            1.0
+        };
+        if let Some(command) = self.tools.nudge_selected(Vec2::new(dx, dy) * step) {
+            self.apply(command);
         }
     }
 
@@ -182,9 +214,24 @@ impl App {
             KeyCode::KeyY if ctrl => self.redo(),
             KeyCode::KeyV if !ctrl => self.tools.set_active(ToolKind::Select),
             KeyCode::KeyR if !ctrl => self.tools.set_active(ToolKind::Rectangle),
+            KeyCode::KeyA if ctrl => self.tools.select_all(&self.document),
+            KeyCode::Delete | KeyCode::Backspace => {
+                if let Some(command) = self.tools.delete_selected() {
+                    self.apply(command);
+                }
+            }
+            KeyCode::ArrowLeft => self.nudge(-1.0, 0.0),
+            KeyCode::ArrowRight => self.nudge(1.0, 0.0),
+            KeyCode::ArrowUp => self.nudge(0.0, -1.0),
+            KeyCode::ArrowDown => self.nudge(0.0, 1.0),
+            // Esc backs out one level: gesture, then tool, then selection.
             KeyCode::Escape => {
                 if !self.tools.cancel() {
-                    self.tools.set_active(ToolKind::Select);
+                    if self.tools.active() != ToolKind::Select {
+                        self.tools.set_active(ToolKind::Select);
+                    } else {
+                        self.tools.clear_selection();
+                    }
                 }
             }
             KeyCode::Equal | KeyCode::NumpadAdd if ctrl => {
@@ -278,7 +325,8 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.navigation.set_modifiers(modifiers.state());
                 // Shift changes the shape being drawn without moving the mouse.
-                self.pointer().is_some_and(|p| self.tools.pointer_move(p))
+                self.pointer()
+                    .is_some_and(|p| self.tools.pointer_move(&self.document, p))
             }
             WindowEvent::KeyboardInput { event, .. } => self.handle_key(&event),
             WindowEvent::CursorMoved { position, .. } => {
@@ -286,7 +334,9 @@ impl ApplicationHandler<UserEvent> for App {
                 let panned = self
                     .navigation
                     .cursor_moved(&mut self.camera, Point::new(pos.x, pos.y));
-                let tool_changed = self.pointer().is_some_and(|p| self.tools.pointer_move(p));
+                let tool_changed = self
+                    .pointer()
+                    .is_some_and(|p| self.tools.pointer_move(&self.document, p));
                 panned || tool_changed
             }
             WindowEvent::CursorLeft { .. } => {
@@ -313,5 +363,29 @@ impl ApplicationHandler<UserEvent> for App {
         if changed {
             self.request_redraw();
         }
+    }
+}
+
+/// Selection feedback, following objects mid-gesture.
+fn overlay(document: &Document, tools: &Tools, overrides: &[Object]) -> Overlay {
+    let bounds_of = |id| {
+        overrides
+            .iter()
+            .find(|o| o.id == id)
+            .or_else(|| document.get(id))
+            .map(|o| o.data.bounds)
+    };
+    let selected: Vec<Rect> = tools
+        .selection()
+        .ids()
+        .iter()
+        .filter_map(|&id| bounds_of(id))
+        .collect();
+    Overlay {
+        selection_bounds: selected.iter().copied().reduce(|a, b| a.union(b)),
+        selected,
+        show_handles: tools.shows_handles(),
+        hover: tools.hover().and_then(bounds_of),
+        marquee: tools.marquee(),
     }
 }

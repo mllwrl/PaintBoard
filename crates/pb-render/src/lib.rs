@@ -3,10 +3,14 @@
 mod gpu;
 mod grid;
 mod objects;
+mod overlay;
 
 pub use gpu::Gpu;
 pub use grid::{GridColors, GridLevel, GridStyle, draw_grid};
+pub use overlay::{Overlay, OverlayColors};
 pub use vello;
+
+use std::collections::HashMap;
 
 use pb_core::{Object, ObjectData};
 use pb_geom::Camera;
@@ -17,6 +21,7 @@ use vello::peniko::Color;
 pub struct Theme {
     pub background: Color,
     pub grid: GridColors,
+    pub overlay: OverlayColors,
 }
 
 impl Theme {
@@ -26,6 +31,10 @@ impl Theme {
             grid: GridColors {
                 dot: Color::from_rgb8(0xBD, 0xBD, 0xB8),
                 line: Color::from_rgb8(0xE2, 0xE2, 0xDE),
+            },
+            overlay: OverlayColors {
+                accent: Color::from_rgb8(0x3B, 0x6E, 0xF5),
+                handle_fill: Color::WHITE,
             },
         }
     }
@@ -42,8 +51,11 @@ pub struct View<'a> {
     pub theme: &'a Theme,
     /// Board objects in z-order, back to front.
     pub objects: &'a [Object],
+    /// Objects mid-gesture (moved, resized) that replace their stored state.
+    pub overrides: &'a [Object],
     /// Object being drawn by the active tool, shown on top.
     pub preview: Option<ObjectData>,
+    pub overlay: &'a Overlay,
 }
 
 /// Rebuilds `scene` for the given view.
@@ -61,12 +73,21 @@ pub fn build_scene(scene: &mut Scene, view: &View<'_>) {
     let transform = Affine::scale(view.scale) * view.camera.transform();
     let visible = view.camera.visible_world_rect(view.viewport);
     // TODO: query an R-tree instead of scanning every object.
+    let overrides: HashMap<_, _> = view.overrides.iter().map(|o| (o.id, &o.data)).collect();
     let on_screen = view
         .objects
         .iter()
-        .map(|o| &o.data)
+        .map(|o| overrides.get(&o.id).copied().unwrap_or(&o.data))
         .filter(|data| objects::painted_bounds(data).overlaps(visible));
     for data in on_screen.chain(view.preview.as_ref()) {
         objects::draw_object(scene, transform, data);
     }
+
+    overlay::draw_overlay(
+        scene,
+        view.camera,
+        view.scale,
+        view.overlay,
+        &view.theme.overlay,
+    );
 }
