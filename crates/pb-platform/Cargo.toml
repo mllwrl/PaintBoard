@@ -9,3 +9,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+log.workspace = true
+web-time.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rfd.workspace = true

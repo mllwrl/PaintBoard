@@ -2,6 +2,7 @@
 
 mod app;
 mod navigation;
+mod session;
 
 use app::{App, UserEvent};
 use winit::event_loop::EventLoop;

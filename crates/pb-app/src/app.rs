@@ -4,6 +4,7 @@ use std::sync::Arc;
 use pb_core::{Command, Document, Object, ShapeKind, ZOrder};
 use pb_geom::Camera;
 use pb_geom::kurbo::{Point, Size, Vec2};
+use pb_platform::Instant;
 use pb_render::vello::Scene;
 use pb_render::{Gpu, GridStyle, Overlay, Theme, View, build_scene};
 use pb_tools::{
@@ -12,11 +13,12 @@ use pb_tools::{
 };
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::navigation::Navigation;
+use crate::session::Session;
 
 pub enum UserEvent {
     /// GPU initialization finished (asynchronous on the web).
@@ -37,11 +39,13 @@ pub struct App {
     document: Document,
     tools: Tools,
     clipboard: Clipboard,
+    session: Session,
     shown_title: String,
 }
 
 impl App {
     pub fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
+        let (session, document) = Session::restore();
         Self {
             proxy,
             window: None,
@@ -51,9 +55,10 @@ impl App {
             camera: Camera::default(),
             grid: GridStyle::default(),
             navigation: Navigation::default(),
-            document: Document::new(),
+            document,
             tools: Tools::default(),
             clipboard: Clipboard::default(),
+            session,
             shown_title: String::new(),
         }
     }
@@ -102,7 +107,8 @@ impl App {
 
         // Until there is a toolbar, the title shows the active tool, zoom and grid snapping.
         let title = format!(
-            "PaintBoard — {} — {:.0}%{}",
+            "{} — PaintBoard — {} — {:.0}%{}",
+            self.session.name(),
             self.tools.active().name(),
             self.camera.zoom() * 100.0,
             if self.tools.snap_to_grid() {
@@ -244,6 +250,16 @@ impl App {
         }
     }
 
+    /// Shows another board (opened or new) from a clean slate.
+    fn replace_document(&mut self, document: Document) {
+        self.document = document;
+        self.tools.cancel();
+        self.tools.clear_selection();
+        self.tools.sync(&self.document);
+        let viewport = self.viewport();
+        self.camera.look_at(Point::ZERO, 1.0, viewport);
+    }
+
     fn on_gpu_ready(&mut self, gpu: Gpu) {
         self.gpu = Some(gpu);
         self.request_redraw();
@@ -269,6 +285,20 @@ impl App {
         let viewport = self.viewport();
         // Physical keys, so shortcuts work the same on any keyboard layout.
         match code {
+            KeyCode::KeyS if ctrl && modifiers.shift_key() => {
+                self.session.save_as(&self.document);
+            }
+            KeyCode::KeyS if ctrl => self.session.save(&self.document),
+            KeyCode::KeyO if ctrl => {
+                if let Some(document) = self.session.open(&self.document) {
+                    self.replace_document(document);
+                }
+            }
+            KeyCode::KeyN if ctrl => {
+                if let Some(document) = self.session.new_board(&self.document) {
+                    self.replace_document(document);
+                }
+            }
             KeyCode::KeyZ if ctrl && modifiers.shift_key() => self.redo(),
             KeyCode::KeyZ if ctrl => self.undo(),
             KeyCode::KeyY if ctrl => self.redo(),
@@ -403,6 +433,19 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             });
         }
+    }
+
+    /// Runs after each batch of events: autosaves when due and wakes up for the next one.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.session.tick(&self.document, Instant::now());
+        event_loop.set_control_flow(match self.session.deadline() {
+            Some(deadline) => ControlFlow::WaitUntil(deadline),
+            None => ControlFlow::Wait,
+        });
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.session.flush(&self.document);
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {

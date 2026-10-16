@@ -11,3 +11,6 @@ workspace = true
 [dependencies]
 pb-core.workspace = true
 pb-platform.workspace = true
+
+[dev-dependencies]
+pb-geom.workspace = true
