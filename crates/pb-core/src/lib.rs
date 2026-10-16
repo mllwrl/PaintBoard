@@ -6,6 +6,7 @@ pub mod connector;
 mod document;
 mod object;
 pub mod rich;
+pub mod table;
 
 pub use asset::{AssetId, Assets};
 pub use command::{Applied, Command, ZOrder};
@@ -17,3 +18,4 @@ pub use object::{
 };
 pub use pb_geom::ShapeKind;
 pub use rich::{Span, Spans, TextMarks};
+pub use table::{Cell, Line, Table};

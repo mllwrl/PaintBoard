@@ -6,7 +6,7 @@ use kurbo::{Point, Rect, Vec2};
 use loro::TreeID;
 use pb_geom::{Frame, ShapeKind};
 
-use crate::{AssetId, Connector, Span, Spans};
+use crate::{AssetId, Connector, Span, Spans, Table};
 
 /// Stable identifier of a board object, unique across replicas.
 ///
@@ -70,6 +70,8 @@ pub enum ObjectKind {
     /// [`crate::Document::frame_members`]. It is drawn below everything else and does not
     /// rotate.
     Frame(FrameData),
+    /// A grid of cells with text, in the fill color with lines in the outline color.
+    Table(Table),
 }
 
 impl ObjectKind {
@@ -82,6 +84,7 @@ impl ObjectKind {
             Self::Image(_) => "image",
             Self::Connector(_) => "connector",
             Self::Frame(_) => "frame",
+            Self::Table(_) => "table",
             Self::Shape(shape) => shape_name(shape.kind),
         }
     }
@@ -108,7 +111,7 @@ impl ObjectKind {
             Self::Sticky(sticky) => Some(&sticky.text),
             Self::Shape(shape) => Some(&shape.text),
             Self::Frame(frame) => Some(&frame.title),
-            Self::Ink(_) | Self::Image(_) | Self::Connector(_) => None,
+            Self::Ink(_) | Self::Image(_) | Self::Connector(_) | Self::Table(_) => None,
         }
     }
 
@@ -118,7 +121,11 @@ impl ObjectKind {
             Self::Text(text) => &text.spans,
             Self::Sticky(sticky) => &sticky.spans,
             Self::Shape(shape) => &shape.spans,
-            Self::Frame(_) | Self::Ink(_) | Self::Image(_) | Self::Connector(_) => &[],
+            Self::Frame(_)
+            | Self::Ink(_)
+            | Self::Image(_)
+            | Self::Connector(_)
+            | Self::Table(_) => &[],
         }
     }
 }
@@ -376,10 +383,10 @@ impl StyleChange {
         }
     }
 
-    /// The part of this change that applies to an object of `kind`: only shapes have text
-    /// styles.
+    /// The part of this change that applies to an object of `kind`: only shapes and tables
+    /// have text styles.
     pub fn for_kind(mut self, kind: &ObjectKind) -> Self {
-        if !matches!(kind, ObjectKind::Shape(_)) {
+        if !matches!(kind, ObjectKind::Shape(_) | ObjectKind::Table(_)) {
             self.text_color = None;
             self.font_size = None;
             self.text_align = None;
@@ -579,7 +586,7 @@ impl ObjectData {
             ObjectKind::Sticky(_) => Some(Sticky::text_box(self.bounds)),
             ObjectKind::Shape(shape) => Some(Shape::text_box(shape.kind, self.bounds, &self.style)),
             ObjectKind::Text(_) | ObjectKind::Ink(_) | ObjectKind::Image(_) => None,
-            ObjectKind::Connector(_) | ObjectKind::Frame(_) => None,
+            ObjectKind::Connector(_) | ObjectKind::Frame(_) | ObjectKind::Table(_) => None,
         }
     }
 

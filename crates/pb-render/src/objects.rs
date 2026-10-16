@@ -259,6 +259,37 @@ pub(crate) fn draw_object(
         }
         // Drawn by `draw_connector`, which needs the objects they attach to.
         ObjectKind::Connector(_) => {}
+        ObjectKind::Table(table) => {
+            let b = data.bounds;
+            scene.fill(Fill::NonZero, transform, color(style.fill), None, &b);
+            let brush = color(style.text_color());
+            for row in 0..table.rows.len() {
+                for col in 0..table.cols.len() {
+                    let Some(cell) = table.cell(row, col) else {
+                        continue;
+                    };
+                    if let Some(text_box) = table.text_box(b, row, col, style) {
+                        let content = (&cell.text, &cell.spans);
+                        text.draw_fitted(scene, transform, content, text_box, brush);
+                    }
+                }
+            }
+            if style.stroke_width > 0.0 {
+                let (ys, xs) = table.grid(b);
+                let mut grid = BezPath::new();
+                for &y in &ys[1..ys.len() - 1] {
+                    grid.move_to((b.x0, y));
+                    grid.line_to((b.x1, y));
+                }
+                for &x in &xs[1..xs.len() - 1] {
+                    grid.move_to((x, b.y0));
+                    grid.line_to((x, b.y1));
+                }
+                grid.extend(b.path_elements(0.1));
+                let stroke = Stroke::new(style.stroke_width);
+                scene.stroke(&stroke, transform, color(style.stroke), None, &grid);
+            }
+        }
         ObjectKind::Frame(frame) => {
             let b = data.bounds;
             scene.fill(Fill::NonZero, transform, color(style.fill), None, &b);

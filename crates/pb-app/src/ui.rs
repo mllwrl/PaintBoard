@@ -69,6 +69,10 @@ pub enum Action {
     ToggleMinimap,
     /// Puts the selected connector back on its automatic path.
     ResetBends,
+    /// Adds a row (`true`) or column to the selected table.
+    AddTableLine(bool),
+    /// Removes the last row (`true`) or column of the selected table.
+    RemoveTableLine(bool),
     /// Centers the view on a world point (from the minimap).
     LookAt(kurbo::Point),
     /// Replace the selected handwriting with typed text.
@@ -153,8 +157,10 @@ pub struct SelectionInfo {
     /// Only ink is selected and handwriting can be recognized: `Some(busy)`, where `busy`
     /// says a recognition is already running.
     pub handwriting: Option<bool>,
-    /// Text style of the first selected shape, if there is one.
+    /// Text style of the first selected shape or table, if there is one.
     pub shape_text: Option<ShapeText>,
+    /// A single table is selected: its numbers of rows and columns.
+    pub table: Option<(usize, usize)>,
     /// A single unlocked image is selected.
     pub can_crop: bool,
     pub several: bool,
@@ -488,6 +494,7 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         (ToolKind::Sticky, "Sticky note (N)", paint_sticky),
                         (ToolKind::Connector, "Connector (L)", paint_connector),
                         (ToolKind::Frame, "Frame (F)", paint_frame),
+                        (ToolKind::Table, "Table", paint_table),
                     ];
                     let mut ink_button = shapes.rect;
                     for (tool, tooltip, paint) in ink_tools {
@@ -889,6 +896,24 @@ fn selection_toolbar(
                     if let Some(c) = &selection.connector {
                         connector_controls(ui, c, actions);
                     }
+                    if let Some((rows, cols)) = selection.table {
+                        let buttons = [
+                            ("+ Row", "Add a row at the bottom", Action::AddTableLine(true), true),
+                            ("+ Column", "Add a column at the right", Action::AddTableLine(false), true),
+                            ("− Row", "Remove the bottom row", Action::RemoveTableLine(true), rows > 1),
+                            ("− Column", "Remove the right column", Action::RemoveTableLine(false), cols > 1),
+                        ];
+                        for (label, tip, action, enabled) in buttons {
+                            if ui
+                                .add_enabled(enabled, Button::new(label))
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
+                                actions.push(action);
+                            }
+                        }
+                        ui.separator();
+                    }
                     if selection.can_crop
                         && ui
                             .button("Crop")
@@ -1283,6 +1308,21 @@ fn paint_cursor(painter: &Painter, rect: Rect, color: Color32) {
         at(0.15, 0.0),
     ];
     painter.add(Shape::line(points, Stroke::new(1.6, color)));
+}
+
+/// A table: a box split into cells.
+fn paint_table(painter: &Painter, rect: Rect, color: Color32) {
+    let at = |x: f32, y: f32| rect.min + Vec2::new(x, y) * rect.width();
+    let stroke = Stroke::new(1.6, color);
+    painter.rect_stroke(
+        Rect::from_min_max(at(0.0, 0.1), at(1.0, 0.9)),
+        1,
+        stroke,
+        egui::StrokeKind::Middle,
+    );
+    painter.line_segment([at(0.0, 0.37), at(1.0, 0.37)], stroke);
+    painter.line_segment([at(0.0, 0.63), at(1.0, 0.63)], stroke);
+    painter.line_segment([at(0.5, 0.1), at(0.5, 0.9)], stroke);
 }
 
 /// A frame: its area under a title line.

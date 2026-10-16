@@ -5,8 +5,8 @@
 //! the whole edit and autosave and sync see finished text only.
 
 use pb_core::{
-    Command, Document, FrameData, Label, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Span,
-    Sticky, Style, Text, TextBox, TextMarks,
+    Cell, Command, Document, FrameData, Label, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Span,
+    Sticky, Style, Table, Text, TextBox, TextMarks,
 };
 use pb_geom::kurbo::{Point, Rect, Size, Vec2};
 use pb_geom::{Frame, ShapeKind};
@@ -44,6 +44,11 @@ pub enum KeyOutcome {
     NextSticky {
         below: bool,
     },
+    /// Tab in a table cell: stop editing and go on in the next cell, or the previous one
+    /// with Shift.
+    NextCell {
+        back: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +74,15 @@ enum Placement {
     Label { center: Point, at: f64 },
     /// A frame's title, above the frame's `bounds`, sized for `zoom`.
     Title { bounds: Rect, zoom: f64 },
+    /// Cell (`row`, `col`) of a table with `bounds`: the text is fitted into `text_box`
+    /// inside the cell's rectangle `rect`.
+    Cell {
+        bounds: Rect,
+        rect: Rect,
+        row: usize,
+        col: usize,
+        text_box: TextBox,
+    },
 }
 
 impl Placement {
@@ -83,6 +97,7 @@ impl Placement {
                 bounds,
                 shape: None,
             } => Some(Sticky::text_box(bounds)),
+            Self::Cell { text_box, .. } => Some(text_box),
             Self::Free { .. } | Self::Label { .. } | Self::Title { .. } => None,
         }
     }
@@ -104,6 +119,8 @@ pub struct TextEdit {
     caret_drawn: bool,
     /// The connector whose label this is.
     connector: Option<ObjectData>,
+    /// The table whose cell this is.
+    table: Option<Table>,
 }
 
 impl TextEdit {
@@ -132,6 +149,7 @@ impl TextEdit {
             active_at: Instant::now(),
             caret_drawn: false,
             connector: None,
+            table: None,
         }
     }
 
@@ -168,6 +186,7 @@ impl TextEdit {
             active_at: Instant::now(),
             caret_drawn: false,
             connector: None,
+            table: None,
         };
         this.refit(engine);
         this
@@ -217,6 +236,7 @@ impl TextEdit {
                 active_at: Instant::now(),
                 caret_drawn: false,
                 connector: None,
+                table: None,
             }),
             ObjectKind::Sticky(sticky) => Some(Self::fitted(
                 engine,
@@ -263,6 +283,7 @@ impl TextEdit {
                     active_at: Instant::now(),
                     caret_drawn: false,
                     connector: Some(data.clone()),
+                    table: None,
                 })
             }
             ObjectKind::Frame(frame) => Some(Self {
@@ -280,9 +301,71 @@ impl TextEdit {
                 active_at: Instant::now(),
                 caret_drawn: false,
                 connector: None,
+                table: None,
             }),
+            ObjectKind::Table(table) => {
+                let local = near.map(|p| data.frame().to_local(p));
+                let (row, col) = local
+                    .and_then(|p| table.cell_at(data.bounds, p))
+                    .unwrap_or((0, 0));
+                Self::cell(engine, target, data, table, row, col)
+            }
             ObjectKind::Ink(_) | ObjectKind::Image(_) => None,
         }
+    }
+
+    /// Edits cell (`row`, `col`) of the table object `data`.
+    fn cell(
+        engine: &mut TextEngine,
+        target: Target,
+        data: &ObjectData,
+        table: &Table,
+        row: usize,
+        col: usize,
+    ) -> Option<Self> {
+        let bounds = data.bounds;
+        let placement = Placement::Cell {
+            bounds,
+            rect: table.cell_rect(bounds, row, col)?,
+            row,
+            col,
+            text_box: table.text_box(bounds, row, col, &data.style)?,
+        };
+        let content = table.text(row, col);
+        let mut this = Self::fitted(
+            engine,
+            target,
+            content,
+            placement,
+            data.rotation,
+            data.style,
+        );
+        this.table = Some(table.clone());
+        Some(this)
+    }
+
+    /// Edits cell (`row`, `col`) of table `id`; `None` if there is no such cell.
+    pub fn table_cell(
+        engine: &mut TextEngine,
+        doc: &Document,
+        id: ObjectId,
+        (row, col): (usize, usize),
+    ) -> Option<Self> {
+        let data = &doc.get(id)?.data;
+        let ObjectKind::Table(table) = &data.kind else {
+            return None;
+        };
+        Self::cell(engine, Target::Existing(id), data, table, row, col)
+    }
+
+    /// The cell after this one (before it with `back`), when editing a table cell.
+    pub fn next_cell(&self, back: bool) -> Option<(ObjectId, (usize, usize))> {
+        let (Target::Existing(id), Placement::Cell { row, col, .. }, Some(table)) =
+            (self.target, self.placement, &self.table)
+        else {
+            return None;
+        };
+        Some((id, table.next_cell(row, col, back)))
     }
 
     /// Sizes fitted text to fit, after it changed.
@@ -321,6 +404,7 @@ impl TextEdit {
                 Rect::from_origin_size(origin, (width, layout.height))
             }
             Placement::Fitted { bounds, .. } => bounds,
+            Placement::Cell { rect, .. } => rect,
             Placement::Label { center, .. } => {
                 let layout = self.editor.layout(engine);
                 let width = layout.width.max(self.editor.size() * MIN_WIDTH);
@@ -340,7 +424,7 @@ impl TextEdit {
     /// The object's bounds as they are now: the text box, except for a frame.
     fn object_bounds(&mut self, engine: &mut TextEngine) -> Rect {
         match self.placement {
-            Placement::Title { bounds, .. } => bounds,
+            Placement::Title { bounds, .. } | Placement::Cell { bounds, .. } => bounds,
             _ => self.frame(engine).rect,
         }
     }
@@ -350,7 +434,7 @@ impl TextEdit {
         match self.placement {
             Placement::Free { origin, .. } => origin,
             Placement::Title { .. } => self.frame(engine).rect.origin(),
-            Placement::Fitted { .. } => {
+            Placement::Fitted { .. } | Placement::Cell { .. } => {
                 let text_box = self.placement.text_box(&self.style);
                 let text_box = text_box.expect("fitted placement");
                 let height = self.editor.layout(engine).height;
@@ -383,7 +467,7 @@ impl TextEdit {
     pub fn is_rich(&self) -> bool {
         matches!(
             self.placement,
-            Placement::Free { .. } | Placement::Fitted { .. }
+            Placement::Free { .. } | Placement::Fitted { .. } | Placement::Cell { .. }
         )
     }
 
@@ -537,6 +621,13 @@ impl TextEdit {
             Key::Named(NamedKey::Tab) if sticky && !ctrl && !ed.is_composing() => {
                 return KeyOutcome::NextSticky { below: shift };
             }
+            Key::Named(NamedKey::Tab)
+                if matches!(self.placement, Placement::Cell { .. })
+                    && !ctrl
+                    && !ed.is_composing() =>
+            {
+                return KeyOutcome::NextCell { back: shift };
+            }
             Key::Named(NamedKey::Backspace) => ed.backspace(engine, word),
             Key::Named(NamedKey::Delete) => ed.delete(engine, word),
             // A title is one line: Enter keeps it.
@@ -648,6 +739,10 @@ impl TextEdit {
                     text,
                 }),
                 Placement::Title { .. } => ObjectKind::Frame(FrameData { title: text }),
+                Placement::Cell { row, col, .. } => {
+                    let table = self.table.clone().expect("cell of a table");
+                    ObjectKind::Table(table.with_cell(row, col, Cell { text, spans }))
+                }
                 Placement::Fitted { shape: None, .. } | Placement::Label { .. } => {
                     ObjectKind::Sticky(Sticky {
                         spans: spans.clone(),
@@ -715,6 +810,22 @@ impl TextEdit {
             return Some(Command::SetLabel { id, label });
         }
         let spans = self.editor.spans();
+        if let (Target::Existing(id), Placement::Cell { row, col, .. }, Some(table)) =
+            (self.target, self.placement, &self.table)
+        {
+            if text == self.original && spans == self.original_spans {
+                return None;
+            }
+            return Some(Command::SetCell {
+                id,
+                row: table.rows.get(row)?.id.clone(),
+                col: table.cols.get(col)?.id.clone(),
+                cell: Cell {
+                    text: text.into(),
+                    spans: spans.into(),
+                },
+            });
+        }
         let empty = text.trim().is_empty() && matches!(self.placement, Placement::Free { .. });
         match self.target {
             Target::Existing(_) if text == self.original && spans == self.original_spans => None,
@@ -1054,6 +1165,50 @@ mod tests {
         assert_eq!(&*text, "abc");
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].range(), 0..3);
+    }
+
+    #[test]
+    fn table_cells_are_edited_one_at_a_time() {
+        let mut e = engine();
+        let mut doc = Document::new();
+        let table = Table::new(2, 2, || doc.new_line_id());
+        let data = ObjectData {
+            kind: ObjectKind::Table(table.clone()),
+            bounds: Rect::new(0.0, 0.0, 200.0, 100.0),
+            rotation: 0.0,
+            style: Table::style(),
+        };
+        let id = doc
+            .apply(Command::Create(vec![data.into()]))
+            .unwrap()
+            .created[0];
+        // A double click in the bottom-right cell edits it.
+        let mut edit =
+            TextEdit::existing(&mut e, &doc, id, Some(Point::new(150.0, 75.0)), 1.0).unwrap();
+        assert_eq!(
+            edit.frame(&mut e).rect,
+            Rect::new(100.0, 50.0, 200.0, 100.0)
+        );
+        edit.editor.insert(&mut e, "Done");
+        // What is drawn while typing is the table with the new text.
+        let shown = edit.data(&mut e);
+        let ObjectKind::Table(shown) = &shown.kind else {
+            panic!("not a table");
+        };
+        assert_eq!(shown.text(1, 1).0, "Done");
+        assert_eq!(edit.next_cell(false), Some((id, (0, 0))));
+        assert_eq!(edit.next_cell(true), Some((id, (1, 0))));
+        let Some(Command::SetCell { row, col, cell, .. }) = edit.finish(&mut e) else {
+            panic!("expected SetCell");
+        };
+        assert_eq!(
+            (row, col),
+            (table.rows[1].id.clone(), table.cols[1].id.clone())
+        );
+        assert_eq!(&*cell.text, "Done");
+        // Tab goes on in the next cell.
+        let mut next = TextEdit::table_cell(&mut e, &doc, id, (0, 1)).unwrap();
+        assert_eq!(next.frame(&mut e).rect, Rect::new(100.0, 0.0, 200.0, 50.0));
     }
 
     #[test]

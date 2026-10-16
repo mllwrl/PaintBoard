@@ -1069,3 +1069,40 @@ fn marquee_in_a_frame_selects_its_contents_only() {
     drag(&mut tools, &doc, at(-10.0, -10.0), at(410.0, 310.0));
     assert!(tools.selection().contains(frame) && tools.selection().contains(inside));
 }
+
+// Tables
+
+#[test]
+fn table_tool_places_a_grid_and_lines_come_and_go() {
+    let mut doc = Document::new();
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Table);
+    let cmd = click(&mut tools, &doc, at(0.0, 0.0)).unwrap();
+    let id = doc.apply(cmd).unwrap().created[0];
+    let data = doc.get(id).unwrap().data.clone();
+    let ObjectKind::Table(table) = &data.kind else {
+        panic!("not a table");
+    };
+    assert_eq!((table.rows.len(), table.cols.len()), (3, 3));
+    assert_eq!(data.bounds.size(), pb_geom::kurbo::Size::new(360.0, 132.0));
+    tools.select_only([id]);
+    let cmd = tools.add_table_line(&doc, true).unwrap();
+    doc.apply(cmd).unwrap();
+    let data = doc.get(id).unwrap().data.clone();
+    let ObjectKind::Table(table) = &data.kind else {
+        panic!("not a table");
+    };
+    assert_eq!(table.rows.len(), 4);
+    assert!((data.bounds.height() - 176.0).abs() < 1e-9);
+    // Rows keep their size.
+    let rect = table.cell_rect(data.bounds, 0, 0).unwrap();
+    assert!((rect.height() - 44.0).abs() < 1e-9);
+    let cmd = tools.remove_table_line(&doc, false).unwrap();
+    doc.apply(cmd).unwrap();
+    let data = doc.get(id).unwrap().data.clone();
+    let ObjectKind::Table(table) = &data.kind else {
+        panic!("not a table");
+    };
+    assert_eq!(table.cols.len(), 2);
+    assert!((data.bounds.width() - 240.0).abs() < 1e-9);
+}

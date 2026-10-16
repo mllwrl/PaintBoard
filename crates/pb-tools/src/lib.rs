@@ -26,7 +26,7 @@ pub use selection::{Selection, selection_frame, unit_frame};
 use bend::BendGrip;
 use pb_core::{
     Cap, Command, Connector, ConnectorChange, Content, Document, End, FrameData, Label, Object,
-    ObjectData, ObjectId, ObjectKind, Route, ShapeKind, Style,
+    ObjectData, ObjectId, ObjectKind, Route, ShapeKind, Style, Table,
 };
 use pb_geom::kurbo::{Line, Point, Rect, Vec2};
 use pb_geom::{Frame, GridLevel, Snapper, xs_of, ys_of};
@@ -62,6 +62,8 @@ pub enum ToolKind {
     Connector,
     /// Drag out a frame, or click to place one.
     Frame,
+    /// Drag out a table, or click to place a 3 x 3 one.
+    Table,
 }
 
 impl ToolKind {
@@ -76,6 +78,7 @@ impl ToolKind {
             Self::Sticky => "Sticky note",
             Self::Connector => "Connector",
             Self::Frame => "Frame",
+            Self::Table => "Table",
         }
     }
 
@@ -144,6 +147,7 @@ enum Grip {
 enum Drawn {
     Shape(ShapeKind),
     Frame,
+    Table,
 }
 
 enum Gesture {
@@ -459,6 +463,7 @@ impl Tools {
         let drawn = match self.active {
             ToolKind::Shape(shape) => Some(Drawn::Shape(shape)),
             ToolKind::Frame => Some(Drawn::Frame),
+            ToolKind::Table => Some(Drawn::Table),
             _ => None,
         };
         if let Some(kind) = drawn {
@@ -816,6 +821,82 @@ impl Tools {
         self.single_connector(doc)
             .map(|(id, _)| bend::handles(doc, id).into_iter().map(|(p, _)| p).collect())
             .unwrap_or_default()
+    }
+
+    /// The single selected unlocked table, with its data.
+    fn single_table<'a>(&self, doc: &'a Document) -> Option<(ObjectId, &'a ObjectData, &'a Table)> {
+        let [id] = self.selection.ids() else {
+            return None;
+        };
+        let object = doc.get(*id).filter(|_| !doc.is_locked(*id))?;
+        match &object.data.kind {
+            ObjectKind::Table(table) => Some((*id, &object.data, table)),
+            _ => None,
+        }
+    }
+
+    /// Adds a row at the bottom (`rows`) or a column at the right of the selected table,
+    /// as big as the average one; the table grows to make room.
+    pub fn add_table_line(&self, doc: &Document, rows: bool) -> Option<Command> {
+        let (id, data, table) = self.single_table(doc)?;
+        let lines = if rows { &table.rows } else { &table.cols };
+        let total: f64 = lines.iter().map(|l| l.weight).sum();
+        let weight = total / lines.len() as f64;
+        let mut grown = lines.to_vec();
+        grown.push(pb_core::Line {
+            id: doc.new_line_id().into(),
+            weight,
+        });
+        let scale = (total + weight) / total;
+        let b = data.bounds;
+        let bounds = if rows {
+            Rect::new(b.x0, b.y0, b.x1, b.y0 + b.height() * scale)
+        } else {
+            Rect::new(b.x0, b.y0, b.x0 + b.width() * scale, b.y1)
+        };
+        Some(self.table_lines(id, table, rows, grown, bounds))
+    }
+
+    /// Removes the bottom row or the right column of the selected table, if it has more
+    /// than one; the table shrinks by its size.
+    pub fn remove_table_line(&self, doc: &Document, rows: bool) -> Option<Command> {
+        let (id, data, table) = self.single_table(doc)?;
+        let lines = if rows { &table.rows } else { &table.cols };
+        if lines.len() < 2 {
+            return None;
+        }
+        let total: f64 = lines.iter().map(|l| l.weight).sum();
+        let last = lines[lines.len() - 1].weight;
+        let scale = (total - last) / total;
+        let b = data.bounds;
+        let bounds = if rows {
+            Rect::new(b.x0, b.y0, b.x1, b.y0 + b.height() * scale)
+        } else {
+            Rect::new(b.x0, b.y0, b.x0 + b.width() * scale, b.y1)
+        };
+        let shrunk = lines[..lines.len() - 1].to_vec();
+        Some(self.table_lines(id, table, rows, shrunk, bounds))
+    }
+
+    fn table_lines(
+        &self,
+        id: ObjectId,
+        table: &Table,
+        rows: bool,
+        lines: Vec<pb_core::Line>,
+        bounds: Rect,
+    ) -> Command {
+        let (r, c) = if rows {
+            (lines.into(), table.cols.clone())
+        } else {
+            (table.rows.clone(), lines.into())
+        };
+        Command::SetTable {
+            id,
+            rows: r,
+            cols: c,
+            bounds,
+        }
     }
 
     /// Puts the selected connectors back on their automatic paths.
@@ -1303,6 +1384,10 @@ impl Tools {
                     let (w, h) = FrameData::CLICK_SIZE;
                     (w / current.zoom, h / current.zoom)
                 }
+                Drawn::Table => {
+                    let (w, h) = Table::CELL_SIZE;
+                    (3.0 * w / current.zoom, 3.0 * h / current.zoom)
+                }
             };
             return (Rect::from_center_size(*anchor, size), Vec::new());
         }
@@ -1386,6 +1471,12 @@ fn drawn(doc: &Document, kind: Drawn, bounds: Rect) -> ObjectData {
             bounds,
             rotation: 0.0,
             style: Style::default(),
+        },
+        Drawn::Table => ObjectData {
+            kind: ObjectKind::Table(Table::new(3, 3, || doc.new_line_id())),
+            bounds,
+            rotation: 0.0,
+            style: Table::style(),
         },
         Drawn::Frame => {
             let count = doc

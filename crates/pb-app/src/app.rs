@@ -311,7 +311,7 @@ impl App {
             let bounds = data.frame().aabb();
             content = Some(content.map_or(bounds, |c: pb_geom::kurbo::Rect| c.union(bounds)));
             let color = match data.kind {
-                ObjectKind::Shape(_) | ObjectKind::Sticky(_)
+                ObjectKind::Shape(_) | ObjectKind::Sticky(_) | ObjectKind::Table(_)
                     if data.style.fill.to_bytes()[3] > 0 =>
                 {
                     data.style.fill
@@ -366,6 +366,16 @@ impl App {
             .collect();
         let first = leaves.first()?;
         let shape_text = leaves.iter().find_map(|o| match &o.data.kind {
+            ObjectKind::Table(_) => {
+                let style = o.data.style;
+                Some(ShapeText {
+                    color: style.text_color(),
+                    size: style.font_size.unwrap_or(pb_core::Table::FONT_SIZE),
+                    auto: style.font_size.is_none(),
+                    align: style.text_align,
+                    valign: style.text_valign,
+                })
+            }
             ObjectKind::Shape(shape) => {
                 let style = o.data.style;
                 let text_box = o.data.text_box()?;
@@ -402,7 +412,10 @@ impl App {
             has_fill: leaves.iter().any(|o| {
                 matches!(
                     o.data.kind,
-                    ObjectKind::Shape(_) | ObjectKind::Sticky(_) | ObjectKind::Frame(_)
+                    ObjectKind::Shape(_)
+                        | ObjectKind::Sticky(_)
+                        | ObjectKind::Frame(_)
+                        | ObjectKind::Table(_)
                 )
             }),
             has_width: leaves.iter().any(|o| {
@@ -435,6 +448,12 @@ impl App {
                 && leaves.iter().all(|o| o.data.kind.is_ink()))
             .then_some(self.recognition.is_some()),
             shape_text,
+            table: match (ids, leaves.first().map(|o| &o.data.kind)) {
+                ([_], Some(ObjectKind::Table(t))) if leaves.len() == 1 => {
+                    Some((t.rows.len(), t.cols.len()))
+                }
+                _ => None,
+            },
             can_crop: matches!(ids, [id] if Crop::new(&self.document, *id).is_some()),
             several: ids.len() > 1,
             locked: selection.has_locked(&self.document),
@@ -491,6 +510,16 @@ impl App {
             Action::NextGrid => self.grid = self.grid.next(),
             Action::ToggleSnap => self.tools.set_snap_to_grid(!self.tools.snap_to_grid()),
             Action::ToggleMinimap => self.show_minimap = !self.show_minimap,
+            Action::AddTableLine(rows) => {
+                if let Some(command) = self.tools.add_table_line(&self.document, rows) {
+                    self.apply(command);
+                }
+            }
+            Action::RemoveTableLine(rows) => {
+                if let Some(command) = self.tools.remove_table_line(&self.document, rows) {
+                    self.apply(command);
+                }
+            }
             Action::ResetBends => {
                 if let Some(command) = self.tools.reset_bends_selected(&self.document) {
                     self.apply(command);
@@ -680,6 +709,19 @@ impl App {
     }
 
     /// Tab on a sticky note: keeps it and starts the next one beside it, in view.
+    /// Tab in a table cell: keeps it and goes on typing in the next cell.
+    fn next_cell(&mut self, back: bool) {
+        let Some((id, cell)) = self.editing.as_ref().and_then(|e| e.next_cell(back)) else {
+            return;
+        };
+        self.finish_editing();
+        let engine = self.text.engine();
+        if let Some(mut edit) = TextEdit::table_cell(engine, &self.document, id, cell) {
+            edit.select_all(engine);
+            self.start_editing(edit);
+        }
+    }
+
     fn next_sticky(&mut self, below: bool) {
         let Some(edit) = &mut self.editing else {
             return;
@@ -1544,6 +1586,7 @@ impl App {
                             self.handle_key(&event);
                         }
                         KeyOutcome::NextSticky { below } => self.next_sticky(below),
+                        KeyOutcome::NextCell { back } => self.next_cell(back),
                     }
                     true
                 } else {

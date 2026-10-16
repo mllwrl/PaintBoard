@@ -23,8 +23,8 @@ use crate::rich::{self, Span, Spans};
 use crate::command::reorder;
 use crate::{
     Applied, AssetId, Assets, Command, Connector, Content, End, FrameData, Group, HAlign, Image,
-    Ink, Object, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Sticky, Style, StyleChange, Text,
-    VAlign, ZOrder,
+    Ink, Line, Object, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Sticky, Style, StyleChange,
+    Text, VAlign, ZOrder,
 };
 
 /// Font size of text objects stored without one.
@@ -89,6 +89,12 @@ mod key {
     pub const LABEL_H: &str = "labelH";
     /// ...and the points it runs through when set by hand: little-endian `f64` pairs.
     pub const BENDS: &str = "bends";
+    /// Tables: rows and columns as `id=weight` pairs joined by `;`, and each cell's text
+    /// and inline styles under these prefixes followed by `row:col` ids.
+    pub const ROWS: &str = "rows";
+    pub const COLS: &str = "cols";
+    pub const CELL: &str = "cell:";
+    pub const CELL_MARKS: &str = "cellMarks:";
 
     /// `kind` of group nodes.
     pub const GROUP: &str = "group";
@@ -156,6 +162,8 @@ pub struct Document {
     changes: Arc<Mutex<Changes>>,
     /// Keeps the events coming.
     _events: Subscription,
+    /// Ids handed out by `new_line_id`.
+    line_ids: std::cell::Cell<u64>,
     /// Files used by images. They are not part of the CRDT and never removed while the board
     /// is open, so undoing the deletion of an image finds its file again.
     assets: Assets,
@@ -308,6 +316,7 @@ impl Document {
             node_cache: HashMap::new(),
             changes,
             _events: events,
+            line_ids: std::cell::Cell::new(0),
         };
         document.refresh();
         document
@@ -613,6 +622,35 @@ impl Document {
                     return Err(Error::UnknownObject(id));
                 }
                 write_bends(&self.tree.get_meta(self.nodes[&id])?, &bends)?;
+            }
+            Command::SetCell { id, row, col, cell } => {
+                if !matches!(
+                    self.get(id).map(|o| &o.data.kind),
+                    Some(ObjectKind::Table(_))
+                ) {
+                    return Err(Error::UnknownObject(id));
+                }
+                let meta = self.tree.get_meta(self.nodes[&id])?;
+                write_cell(&meta, &row, &col, &cell)?;
+            }
+            Command::SetTable {
+                id,
+                rows,
+                cols,
+                bounds,
+            } => {
+                if !matches!(
+                    self.get(id).map(|o| &o.data.kind),
+                    Some(ObjectKind::Table(_))
+                ) || rows.is_empty()
+                    || cols.is_empty()
+                {
+                    return Err(Error::UnknownObject(id));
+                }
+                let meta = self.tree.get_meta(self.nodes[&id])?;
+                meta.insert(key::ROWS, lines_to_string(&rows))?;
+                meta.insert(key::COLS, lines_to_string(&cols))?;
+                write_bounds(&meta, bounds.abs())?;
             }
             Command::SetLabel { id, label } => {
                 if !matches!(
@@ -922,6 +960,13 @@ impl Document {
         self.revision += 1;
     }
 
+    /// An id for a new table row or column, unique across replicas.
+    pub fn new_line_id(&self) -> String {
+        let n = self.line_ids.get() + 1;
+        self.line_ids.set(n);
+        format!("{:x}.{n}", self.doc.peer_id())
+    }
+
     /// Where object `id` is in paint order (its index in [`Self::objects`]).
     pub fn paint_order(&self, id: ObjectId) -> Option<usize> {
         self.index.get(&id).copied()
@@ -1161,6 +1206,13 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
         }
         ObjectKind::Sticky(sticky) => meta.insert(key::TEXT, &*sticky.text)?,
         ObjectKind::Frame(frame) => meta.insert(key::TEXT, &*frame.title)?,
+        ObjectKind::Table(table) => {
+            meta.insert(key::ROWS, lines_to_string(&table.rows))?;
+            meta.insert(key::COLS, lines_to_string(&table.cols))?;
+            for ((row, col), cell) in table.cells.iter() {
+                write_cell(meta, row, col, cell)?;
+            }
+        }
         ObjectKind::Image(image) => {
             meta.insert(key::ASSET, image.asset.to_string())?;
             write_crop(meta, image.crop)?;
@@ -1291,6 +1343,91 @@ fn write_connector(meta: &LoroMap, c: &Connector, change: &crate::ConnectorChang
         meta.insert(key::END_CAP, cap_name(c.end_cap))?;
     }
     Ok(())
+}
+
+/// `id=weight;id=weight`, see `key::ROWS`.
+fn lines_to_string(lines: &[Line]) -> String {
+    lines
+        .iter()
+        .map(|l| format!("{}={}", l.id, l.weight))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn lines_from_string(s: &str) -> Vec<Line> {
+    s.split(';')
+        .filter_map(|part| {
+            let (id, weight) = part.split_once('=')?;
+            let weight: f64 = weight.parse().ok()?;
+            (!id.is_empty() && weight.is_finite() && weight > 0.0).then(|| Line {
+                id: id.into(),
+                weight,
+            })
+        })
+        .collect()
+}
+
+/// Writes a table cell's text and styles; empty text removes them.
+fn write_cell(meta: &LoroMap, row: &str, col: &str, cell: &crate::Cell) -> Result<()> {
+    let text_key = format!("{}{row}:{col}", key::CELL);
+    let marks_key = format!("{}{row}:{col}", key::CELL_MARKS);
+    if cell.text.is_empty() {
+        for k in [&text_key, &marks_key] {
+            if meta.get(k).is_some() {
+                meta.delete(k)?;
+            }
+        }
+        return Ok(());
+    }
+    meta.insert(&text_key, &*cell.text)?;
+    let spans = rich::fit_to(&cell.spans, &cell.text);
+    if spans.is_empty() {
+        if meta.get(&marks_key).is_some() {
+            meta.delete(&marks_key)?;
+        }
+    } else {
+        meta.insert(&marks_key, rich::to_bytes(&spans))?;
+    }
+    Ok(())
+}
+
+fn read_table(meta: &LoroMap) -> Option<crate::Table> {
+    let rows = lines_from_string(&get_str(meta, key::ROWS)?);
+    let cols = lines_from_string(&get_str(meta, key::COLS)?);
+    if rows.is_empty() || cols.is_empty() {
+        return None;
+    }
+    let mut texts = Vec::new();
+    meta.for_each(|k, v| {
+        if let (Some(ids), ValueOrContainer::Value(LoroValue::String(text))) =
+            (k.strip_prefix(key::CELL), v)
+            && let Some((row, col)) = ids.split_once(':')
+        {
+            texts.push((row.to_owned(), col.to_owned(), text.to_string()));
+        }
+    });
+    let cells = texts
+        .into_iter()
+        .map(|(row, col, text)| {
+            let marks_key = format!("{}{row}:{col}", key::CELL_MARKS);
+            let spans: Spans = match meta.get(&marks_key) {
+                Some(ValueOrContainer::Value(LoroValue::Binary(bytes))) => {
+                    rich::fit_to(&rich::from_bytes(&bytes), &text).into()
+                }
+                _ => Spans::default(),
+            };
+            let cell = crate::Cell {
+                text: text.into(),
+                spans,
+            };
+            ((Arc::from(row), Arc::from(col)), cell)
+        })
+        .collect();
+    Some(crate::Table {
+        rows: rows.into(),
+        cols: cols.into(),
+        cells: Arc::new(cells),
+    })
 }
 
 /// Writes a connector's hand-set bends, or removes them when there are none.
@@ -1482,6 +1619,9 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
             };
             let spans = read_spans(meta, &text);
             ObjectKind::Sticky(Sticky { text, spans })
+        }
+        ValueOrContainer::Value(LoroValue::String(s)) if &**s == "table" => {
+            ObjectKind::Table(read_table(meta)?)
         }
         ValueOrContainer::Value(LoroValue::String(s)) if &**s == "frame" => {
             let title = get_str(meta, key::TEXT).unwrap_or_default();
@@ -2412,6 +2552,59 @@ mod tests {
         })
         .unwrap();
         eprintln!("one move: {:?}", t.elapsed());
+    }
+
+    #[test]
+    fn tables_store_cells_by_line_and_merge() {
+        let mut doc = Document::new();
+        let table = crate::Table::new(2, 2, || doc.new_line_id());
+        let mut data = rect(0.0, 0.0, 200.0, 80.0);
+        data.kind = ObjectKind::Table(table.clone());
+        let id = create(&mut doc, data);
+        let cell = |text: &str| crate::Cell {
+            text: text.into(),
+            spans: Spans::default(),
+        };
+        let set = |doc: &mut Document, r: usize, c: usize, text: &str| {
+            doc.apply(Command::SetCell {
+                id,
+                row: table.rows[r].id.clone(),
+                col: table.cols[c].id.clone(),
+                cell: cell(text),
+            })
+            .unwrap();
+        };
+        let get = |doc: &Document, r: usize, c: usize| match &doc.get(id).unwrap().data.kind {
+            ObjectKind::Table(t) => t.text(r, c).0.to_owned(),
+            _ => panic!("not a table"),
+        };
+        set(&mut doc, 1, 1, "Done");
+        assert_eq!(get(&doc, 1, 1), "Done");
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(loaded.get(id).unwrap().data, doc.get(id).unwrap().data);
+        // A row added on top keeps the text with its row.
+        let mut rows = table.rows.to_vec();
+        rows.insert(0, crate::Line::new(doc.new_line_id()));
+        doc.apply(Command::SetTable {
+            id,
+            rows: rows.into(),
+            cols: table.cols.clone(),
+            bounds: Rect::new(0.0, 0.0, 200.0, 120.0),
+        })
+        .unwrap();
+        assert_eq!(get(&doc, 2, 1), "Done");
+        doc.undo().unwrap();
+        assert_eq!(get(&doc, 1, 1), "Done");
+        // Two replicas typing in different cells both keep their text.
+        let mut other = Document::from_snapshot(&doc.snapshot()).unwrap();
+        set(&mut doc, 0, 0, "A");
+        set(&mut other, 0, 1, "B");
+        doc.doc.import(&other.snapshot()).unwrap();
+        doc.refresh();
+        assert_eq!((get(&doc, 0, 0), get(&doc, 0, 1)), ("A".into(), "B".into()));
+        // Clearing a cell removes its text.
+        set(&mut doc, 0, 0, "");
+        assert_eq!(get(&doc, 0, 0), "");
     }
 
     #[test]
