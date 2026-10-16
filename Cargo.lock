@@ -2695,6 +2695,7 @@ dependencies = [
 name = "pb-platform"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "log",
  "rfd",
  "web-time",

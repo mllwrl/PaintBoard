@@ -1,4 +1,6 @@
-use kurbo::Vec2;
+use std::sync::Arc;
+
+use kurbo::{Rect, Vec2};
 use pb_geom::Frame;
 
 use crate::{Content, ObjectId, StyleChange};
@@ -30,6 +32,13 @@ pub enum Command {
     Group(Vec<ObjectId>),
     /// Dissolves groups; their children take the group's place. Other ids are ignored.
     Ungroup(Vec<ObjectId>),
+    /// Replaces the text of a text object and fits its bounds to it. Takes a text object
+    /// only.
+    SetText {
+        id: ObjectId,
+        text: Arc<str>,
+        bounds: Rect,
+    },
     /// Changes colors, outline or opacity; a group restyles everything inside it.
     SetStyle {
         ids: Vec<ObjectId>,

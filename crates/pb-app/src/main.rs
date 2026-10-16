@@ -1,6 +1,7 @@
 //! PaintBoard desktop/web entry point: wires winit, wgpu and egui to the rest of the crates.
 
 mod app;
+mod editing;
 mod navigation;
 mod session;
 mod ui;

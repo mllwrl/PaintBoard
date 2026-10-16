@@ -14,6 +14,7 @@ web-time.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd.workspace = true
+arboard = { version = "3.6", default-features = false }
 
 # Handwriting recognition through Windows Ink (part of the OS, works offline).
 [target.'cfg(windows)'.dependencies.windows]

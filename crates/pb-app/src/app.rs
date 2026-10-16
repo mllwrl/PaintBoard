@@ -21,6 +21,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
+use crate::editing::{self, KeyOutcome, NEW_TEXT_SIZE, TextEdit};
 use crate::navigation::Navigation;
 use crate::session::Session;
 use crate::ui::{Action, Model, SelectionInfo, Ui};
@@ -55,6 +56,10 @@ struct PendingRecognition {
     color: Rgba,
 }
 
+/// Two presses closer than this in time and distance (logical pixels) are a double click.
+const DOUBLE_CLICK_TIME: pb_platform::Duration = pb_platform::Duration::from_millis(450);
+const DOUBLE_CLICK_DISTANCE: f64 = 5.0;
+
 /// Recognized text is sized so its letters are about as tall as the handwriting.
 const HANDWRITING_TO_FONT_SIZE: f64 = 1.0 / 0.9;
 /// Space between an expression and its answer, relative to the font size.
@@ -82,6 +87,10 @@ pub struct App {
     /// Pressure of a pen touching the screen or tablet; `None` for a mouse.
     pen_pressure: Option<f64>,
     text: TextRenderer,
+    /// The text being typed into, if any.
+    editing: Option<TextEdit>,
+    /// Time and screen position of the last left press, to detect double clicks.
+    last_press: Option<(Instant, Point)>,
     recognition: Option<PendingRecognition>,
     next_request: u64,
     shown_title: String,
@@ -108,6 +117,8 @@ impl App {
             style_drag: false,
             pen_pressure: None,
             text: TextRenderer::new(),
+            editing: None,
+            last_press: None,
             recognition: None,
             next_request: 0,
             shown_title: String::new(),
@@ -140,9 +151,35 @@ impl App {
         }
         let scale = window.scale_factor();
         let size = window.inner_size().to_logical::<f64>(scale);
-        let overrides = self.tools.overrides(&self.document);
-        let previews = self.tools.previews(&self.document);
-        let overlay = overlay(&self.document, &self.tools, &overrides, self.camera.zoom());
+        let mut overrides = self.tools.overrides(&self.document);
+        let mut previews = self.tools.previews(&self.document);
+        let mut overlay = overlay(&self.document, &self.tools, &overrides, self.camera.zoom());
+        if let Some(edit) = &mut self.editing {
+            let engine = self.text.engine();
+            let data = edit.data(engine);
+            match edit.target {
+                editing::Target::Existing(id) => overrides.push(Object {
+                    id,
+                    data,
+                    parent: self.document.parent(id),
+                    locked: false,
+                }),
+                editing::Target::New => previews.push(data),
+            }
+            // The edit box replaces the selection frame and handles.
+            overlay.selection = None;
+            overlay.selected.clear();
+            overlay.show_handles = false;
+            overlay.rotate_knob = None;
+            overlay.text_edit = Some(edit.overlay(engine));
+            let area = edit.ime_area(engine);
+            let a = self.camera.world_to_screen(area.origin());
+            let b = self.camera.world_to_screen(Point::new(area.x1, area.y1));
+            window.set_ime_cursor_area(
+                winit::dpi::LogicalPosition::new(a.x, a.y),
+                winit::dpi::LogicalSize::new((b.x - a.x).max(1.0), (b.y - a.y).max(1.0)),
+            );
+        }
         build_scene(
             &mut self.scene,
             &View {
@@ -204,7 +241,8 @@ impl App {
 
     /// What the selection toolbar needs; nothing while a gesture is in progress.
     fn selection_info(&self) -> Option<SelectionInfo> {
-        if self.tools.is_busy() || self.tools.active() != ToolKind::Select {
+        if self.editing.is_some() || self.tools.is_busy() || self.tools.active() != ToolKind::Select
+        {
             return None;
         }
         let selection = self.tools.selection();
@@ -241,7 +279,10 @@ impl App {
     fn perform(&mut self, action: Action) {
         let viewport = self.viewport();
         match action {
-            Action::Tool(tool) => self.tools.set_active(tool),
+            Action::Tool(tool) => {
+                self.finish_editing();
+                self.tools.set_active(tool);
+            }
             Action::InkStyle { marker, style } => self.tools.set_ink_style(marker, style),
             Action::Undo => self.undo(),
             Action::Redo => self.redo(),
@@ -285,6 +326,96 @@ impl App {
             Action::ToText => self.recognize(Recognition::ToText),
             Action::Calculate => self.recognize(Recognition::Calculate),
         }
+    }
+
+    fn start_editing(&mut self, edit: TextEdit) {
+        self.finish_editing();
+        self.tools.cancel();
+        if let editing::Target::Existing(id) = edit.target {
+            self.tools.select_only([id]);
+        }
+        self.editing = Some(edit);
+        if let Some(window) = &self.window {
+            window.set_ime_allowed(true);
+        }
+    }
+
+    /// Ends text editing, keeping the edit as one command.
+    fn finish_editing(&mut self) {
+        let Some(edit) = self.editing.take() else {
+            return;
+        };
+        if let Some(window) = &self.window {
+            window.set_ime_allowed(false);
+        }
+        if let Some(command) = edit.finish(self.text.engine()) {
+            self.apply(command);
+        }
+    }
+
+    /// Enter on a single selected text starts editing it with everything selected.
+    fn edit_selected_text(&mut self) -> bool {
+        let [id] = self.tools.selection().ids() else {
+            return false;
+        };
+        let Some(object) = self
+            .document
+            .get(*id)
+            .filter(|_| !self.document.is_locked(*id))
+        else {
+            return false;
+        };
+        let Some(mut edit) = TextEdit::existing(self.text.engine(), &object.clone()) else {
+            return false;
+        };
+        edit.select_all(self.text.engine());
+        self.start_editing(edit);
+        true
+    }
+
+    /// A left press on the canvas that belongs to text editing, rather than the tools.
+    /// Returns true if it was handled.
+    fn text_press(&mut self, pointer: Pointer, screen: Point) -> bool {
+        let now = Instant::now();
+        let double = self.last_press.is_some_and(|(at, pos)| {
+            now.duration_since(at) <= DOUBLE_CLICK_TIME
+                && (pos - screen).hypot() <= DOUBLE_CLICK_DISTANCE
+        });
+        self.last_press = Some((now, screen));
+        let pad = 4.0 / pointer.zoom;
+        if let Some(edit) = &mut self.editing {
+            let engine = self.text.engine();
+            if edit.contains(engine, pointer.world, pad) {
+                edit.press(engine, pointer.world, pointer.shift, double);
+                return true;
+            }
+            // A click elsewhere ends editing and then does what it normally does.
+            self.finish_editing();
+        }
+        if self.tools.active() == ToolKind::Text {
+            // Like the shape tools, the text tool is one-shot.
+            self.tools.set_active(ToolKind::Select);
+            let size = NEW_TEXT_SIZE / pointer.zoom;
+            let color = Style::default().stroke;
+            let edit = TextEdit::new_text(self.text.engine(), pointer.world, size, color);
+            self.start_editing(edit);
+            return true;
+        }
+        if double && self.tools.active() == ToolKind::Select {
+            let target = self
+                .tools
+                .object_at(&self.document, pointer)
+                .filter(|&id| !self.document.is_locked(id))
+                .and_then(|id| self.document.get(id).cloned());
+            if let Some(object) = target
+                && let Some(mut edit) = TextEdit::existing(self.text.engine(), &object)
+            {
+                edit.press(self.text.engine(), pointer.world, false, false);
+                self.start_editing(edit);
+                return true;
+            }
+        }
+        false
     }
 
     /// Sends the selected ink to handwriting recognition; the result comes back as
@@ -446,6 +577,7 @@ impl App {
     }
 
     fn open_board(&mut self) {
+        self.finish_editing();
         self.end_style_drag();
         if let Some(document) = self.session.open(&self.document) {
             self.replace_document(document);
@@ -453,6 +585,7 @@ impl App {
     }
 
     fn new_board(&mut self) {
+        self.finish_editing();
         self.end_style_drag();
         if let Some(document) = self.session.new_board(&self.document) {
             self.replace_document(document);
@@ -492,6 +625,7 @@ impl App {
     }
 
     fn undo(&mut self) {
+        self.finish_editing();
         self.end_style_drag();
         self.tools.cancel();
         if let Err(err) = self.document.undo() {
@@ -526,7 +660,17 @@ impl App {
         }
     }
 
-    fn cursor_icon(&self) -> CursorIcon {
+    fn cursor_icon(&mut self) -> CursorIcon {
+        let over_text = match (&mut self.editing, self.navigation.cursor()) {
+            (Some(edit), Some(cursor)) => {
+                let world = self.camera.screen_to_world(cursor);
+                edit.contains(self.text.engine(), world, 0.0)
+            }
+            _ => false,
+        };
+        if over_text || self.tools.active() == ToolKind::Text {
+            return CursorIcon::Text;
+        }
         match self.navigation.cursor_icon() {
             CursorIcon::Default => match self.tools.cursor() {
                 CursorHint::Default => CursorIcon::Default,
@@ -644,6 +788,8 @@ impl App {
             KeyCode::KeyR if !ctrl => self.tools.set_active(ToolKind::Shape(ShapeKind::Rectangle)),
             KeyCode::KeyO if !ctrl => self.tools.set_active(ToolKind::Shape(ShapeKind::Ellipse)),
             KeyCode::KeyS if !ctrl => self.tools.cycle_shape(),
+            KeyCode::KeyT if !ctrl => self.tools.set_active(ToolKind::Text),
+            KeyCode::Enter | KeyCode::NumpadEnter if !ctrl => return self.edit_selected_text(),
             KeyCode::KeyP if !ctrl => self.tools.set_active(ToolKind::Pen),
             KeyCode::KeyM if !ctrl => self.tools.set_active(ToolKind::Marker),
             KeyCode::KeyE if !ctrl => self.tools.set_active(ToolKind::Eraser),
@@ -841,14 +987,43 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let typing = self.ui.as_ref().is_some_and(Ui::wants_keyboard);
-                !typing && self.handle_key(&event)
+                if typing {
+                    false
+                } else if let Some(edit) = &mut self.editing {
+                    let modifiers = self.navigation.modifiers();
+                    match edit.key(self.text.engine(), &event, modifiers) {
+                        KeyOutcome::Handled => {}
+                        KeyOutcome::Finish => self.finish_editing(),
+                        KeyOutcome::FinishAndPass => {
+                            self.finish_editing();
+                            self.handle_key(&event);
+                        }
+                    }
+                    true
+                } else {
+                    self.handle_key(&event)
+                }
             }
+            WindowEvent::Ime(ime) => match &mut self.editing {
+                Some(edit) => {
+                    edit.ime(self.text.engine(), &ime);
+                    true
+                }
+                None => false,
+            },
             WindowEvent::CursorMoved { position, .. } => {
                 let pos = position.to_logical::<f64>(scale);
                 let panned = self
                     .navigation
                     .cursor_moved(&mut self.camera, Point::new(pos.x, pos.y));
-                let tool_changed = if over_ui {
+                let pointer = self.pointer();
+                let text_drag = match (&mut self.editing, pointer) {
+                    (Some(edit), Some(p)) => edit.drag(self.text.engine(), p.world),
+                    _ => false,
+                };
+                let tool_changed = if text_drag {
+                    true
+                } else if over_ui {
                     self.tools.clear_hover()
                 } else {
                     self.pointer()
@@ -871,7 +1046,22 @@ impl ApplicationHandler<UserEvent> for App {
                     if left {
                         self.canvas_drag = state == ElementState::Pressed && !consumed;
                     }
-                    !consumed && left && self.handle_left_button(state)
+                    if !consumed
+                        && left
+                        && state == ElementState::Released
+                        && let Some(edit) = &mut self.editing
+                    {
+                        edit.release();
+                    }
+                    let screen = self.navigation.cursor();
+                    let text = !consumed
+                        && left
+                        && state == ElementState::Pressed
+                        && match (self.pointer(), screen) {
+                            (Some(p), Some(s)) => self.text_press(p, s),
+                            _ => false,
+                        };
+                    text || (!consumed && left && self.handle_left_button(state))
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -898,10 +1088,11 @@ impl ApplicationHandler<UserEvent> for App {
             _ => false,
         };
         // Over the UI, egui sets the cursor.
-        if let Some(window) = &self.window
-            && !over_ui
-        {
-            window.set_cursor(self.cursor_icon());
+        if !over_ui {
+            let icon = self.cursor_icon();
+            if let Some(window) = &self.window {
+                window.set_cursor(icon);
+            }
         }
         if changed {
             self.request_redraw();
@@ -938,5 +1129,6 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
         marquee: tools.marquee(),
         guides: tools.guides(document),
         eraser: tools.eraser(),
+        text_edit: None,
     }
 }

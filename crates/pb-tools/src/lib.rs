@@ -46,6 +46,8 @@ pub enum ToolKind {
     Marker,
     /// Removes whole ink strokes it touches.
     Eraser,
+    /// Click to type. The app runs the text editor; the tool only marks the mode.
+    Text,
 }
 
 impl ToolKind {
@@ -56,6 +58,7 @@ impl ToolKind {
             Self::Pen => "Pen",
             Self::Marker => "Marker",
             Self::Eraser => "Eraser",
+            Self::Text => "Text",
         }
     }
 
@@ -355,6 +358,8 @@ impl Tools {
                 });
                 return true;
             }
+            // Text editing is handled by the app.
+            ToolKind::Text => return false,
             ToolKind::Eraser => {
                 let radius = ERASER_RADIUS / pointer.zoom;
                 self.gesture = Some(Gesture::Erase {
@@ -682,6 +687,11 @@ impl Tools {
     /// All objects making up the selection, groups expanded.
     fn selected<'a>(&'a self, doc: &'a Document) -> impl Iterator<Item = &'a Object> + 'a {
         self.selection.ids().iter().flat_map(|&id| doc.leaves(id))
+    }
+
+    /// The top-level object or group under the pointer.
+    pub fn object_at(&self, doc: &Document, pointer: Pointer) -> Option<ObjectId> {
+        hit::object_at(doc, pointer.world, HIT_SLOP / pointer.zoom)
     }
 
     /// The selected objects and groups that are not locked.

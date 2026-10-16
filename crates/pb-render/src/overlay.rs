@@ -24,12 +24,26 @@ pub struct Overlay {
     pub guides: Vec<Line>,
     /// The eraser: center and radius (world).
     pub eraser: Option<(Point, f64)>,
+    /// Text being edited.
+    pub text_edit: Option<TextEditOverlay>,
+}
+
+/// The text box being edited, in world space.
+#[derive(Clone, Debug)]
+pub struct TextEditOverlay {
+    pub frame: Frame,
+    /// Selected ranges as quads (they follow the text's rotation).
+    pub selection: Vec<[Point; 4]>,
+    /// Top and bottom of the caret, hidden while text is selected.
+    pub caret: Option<(Point, Point)>,
+    pub caret_width: f64,
 }
 
 pub struct OverlayColors {
     pub accent: Color,
     pub handle_fill: Color,
     pub guide: Color,
+    pub caret: Color,
 }
 
 /// Handle radius in logical pixels.
@@ -110,6 +124,19 @@ pub fn draw_overlay(
             Line::new((line.p0.x, snap(line.p0.y)), (line.p1.x, snap(line.p1.y)))
         };
         scene.stroke(&thin, id, colors.guide, None, &line);
+    }
+    if let Some(edit) = &overlay.text_edit {
+        let selection = colors.accent.multiply_alpha(0.25);
+        for quad in &edit.selection {
+            let path = frame_path(quad.map(to_px), false);
+            scene.fill(Fill::NonZero, id, selection, None, &path);
+        }
+        scene.stroke(&thin, id, colors.accent, None, &outline(&edit.frame));
+        if let Some((top, bottom)) = edit.caret {
+            let width = (edit.caret_width * camera.zoom() * scale).max(1.5 * scale);
+            let caret = Line::new(to_px(top), to_px(bottom));
+            scene.stroke(&Stroke::new(width), id, colors.caret, None, &caret);
+        }
     }
     if let Some((center, radius)) = overlay.eraser {
         let circle = Circle::new(to_px(center), radius * camera.zoom() * scale);

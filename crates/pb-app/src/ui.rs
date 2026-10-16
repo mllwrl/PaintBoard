@@ -356,6 +356,7 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         ),
                         (ToolKind::Marker, "Marker (M)", paint_marker),
                         (ToolKind::Eraser, "Eraser (E)", paint_eraser),
+                        (ToolKind::Text, "Text (T)", paint_text),
                     ];
                     let mut ink_button = shapes.rect;
                     for (tool, tooltip, paint) in ink_tools {
@@ -841,6 +842,11 @@ fn paint_eraser(painter: &Painter, rect: Rect, color: Color32) {
     ];
     painter.add(Shape::line(body, Stroke::new(1.6, color)));
     painter.line_segment([at(0.3, 0.35), at(0.7, 0.75)], Stroke::new(1.6, color));
+}
+
+fn paint_text(painter: &Painter, rect: Rect, color: Color32) {
+    let font = egui::FontId::proportional(rect.height() * 1.15);
+    painter.text(rect.center(), Align2::CENTER_CENTER, "T", font, color);
 }
 
 fn paint_shape(painter: &Painter, rect: Rect, color: Color32, kind: ShapeKind) {

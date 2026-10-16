@@ -85,10 +85,9 @@ pub fn draw_object(
                 .engine
                 .layout(&content.text, content.size, Some(b.width() + 0.5));
             let top = b.y0 + (b.height() - layout.height) / 2.0;
-            let offset = (b.width() - layout.width) / 2.0;
             let glyphs = layout.glyphs.iter().map(|g| vello::Glyph {
                 id: g.id,
-                x: g.x + offset as f32,
+                x: g.x,
                 y: g.y,
             });
             scene

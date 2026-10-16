@@ -3,7 +3,11 @@
 //! All text uses Inter (SIL Open Font License, see `assets/fonts/Inter-OFL.txt`), which
 //! covers Latin, Cyrillic and Greek.
 //!
-//! TODO: an editor (cursor, selection, IME) and rich text.
+//! TODO: rich text (bold, italic, lists, links).
+
+mod editor;
+
+pub use editor::{Motion, TextEditor, TextRect};
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -37,8 +41,8 @@ pub struct TextLayout {
 
 /// Shapes and lays out text. Keeps font data and caches between calls.
 pub struct TextEngine {
-    fonts: FontContext,
-    layouts: LayoutContext<()>,
+    pub(crate) fonts: FontContext,
+    pub(crate) layouts: LayoutContext<()>,
 }
 
 impl TextEngine {
@@ -53,8 +57,8 @@ impl TextEngine {
         }
     }
 
-    /// Lays out `text` at font `size`, wrapping lines at `max_width` if given. Lines are
-    /// centered, which suits labels and recognized handwriting.
+    /// Lays out `text` at font `size`, wrapping lines at `max_width` if given. Lines start
+    /// at the left edge, as in [`TextEditor`].
     pub fn layout(&mut self, text: &str, size: f64, max_width: Option<f64>) -> TextLayout {
         let mut builder = self
             .layouts
@@ -68,25 +72,29 @@ impl TextEngine {
         ));
         let mut layout: Layout<()> = builder.build(text);
         layout.break_all_lines(max_width.map(|w| w as f32));
-        layout.align(Alignment::Center, AlignmentOptions::default());
+        layout.align(Alignment::Start, AlignmentOptions::default());
+        extract(&layout)
+    }
+}
 
-        let mut glyphs = Vec::new();
-        for line in layout.lines() {
-            for item in line.items() {
-                if let PositionedLayoutItem::GlyphRun(run) = item {
-                    glyphs.extend(run.positioned_glyphs().map(|g| Glyph {
-                        id: g.id,
-                        x: g.x,
-                        y: g.y,
-                    }));
-                }
+/// Glyph positions and size of a finished layout.
+pub(crate) fn extract(layout: &Layout<()>) -> TextLayout {
+    let mut glyphs = Vec::new();
+    for line in layout.lines() {
+        for item in line.items() {
+            if let PositionedLayoutItem::GlyphRun(run) = item {
+                glyphs.extend(run.positioned_glyphs().map(|g| Glyph {
+                    id: g.id,
+                    x: g.x,
+                    y: g.y,
+                }));
             }
         }
-        TextLayout {
-            width: f64::from(layout.full_width()),
-            height: f64::from(layout.height()),
-            glyphs,
-        }
+    }
+    TextLayout {
+        width: f64::from(layout.full_width()),
+        height: f64::from(layout.height()),
+        glyphs,
     }
 }
 

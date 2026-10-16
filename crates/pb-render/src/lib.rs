@@ -8,7 +8,7 @@ mod overlay;
 pub use gpu::{FrameTarget, Gpu};
 pub use grid::{GridColors, GridStyle, draw_grid};
 pub use objects::TextRenderer;
-pub use overlay::{Overlay, OverlayColors};
+pub use overlay::{Overlay, OverlayColors, TextEditOverlay};
 pub use vello;
 
 use std::collections::HashMap;
@@ -37,6 +37,7 @@ impl Theme {
                 accent: Color::from_rgb8(0x3B, 0x6E, 0xF5),
                 handle_fill: Color::WHITE,
                 guide: Color::from_rgb8(0xF2, 0x3D, 0x7A),
+                caret: Color::from_rgb8(0x1F, 0x29, 0x37),
             },
         }
     }

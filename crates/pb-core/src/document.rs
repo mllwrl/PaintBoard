@@ -333,6 +333,17 @@ impl Document {
                     }
                 }
             }
+            Command::SetText { id, text, bounds } => {
+                if !matches!(
+                    self.get(id).map(|o| &o.data.kind),
+                    Some(ObjectKind::Text(_))
+                ) {
+                    return Err(Error::UnknownObject(id));
+                }
+                let meta = self.tree.get_meta(self.nodes[&id])?;
+                meta.insert(key::TEXT, &*text)?;
+                write_bounds(&meta, bounds.abs())?;
+            }
             Command::SetLocked { ids, locked } => {
                 self.check_exist(&ids)?;
                 for id in ids {
@@ -1193,6 +1204,42 @@ mod tests {
         let id = create(&mut doc, data.clone());
         let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
         assert_eq!(loaded.get(id).unwrap().data, data);
+    }
+
+    #[test]
+    fn set_text_replaces_text_and_bounds() {
+        let mut doc = Document::new();
+        let mut data = rect(0.0, 0.0, 10.0, 10.0);
+        data.kind = ObjectKind::Text(Text {
+            text: "old".into(),
+            size: 12.0,
+        });
+        let id = create(&mut doc, data);
+        let square = create(&mut doc, rect(0.0, 0.0, 1.0, 1.0));
+        let bounds = Rect::new(0.0, 0.0, 40.0, 15.0);
+        doc.apply(Command::SetText {
+            id,
+            text: "new text".into(),
+            bounds,
+        })
+        .unwrap();
+        let stored = &doc.get(id).unwrap().data;
+        assert!(
+            matches!(&stored.kind, ObjectKind::Text(t) if &*t.text == "new text" && t.size == 12.0)
+        );
+        assert_eq!(stored.bounds, bounds);
+        assert!(
+            doc.apply(Command::SetText {
+                id: square,
+                text: "x".into(),
+                bounds,
+            })
+            .is_err()
+        );
+        doc.undo().unwrap();
+        assert!(
+            matches!(&doc.get(id).unwrap().data.kind, ObjectKind::Text(t) if &*t.text == "old")
+        );
     }
 
     #[test]
