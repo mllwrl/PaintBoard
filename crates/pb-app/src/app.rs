@@ -11,7 +11,9 @@ use pb_geom::kurbo::{Point, Size, Vec2};
 use pb_platform::Instant;
 use pb_platform::{clipboard, dialog, handwriting};
 use pb_render::vello::Scene;
-use pb_render::{Gpu, GridStyle, ImageCache, Overlay, TextRenderer, Theme, View, build_scene};
+use pb_render::{
+    Gpu, GridStyle, ImageCache, Overlay, TextRenderer, Theme, View, build_scene, fitted_font_size,
+};
 use pb_tools::{
     Align, Axis, Clipboard, Crop, CursorHint, Pointer, ToolKind, Tools, math, rotation_knob,
     selection_frame, unit_frame,
@@ -26,7 +28,7 @@ use crate::editing::{self, KeyOutcome, NEW_TEXT_SIZE, TextEdit};
 use crate::navigation::Navigation;
 use crate::pictures::{self, Picture};
 use crate::session::Session;
-use crate::ui::{Action, Model, STICKY_COLORS, SelectionInfo, Ui};
+use crate::ui::{Action, Model, STICKY_COLORS, SelectionInfo, ShapeText, Ui};
 
 pub enum UserEvent {
     /// GPU initialization finished (asynchronous on the web).
@@ -273,7 +275,7 @@ impl App {
     }
 
     /// What the selection toolbar needs; nothing while a gesture is in progress.
-    fn selection_info(&self) -> Option<SelectionInfo> {
+    fn selection_info(&mut self) -> Option<SelectionInfo> {
         if self.editing.is_some()
             || self.cropping.is_some()
             || self.tools.is_busy()
@@ -289,6 +291,19 @@ impl App {
             .flat_map(|&id| self.document.leaves(id))
             .collect();
         let first = leaves.first()?;
+        let shape_text = leaves.iter().find_map(|o| match &o.data.kind {
+            ObjectKind::Shape(shape) => {
+                let style = o.data.style;
+                let text_box = o.data.text_box()?;
+                let size = fitted_font_size(self.text.engine(), &shape.text, text_box);
+                Some(ShapeText {
+                    color: style.text_color(),
+                    size,
+                    auto: style.font_size.is_none(),
+                })
+            }
+            _ => None,
+        });
         let corner = |x, y| self.camera.world_to_screen(Point::new(x, y));
         Some(SelectionInfo {
             screen: pb_geom::kurbo::Rect::from_points(
@@ -329,6 +344,7 @@ impl App {
             handwriting: (handwriting::is_available()
                 && leaves.iter().all(|o| o.data.kind.is_ink()))
             .then_some(self.recognition.is_some()),
+            shape_text,
             can_crop: matches!(ids, [id] if Crop::new(&self.document, *id).is_some()),
             several: ids.len() > 1,
             locked: selection.has_locked(&self.document),
@@ -806,6 +822,7 @@ impl App {
                 stroke: color,
                 stroke_width: 0.0,
                 opacity: 1.0,
+                ..Style::default()
             },
         }
     }

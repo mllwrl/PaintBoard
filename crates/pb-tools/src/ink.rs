@@ -61,6 +61,7 @@ pub(crate) fn stroke(
             stroke: style.color,
             stroke_width: style.width / zoom,
             opacity: if marker { MARKER_OPACITY } else { 1.0 },
+            ..Style::default()
         },
     })
 }

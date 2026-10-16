@@ -179,8 +179,9 @@ pub(crate) fn draw_object(
                     &path,
                 );
             }
-            if let Some(text_box) = data.kind.text_box(data.bounds) {
-                text.draw_fitted(scene, transform, &shape.text, text_box, color(style.stroke));
+            if let Some(text_box) = data.text_box() {
+                let brush = color(style.text_color());
+                text.draw_fitted(scene, transform, &shape.text, text_box, brush);
             }
         }
         ObjectKind::Text(content) => {
@@ -212,7 +213,7 @@ pub(crate) fn draw_object(
                 side * SHADOW_BLUR,
             );
             scene.fill(Fill::NonZero, transform, color(style.fill), None, &b);
-            if let Some(text_box) = data.kind.text_box(b) {
+            if let Some(text_box) = data.text_box() {
                 text.draw_fitted(
                     scene,
                     transform,

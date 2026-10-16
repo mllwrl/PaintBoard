@@ -42,6 +42,9 @@ mod key {
     pub const STROKE: &str = "stroke";
     pub const STROKE_WIDTH: &str = "strokeWidth";
     pub const OPACITY: &str = "opacity";
+    /// A shape's text color and font size, absent for the defaults (see `Style`).
+    pub const TEXT_COLOR: &str = "textColor";
+    pub const TEXT_SIZE: &str = "textSize";
     pub const LOCKED: &str = "locked";
     /// Points of an ink stroke, see `Ink::to_bytes`.
     pub const POINTS: &str = "points";
@@ -444,6 +447,7 @@ impl Document {
                     for object in self.leaves(id) {
                         if done.insert(object.id) {
                             let meta = self.tree.get_meta(self.nodes[&object.id])?;
+                            let change = change.for_kind(&object.data.kind);
                             write_style_change(&meta, &change, object.data.style)?;
                         }
                     }
@@ -897,8 +901,10 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
         stroke: Some(style.stroke),
         stroke_width: Some(style.stroke_width),
         opacity: Some(style.opacity),
+        text_color: style.text_color,
+        font_size: style.font_size.map(Some),
     };
-    write_style_change(meta, &all, style)
+    write_style_change(meta, &all.for_kind(&data.kind), style)
 }
 
 /// Writes only the properties the change sets, each under its own key.
@@ -915,6 +921,17 @@ fn write_style_change(meta: &LoroMap, change: &StyleChange, current: Style) -> R
     }
     if change.opacity.is_some() {
         meta.insert(key::OPACITY, style.opacity)?;
+    }
+    if let Some(color) = style.text_color
+        && change.text_color.is_some()
+    {
+        meta.insert(key::TEXT_COLOR, i64::from(color.0))?;
+    }
+    if change.font_size.is_some() {
+        match style.font_size {
+            Some(size) => meta.insert(key::TEXT_SIZE, size)?,
+            None => meta.delete(key::TEXT_SIZE)?,
+        }
     }
     Ok(())
 }
@@ -1184,6 +1201,8 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
             stroke: color(key::STROKE).unwrap_or(defaults.stroke),
             stroke_width: num(key::STROKE_WIDTH).unwrap_or(defaults.stroke_width),
             opacity: num(key::OPACITY).unwrap_or(defaults.opacity),
+            text_color: color(key::TEXT_COLOR),
+            font_size: num(key::TEXT_SIZE),
         },
     })
 }
@@ -1786,6 +1805,52 @@ mod tests {
         assert_eq!(loaded.get(id).unwrap().data.kind, expected);
         doc.undo().unwrap();
         assert_eq!(doc.get(id).unwrap().data.kind.text(), Some(""));
+    }
+
+    #[test]
+    fn text_style_applies_to_shapes_only() {
+        let mut doc = Document::new();
+        let shape = create(&mut doc, rect(0.0, 0.0, 100.0, 60.0));
+        let mut note = rect(200.0, 0.0, 100.0, 100.0);
+        note.kind = ObjectKind::Sticky(Sticky { text: "".into() });
+        let note = create(&mut doc, note);
+        let red = Rgba::rgb(0xF2, 0x55, 0x55);
+        doc.apply(Command::SetStyle {
+            ids: vec![shape, note],
+            change: StyleChange {
+                text_color: Some(red),
+                font_size: Some(Some(18.0)),
+                ..StyleChange::default()
+            },
+        })
+        .unwrap();
+        let style = |doc: &Document, id| doc.get(id).unwrap().data.style;
+        assert_eq!(style(&doc, shape).text_color, Some(red));
+        assert_eq!(style(&doc, shape).font_size, Some(18.0));
+        assert_eq!(style(&doc, note), Style::default());
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(style(&loaded, shape), style(&doc, shape));
+
+        // Back to fitting; the color stays.
+        doc.apply(Command::SetStyle {
+            ids: vec![shape],
+            change: StyleChange {
+                font_size: Some(None),
+                ..StyleChange::default()
+            },
+        })
+        .unwrap();
+        assert_eq!(style(&doc, shape).font_size, None);
+        assert_eq!(style(&doc, shape).text_color, Some(red));
+        doc.undo().unwrap();
+        assert_eq!(style(&doc, shape).font_size, Some(18.0));
+        doc.undo().unwrap();
+        assert_eq!(style(&doc, shape), Style::default());
+        // Copies keep the text style.
+        doc.redo().unwrap();
+        let copy = doc.content(shape).unwrap();
+        let id = doc.apply(Command::Create(vec![copy])).unwrap().created[0];
+        assert_eq!(style(&doc, id), style(&doc, shape));
     }
 
     #[test]

@@ -101,16 +101,6 @@ impl ObjectKind {
             Self::Ink(_) | Self::Image(_) | Self::Connector(_) => None,
         }
     }
-
-    /// Where the text of a sticky note or shape with `bounds` goes; `None` for objects
-    /// whose text is not fitted into them.
-    pub fn text_box(&self, bounds: Rect) -> Option<TextBox> {
-        match self {
-            Self::Sticky(_) => Some(Sticky::text_box(bounds)),
-            Self::Shape(shape) => Some(Shape::text_box(shape.kind, bounds)),
-            Self::Text(_) | Self::Ink(_) | Self::Image(_) | Self::Connector(_) => None,
-        }
-    }
 }
 
 fn shape_name(kind: ShapeKind) -> &'static str {
@@ -134,15 +124,15 @@ impl From<ShapeKind> for ObjectKind {
 }
 
 /// Where text fitted into an object goes: wrapped at the area's width, centered in it, and
-/// drawn as large as fits, up to `max_size`.
+/// drawn at `max_size`, or smaller if it does not fit.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextBox {
     pub area: Rect,
     pub max_size: f64,
 }
 
-/// A geometric shape with text inside. Like a sticky note's, the text's font size is not
-/// stored: it is drawn as large as fits.
+/// A geometric shape with text inside. The text's color and size are part of the object's
+/// [`Style`]; by default it is drawn as large as fits.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Shape {
     pub kind: ShapeKind,
@@ -157,14 +147,15 @@ impl Shape {
     /// kind, so short texts in shapes of one size match; long ones shrink to fit.
     const MAX_FONT: f64 = 0.15;
 
-    /// Where the text of a `kind` shape with `bounds` goes.
-    pub fn text_box(kind: ShapeKind, bounds: Rect) -> TextBox {
+    /// Where the text of a `kind` shape with `bounds` goes, at `font_size` or as large as
+    /// fits.
+    pub fn text_box(kind: ShapeKind, bounds: Rect, font_size: Option<f64>) -> TextBox {
         let side = bounds.width().min(bounds.height());
         let area = kind.text_area(bounds);
         let pad = (side * Self::PADDING).min(area.width().min(area.height()) / 4.0);
         TextBox {
             area: area.inset(-pad),
-            max_size: side * Self::MAX_FONT,
+            max_size: font_size.unwrap_or(side * Self::MAX_FONT),
         }
     }
 }
@@ -200,6 +191,19 @@ pub struct Style {
     pub stroke_width: f64,
     /// Opacity of the whole object in `[0, 1]`, applied on top of the colors' own alpha.
     pub opacity: f64,
+    /// Color of a shape's text; `None` draws it in the outline color. Other objects ignore
+    /// it.
+    pub text_color: Option<Rgba>,
+    /// Font size of a shape's text, in world units; `None` makes it as large as fits. Text
+    /// that does not fit shrinks either way. Other objects ignore it.
+    pub font_size: Option<f64>,
+}
+
+impl Style {
+    /// Color of a shape's text.
+    pub fn text_color(&self) -> Rgba {
+        self.text_color.unwrap_or(self.stroke)
+    }
 }
 
 impl Default for Style {
@@ -209,6 +213,8 @@ impl Default for Style {
             stroke: Rgba::rgb(0x1F, 0x29, 0x37),
             stroke_width: 2.0,
             opacity: 1.0,
+            text_color: None,
+            font_size: None,
         }
     }
 }
@@ -221,9 +227,15 @@ pub struct StyleChange {
     pub stroke: Option<Rgba>,
     pub stroke_width: Option<f64>,
     pub opacity: Option<f64>,
+    pub text_color: Option<Rgba>,
+    /// `Some(None)` switches back to fitting the text.
+    pub font_size: Option<Option<f64>>,
 }
 
 impl StyleChange {
+    /// Smallest font size that can be set.
+    pub const MIN_FONT_SIZE: f64 = 1.0;
+
     /// `style` with this change applied, values clamped to their valid ranges.
     pub fn apply_to(&self, style: Style) -> Style {
         Style {
@@ -231,7 +243,22 @@ impl StyleChange {
             stroke: self.stroke.unwrap_or(style.stroke),
             stroke_width: self.stroke_width.unwrap_or(style.stroke_width).max(0.0),
             opacity: self.opacity.unwrap_or(style.opacity).clamp(0.0, 1.0),
+            text_color: self.text_color.or(style.text_color),
+            font_size: self
+                .font_size
+                .unwrap_or(style.font_size)
+                .map(|size| size.max(Self::MIN_FONT_SIZE)),
         }
+    }
+
+    /// The part of this change that applies to an object of `kind`: only shapes have text
+    /// styles.
+    pub fn for_kind(mut self, kind: &ObjectKind) -> Self {
+        if !matches!(kind, ObjectKind::Shape(_)) {
+            self.text_color = None;
+            self.font_size = None;
+        }
+        self
     }
 }
 
@@ -412,6 +439,21 @@ pub struct ObjectData {
 }
 
 impl ObjectData {
+    /// Where the text of a sticky note or shape goes; `None` for objects whose text is not
+    /// placed inside them.
+    pub fn text_box(&self) -> Option<TextBox> {
+        match &self.kind {
+            ObjectKind::Sticky(_) => Some(Sticky::text_box(self.bounds)),
+            ObjectKind::Shape(shape) => Some(Shape::text_box(
+                shape.kind,
+                self.bounds,
+                self.style.font_size,
+            )),
+            ObjectKind::Text(_) | ObjectKind::Ink(_) | ObjectKind::Image(_) => None,
+            ObjectKind::Connector(_) => None,
+        }
+    }
+
     pub fn frame(&self) -> Frame {
         Frame::new(self.bounds, self.rotation)
     }
@@ -491,5 +533,23 @@ impl Content {
 impl From<ObjectData> for Content {
     fn from(data: ObjectData) -> Self {
         Self::Object(data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shape_font_size_is_set_or_follows_the_size() {
+        let bounds = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let fitted = Shape::text_box(ShapeKind::Rectangle, bounds, None);
+        let set = Shape::text_box(ShapeKind::Rectangle, bounds, Some(40.0));
+        assert_eq!(fitted.area, set.area);
+        assert_eq!(set.max_size, 40.0);
+        // Equal shapes of different kinds get the same largest size.
+        let diamond = Shape::text_box(ShapeKind::Diamond, bounds, None);
+        assert_eq!(diamond.max_size, fitted.max_size);
+        assert!(diamond.area.width() < fitted.area.width());
     }
 }

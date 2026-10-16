@@ -62,13 +62,13 @@ enum Placement {
 }
 
 impl Placement {
-    /// Where fitted text goes; `None` unless it is fitted.
-    fn text_box(self) -> Option<TextBox> {
+    /// Where fitted text goes, for an object with `style`; `None` unless it is fitted.
+    fn text_box(self, style: &Style) -> Option<TextBox> {
         match self {
             Self::Fitted {
                 bounds,
                 shape: Some(kind),
-            } => Some(Shape::text_box(kind, bounds)),
+            } => Some(Shape::text_box(kind, bounds, style.font_size)),
             Self::Fitted {
                 bounds,
                 shape: None,
@@ -108,6 +108,7 @@ impl TextEdit {
                 stroke: color,
                 stroke_width: 0.0,
                 opacity: 1.0,
+                ..Style::default()
             },
             original: String::new(),
             selecting: false,
@@ -133,7 +134,7 @@ impl TextEdit {
         rotation: f64,
         style: Style,
     ) -> Self {
-        let text_box = placement.text_box().expect("fitted placement");
+        let text_box = placement.text_box(&style).expect("fitted placement");
         let mut editor = TextEditor::new(engine, text, text_box.max_size);
         editor.set_wrap(Some(text_box.area.width()), TextAlign::Center);
         let mut this = Self {
@@ -224,7 +225,7 @@ impl TextEdit {
 
     /// Sizes fitted text to fit, after it changed.
     fn refit(&mut self, engine: &mut TextEngine) {
-        if let Some(text_box) = self.placement.text_box() {
+        if let Some(text_box) = self.placement.text_box(&self.style) {
             let size = fitted_font_size(engine, &self.editor.display_text(), text_box);
             self.editor.set_size(size);
         }
@@ -271,7 +272,8 @@ impl TextEdit {
         match self.placement {
             Placement::Free { origin } => origin,
             Placement::Fitted { .. } => {
-                let area = self.placement.text_box().expect("fitted placement").area;
+                let text_box = self.placement.text_box(&self.style);
+                let area = text_box.expect("fitted placement").area;
                 let height = self.editor.layout(engine).height;
                 Point::new(area.x0, area.y0 + (area.height() - height) / 2.0)
             }
@@ -712,7 +714,7 @@ mod tests {
         edit.editor
             .insert(&mut e, &"text that has to shrink ".repeat(6));
         edit.refit(&mut e);
-        let area = Shape::text_box(pb_geom::ShapeKind::Ellipse, bounds).area;
+        let area = Shape::text_box(pb_geom::ShapeKind::Ellipse, bounds, None).area;
         let layout = edit.editor.layout(&mut e);
         assert!(layout.height <= area.height() && layout.content_width <= area.width());
         assert_eq!(edit.frame(&mut e).rect, bounds);

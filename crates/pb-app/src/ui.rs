@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use egui::{
     Align2, Area, Button, Color32, Context, FontData, FontDefinitions, FontFamily, Frame, Id,
-    Order, Painter, Pos2, Rect, Response, Sense, Shadow, Shape, Slider, Stroke, Vec2,
+    Order, Painter, Pos2, Rect, Response, RichText, Sense, Shadow, Shape, Slider, Stroke, Vec2,
 };
 use pb_core::{
     Cap, Connector, ConnectorChange, Rgba, Route, ShapeKind, Style, StyleChange, ZOrder,
@@ -100,18 +100,34 @@ pub struct SelectionInfo {
     /// Only ink is selected and handwriting can be recognized: `Some(busy)`, where `busy`
     /// says a recognition is already running.
     pub handwriting: Option<bool>,
+    /// Text style of the first selected shape, if there is one.
+    pub shape_text: Option<ShapeText>,
     /// A single unlocked image is selected.
     pub can_crop: bool,
     pub several: bool,
     pub locked: bool,
 }
 
+/// How a shape's text looks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShapeText {
+    pub color: Rgba,
+    /// The size it is drawn at, fitted or set.
+    pub size: f64,
+    /// The size is fitted to the shape rather than set.
+    pub auto: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Popup {
     Fill,
     Stroke,
+    Text,
     Opacity,
 }
+
+/// Font sizes offered for shape text, in logical pixels at 100% zoom.
+const FONT_SIZES: std::ops::RangeInclusive<f64> = 6.0..=144.0;
 
 /// Colors offered for fill and outline. The last entry is "none".
 const PALETTE: [Rgba; 16] = [
@@ -676,6 +692,11 @@ fn selection_toolbar(
                         let stroke = swatch_button(ui, style.stroke, true, label);
                         toggle(popup, Popup::Stroke, stroke.clicked());
                     }
+                    if let Some(text) = selection.shape_text {
+                        let label = RichText::new("Aa").color(to_color32(text.color)).strong();
+                        let button = ui.button(label).on_hover_text("Text color and size");
+                        toggle(popup, Popup::Text, button.clicked());
+                    }
                     if let Some(busy) = selection.handwriting {
                         ui.add_enabled_ui(!busy, |ui| {
                             let label = if busy { "Recognizing…" } else { "To text" };
@@ -782,6 +803,40 @@ fn selection_toolbar(
                         ..StyleChange::default()
                     });
                 }
+                Popup::Text => {
+                    let Some(text) = selection.shape_text else {
+                        return;
+                    };
+                    if let Some(color) = palette(ui, text.color, false) {
+                        actions.push(Action::SetStyle(StyleChange {
+                            text_color: Some(color),
+                            ..StyleChange::default()
+                        }));
+                    }
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let auto = ui
+                            .selectable_label(text.auto, "Auto")
+                            .on_hover_text("As large as fits the shape");
+                        if auto.clicked() && !text.auto {
+                            actions.push(Action::SetStyle(StyleChange {
+                                font_size: Some(None),
+                                ..StyleChange::default()
+                            }));
+                        }
+                        let mut size = text.size;
+                        let slider = Slider::new(&mut size, FONT_SIZES)
+                            .logarithmic(true)
+                            .fixed_decimals(0);
+                        let response = ui
+                            .add(slider)
+                            .on_hover_text("Font size; text that does not fit the shape shrinks");
+                        style_drag(&response, actions, || StyleChange {
+                            font_size: Some(Some(size.round())),
+                            ..StyleChange::default()
+                        });
+                    });
+                }
                 Popup::Opacity => {
                     let percent = selection.style.opacity * 100.0;
                     style_slider(ui, percent, 0.0..=100.0, "%", actions, |v| StyleChange {
@@ -821,11 +876,16 @@ fn style_slider(
     change: impl Fn(f64) -> StyleChange,
 ) {
     let response = ui.add(Slider::new(&mut value, range).suffix(suffix));
+    style_drag(&response, actions, || change(value));
+}
+
+/// Style actions for a slider's `response`, so that a drag is a single undo step.
+fn style_drag(response: &Response, actions: &mut Vec<Action>, change: impl Fn() -> StyleChange) {
     if response.drag_started() {
         actions.push(Action::BeginStyleDrag);
     }
     if response.changed() {
-        actions.push(Action::SetStyle(change(value)));
+        actions.push(Action::SetStyle(change()));
     }
     if response.drag_stopped() {
         actions.push(Action::EndStyleDrag);
