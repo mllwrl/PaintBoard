@@ -38,6 +38,9 @@ pub struct Overlay {
     /// would snap to.
     pub connection_points: Vec<Point>,
     pub connection_active: Option<Point>,
+    /// Quick create's "+" dots (world) and their radius in logical pixels.
+    pub quick_dots: Vec<Point>,
+    pub quick_dot_radius: f64,
 }
 
 /// The text box being edited, in world space.
@@ -181,6 +184,18 @@ pub fn draw_overlay(
         };
         scene.fill(Fill::NonZero, id, fill, None, &dot);
         scene.stroke(&handle_stroke, id, colors.accent, None, &dot);
+    }
+    for &point in &overlay.quick_dots {
+        let center = to_px(point);
+        let r = overlay.quick_dot_radius * scale;
+        let dot = Circle::new(center, r);
+        scene.fill(Fill::NonZero, id, colors.handle_fill, None, &dot);
+        scene.stroke(&handle_stroke, id, colors.accent, None, &dot);
+        let arm = r * 0.5;
+        for d in [Vec2::new(arm, 0.0), Vec2::new(0.0, arm)] {
+            let line = Line::new(center - d, center + d);
+            scene.stroke(&handle_stroke, id, colors.accent, None, &line);
+        }
     }
     if let Some(edit) = &overlay.text_edit {
         let selection = colors.accent.multiply_alpha(0.25);

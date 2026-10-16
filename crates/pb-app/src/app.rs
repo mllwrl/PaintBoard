@@ -194,6 +194,7 @@ impl App {
             overlay.selected.clear();
             overlay.show_handles = false;
             overlay.rotate_knob = None;
+            overlay.quick_dots.clear();
             overlay.text_edit = Some(edit.overlay(engine, Instant::now()));
             let area = edit.ime_area(engine);
             let a = self.camera.world_to_screen(area.origin());
@@ -211,6 +212,7 @@ impl App {
             overlay.selected.clear();
             overlay.show_handles = true;
             overlay.rotate_knob = None;
+            overlay.quick_dots.clear();
             overlay.hover = None;
         }
         build_scene(
@@ -319,11 +321,21 @@ impl App {
             _ => None,
         });
         let corner = |x, y| self.camera.world_to_screen(Point::new(x, y));
+        let mut screen = pb_geom::kurbo::Rect::from_points(
+            corner(bounds.x0, bounds.y0),
+            corner(bounds.x1, bounds.y1),
+        );
+        // The toolbar keeps clear of quick create's dots.
+        if !self
+            .tools
+            .quick_dots(&self.document, self.camera.zoom())
+            .is_empty()
+        {
+            let reach = pb_tools::quick::DOT_OFFSET + pb_tools::quick::DOT_RADIUS;
+            screen = screen.inflate(reach, reach);
+        }
         Some(SelectionInfo {
-            screen: pb_geom::kurbo::Rect::from_points(
-                corner(bounds.x0, bounds.y0),
-                corner(bounds.x1, bounds.y1),
-            ),
+            screen,
             style: first.data.style,
             has_group: ids.iter().any(|&id| self.document.group(id).is_some()),
             has_fill: leaves.iter().any(|o| {
@@ -939,7 +951,13 @@ impl App {
             return false;
         };
         match state {
-            ElementState::Pressed => self.tools.pointer_down(&self.document, pointer),
+            ElementState::Pressed => {
+                if let Some((id, side)) = self.tools.quick_dot_at(&self.document, pointer) {
+                    self.quick_create(id, side);
+                    return true;
+                }
+                self.tools.pointer_down(&self.document, pointer)
+            }
             ElementState::Released => match self.tools.pointer_up(&self.document, pointer) {
                 Some(command) => {
                     self.apply(command);
@@ -948,6 +966,46 @@ impl App {
                 // The gesture may still have changed the selection.
                 None => true,
             },
+        }
+    }
+
+    /// A "+" dot: adds a copy of `id` on `side`, connects the two, and starts typing on the
+    /// copy. One undo step.
+    fn quick_create(&mut self, id: ObjectId, side: pb_tools::quick::Side) {
+        let zoom = self.camera.zoom();
+        let Some(copy) = pb_tools::quick::copy_beside(&self.document, id, side, zoom) else {
+            return;
+        };
+        let area = copy.frame().aabb();
+        self.document.begin_undo_group();
+        let created = self.document.apply(Command::Create(vec![copy.into()]));
+        let new = match created {
+            Ok(applied) => applied.created.first().copied(),
+            Err(err) => {
+                log::error!("quick create failed: {err}");
+                None
+            }
+        };
+        let route = self.tools.connector_route();
+        if let Some(line) =
+            new.and_then(|new| pb_tools::quick::link(&self.document, id, new, side, route))
+            && let Err(err) = self.document.apply(Command::Create(vec![line.into()]))
+        {
+            log::error!("quick create failed: {err}");
+        }
+        self.document.end_undo_group();
+        self.tools.sync(&self.document);
+        let Some(new) = new else {
+            return;
+        };
+        // Keep the copy in view.
+        let viewport = self.viewport();
+        if !self.camera.visible_world_rect(viewport).contains_rect(area) {
+            self.camera.look_at(area.center(), zoom, viewport);
+        }
+        match TextEdit::existing(self.text.engine(), &self.document, new, None, zoom) {
+            Some(edit) => self.start_editing(edit),
+            None => self.tools.select_only([new]),
         }
     }
 
@@ -1578,6 +1636,12 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
         guides: tools.guides(document),
         eraser: tools.eraser(),
         text_edit: None,
+        quick_dots: if show_handles {
+            tools.quick_dots(document, zoom)
+        } else {
+            Vec::new()
+        },
+        quick_dot_radius: pb_tools::quick::DOT_RADIUS,
         lines,
         gaps,
         end_handles: end_handles.map(Vec::from).unwrap_or_default(),

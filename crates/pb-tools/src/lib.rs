@@ -11,6 +11,7 @@ mod handles;
 mod hit;
 mod ink;
 pub mod math;
+pub mod quick;
 mod selection;
 
 pub use arrange::{Align, Axis, align, distribute};
@@ -984,6 +985,40 @@ impl Tools {
     fn moving(&self, doc: &Document) -> Vec<ObjectId> {
         let ids = doc.with_frame_members(&self.unlocked(doc));
         ids.into_iter().filter(|&id| !doc.is_locked(id)).collect()
+    }
+
+    /// The object quick create works on: a single unlocked object selected with nothing
+    /// else going on.
+    fn quick_target(&self, doc: &Document) -> Option<ObjectId> {
+        match self.selection.ids() {
+            [id] if self.active == ToolKind::Select
+                && self.gesture.is_none()
+                && !doc.is_locked(*id) =>
+            {
+                Some(*id)
+            }
+            _ => None,
+        }
+    }
+
+    /// Quick create's "+" dots around the selection (world), if it has them.
+    pub fn quick_dots(&self, doc: &Document, zoom: f64) -> Vec<Point> {
+        self.quick_target(doc).map_or_else(Vec::new, |id| {
+            quick::dots(doc, id, zoom)
+                .into_iter()
+                .map(|(_, p)| p)
+                .collect()
+        })
+    }
+
+    /// The quick create dot under the pointer, with the object it belongs to.
+    pub fn quick_dot_at(
+        &self,
+        doc: &Document,
+        pointer: Pointer,
+    ) -> Option<(ObjectId, quick::Side)> {
+        let id = self.quick_target(doc)?;
+        quick::dot_at(doc, id, pointer.world, pointer.zoom).map(|side| (id, side))
     }
 
     /// Frames do not rotate, so neither does a selection with one.
