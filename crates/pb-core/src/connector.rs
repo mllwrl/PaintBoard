@@ -230,23 +230,24 @@ pub fn resolve<'a>(
     (start, end)
 }
 
-/// The drawable path of a connector object; elbow connectors go around `obstacles` (see
-/// [`obstacle`]).
+/// The drawable path of a connector object, with its resolved ends. Elbow connectors go
+/// around the obstacles (see [`obstacle`]) `obstacles_in` finds in an area; only elbow
+/// connectors ask.
 pub fn layout<'a>(
     c: &Connector,
     width: f64,
     lookup: impl Fn(ObjectId) -> Option<&'a ObjectData>,
-    obstacles: &[Rect],
-) -> ConnectorPath {
+    obstacles_in: impl FnOnce(Rect) -> Vec<Rect>,
+) -> (EndPoint, EndPoint, ConnectorPath) {
     let (start, end) = resolve(c, lookup);
-    geom::layout(
-        c.route,
-        start,
-        end,
-        (c.start_cap, c.end_cap),
-        width,
-        obstacles,
-    )
+    let obstacles = if c.route == Route::Elbow {
+        obstacles_in(geom::obstacle_area(start.point, end.point))
+    } else {
+        Vec::new()
+    };
+    let caps = (c.start_cap, c.end_cap);
+    let path = geom::layout(c.route, start, end, caps, width, &obstacles);
+    (start, end, path)
 }
 
 /// What elbow connectors go around for an object: its world bounds, for shapes, sticky

@@ -15,7 +15,7 @@ pub use vello;
 
 use std::collections::HashMap;
 
-use pb_core::{Assets, FrameData, Object, ObjectData, ObjectId, ObjectKind};
+use pb_core::{Assets, Document, FrameData, Object, ObjectData, ObjectId, ObjectKind};
 use pb_geom::Camera;
 use vello::Scene;
 use vello::kurbo::{Affine, Size};
@@ -54,8 +54,8 @@ pub struct View<'a> {
     pub scale: f64,
     pub grid: GridStyle,
     pub theme: &'a Theme,
-    /// Board objects in z-order, back to front.
-    pub objects: &'a [Object],
+    /// The board; what is drawn is looked up in it by area.
+    pub document: &'a Document,
     /// Files of the board's images.
     pub assets: &'a Assets,
     /// Objects mid-gesture (moved, resized) that replace their stored state.
@@ -65,6 +65,35 @@ pub struct View<'a> {
     /// Objects the active tool is about to create, shown on top.
     pub previews: &'a [ObjectData],
     pub overlay: &'a Overlay,
+}
+
+/// Ids of the objects that may show in `visible` at `zoom`, back to front: those the
+/// spatial index finds there (with room for frame titles and sticky shadows), the ones
+/// mid-gesture, and connectors attached to those (their stored path is out of date).
+fn shown_objects(
+    doc: &Document,
+    visible: vello::kurbo::Rect,
+    zoom: f64,
+    overrides: &HashMap<ObjectId, &ObjectData>,
+) -> Vec<ObjectId> {
+    let title = FrameData::title_band(vello::kurbo::Rect::ZERO, zoom).height();
+    let margin = title + visible.width().max(visible.height()) * 0.02;
+    let mut ids: Vec<ObjectId> = doc
+        .objects_in(visible.inflate(margin, margin))
+        .into_iter()
+        .map(|o| o.id)
+        .collect();
+    if !overrides.is_empty() {
+        ids.extend(overrides.keys().copied());
+        let follows = |end: &pb_core::End| end.object().is_some_and(|o| overrides.contains_key(&o));
+        ids.extend(doc.objects().iter().filter_map(|o| match &o.data.kind {
+            ObjectKind::Connector(c) if follows(&c.start) || follows(&c.end) => Some(o.id),
+            _ => None,
+        }));
+        ids.sort_by_key(|&id| doc.paint_order(id));
+        ids.dedup();
+    }
+    ids
 }
 
 /// Rebuilds `scene` for the given view.
@@ -86,33 +115,41 @@ pub fn build_scene(
 
     let transform = Affine::scale(view.scale) * view.camera.transform();
     let visible = view.camera.visible_world_rect(view.viewport);
-    // TODO: query an R-tree instead of scanning every object.
+    let zoom = view.camera.zoom();
+    let doc = view.document;
     let overrides: HashMap<_, _> = view.overrides.iter().map(|o| (o.id, &o.data)).collect();
-    // Objects as they are now, mid-gesture included, for connectors to follow.
-    let current: HashMap<_, _> = view
-        .objects
-        .iter()
-        .map(|o| (o.id, overrides.get(&o.id).copied().unwrap_or(&o.data)))
+    // Objects as they are now, mid-gesture included.
+    let current = |id: ObjectId| {
+        overrides
+            .get(&id)
+            .copied()
+            .or_else(|| doc.get(id).map(|o| &o.data))
+    };
+    let shown: Vec<&ObjectData> = shown_objects(doc, visible, zoom, &overrides)
+        .into_iter()
+        .filter(|id| !view.hidden.contains(id))
+        .filter_map(current)
         .collect();
-    let shown: Vec<_> = view
-        .objects
-        .iter()
-        .filter(|o| !view.hidden.contains(&o.id))
-        .map(|o| current[&o.id])
-        .collect();
+    // Obstacles for elbow connectors, where they are now.
+    let obstacles_in = |area: vello::kurbo::Rect| -> Vec<vello::kurbo::Rect> {
+        let stored = doc
+            .objects_in(area)
+            .into_iter()
+            .filter(|o| !overrides.contains_key(&o.id))
+            .map(|o| &o.data);
+        stored
+            .chain(overrides.values().copied())
+            .filter_map(pb_core::connector::obstacle)
+            .filter(|r| r.overlaps(area))
+            .collect()
+    };
     // Frames lie under everything else.
     let frames = shown.iter().filter(|d| d.kind.is_frame());
     let others = shown.iter().filter(|d| !d.kind.is_frame());
-    let zoom = view.camera.zoom();
-    let obstacles: Vec<_> = shown
-        .iter()
-        .filter_map(|d| pb_core::connector::obstacle(d))
-        .collect();
     for data in frames.chain(others).copied().chain(view.previews) {
         if let ObjectKind::Connector(c) = &data.kind {
             let width = data.style.stroke_width;
-            let lookup = |id| current.get(&id).copied();
-            let path = pb_core::connector::layout(c, width, lookup, &obstacles);
+            let (_, _, path) = pb_core::connector::layout(c, width, current, obstacles_in);
             let label = c.label.rect(&path).map(|r| (&c.label, r));
             let area = path.bounds().inflate(width, width);
             let area = label.map_or(area, |(_, r)| area.union(r));

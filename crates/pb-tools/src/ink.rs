@@ -2,7 +2,7 @@
 
 use pb_core::{Document, Ink, ObjectData, ObjectId, ObjectKind, Rgba, Style};
 use pb_geom::ink::simplify;
-use pb_geom::kurbo::Point;
+use pb_geom::kurbo::{Point, Rect};
 
 /// New points closer than this to the previous one are skipped, in logical pixels.
 pub(crate) const MIN_STEP: f64 = 1.0;
@@ -73,8 +73,9 @@ pub(crate) fn erased(doc: &Document, from: Point, to: Point, radius: f64) -> Vec
     let samples: Vec<_> = (0..=steps)
         .map(|i| from.lerp(to, i as f64 / steps as f64))
         .collect();
-    doc.objects()
-        .iter()
+    let swept = Rect::from_points(from, to).inflate(radius, radius);
+    doc.objects_in(swept)
+        .into_iter()
         .filter(|o| o.data.kind.is_ink() && !doc.is_locked(o.id))
         .filter(|o| {
             samples

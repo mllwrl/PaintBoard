@@ -1091,12 +1091,17 @@ impl Tools {
         if pointer.ctrl {
             return None;
         }
-        // TODO: query an R-tree for the visible objects.
-        let targets = doc
-            .roots()
-            .iter()
+        let mut units: Vec<ObjectId> = doc
+            .objects_in(pointer.visible)
+            .into_iter()
+            .map(|o| doc.top_level(o.id))
             .filter(|id| !exclude.contains(id))
-            .filter_map(|&id| unit_frame(doc, id, |o| o.data.frame()))
+            .collect();
+        units.sort_by_key(|&id| doc.paint_order(id));
+        units.dedup();
+        let targets = units
+            .into_iter()
+            .filter_map(|id| unit_frame(doc, id, |o| o.data.frame()))
             .map(|f| f.aabb())
             .filter(|r| r.overlaps(pointer.visible))
             .collect();

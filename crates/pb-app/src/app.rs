@@ -226,7 +226,7 @@ impl App {
                 scale,
                 grid: self.grid,
                 theme: &self.theme,
-                objects: self.document.objects(),
+                document: &self.document,
                 assets: self.document.assets(),
                 overrides: &overrides,
                 hidden: &hidden,

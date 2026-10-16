@@ -316,6 +316,13 @@ fn axis(v: Vec2) -> Vec2 {
 const ROUTE_REACH: f64 = 0.75;
 const ROUTE_REACH_MIN: f64 = 200.0;
 
+/// The area around a connector from `start` to `end` whose obstacles its route can avoid;
+/// obstacles elsewhere can be left out.
+pub fn obstacle_area(start: Point, end: Point) -> Rect {
+    let reach = ((end - start).hypot() * ROUTE_REACH).max(ROUTE_REACH_MIN) + ELBOW_MARGIN;
+    Rect::from_points(start, end).inflate(reach, reach)
+}
+
 /// [`elbow`], unless that runs through one of `obstacles`: then the shortest way around
 /// them with the fewest bends, if there is one.
 fn elbow_around(start: EndPoint, end: EndPoint, obstacles: &[Rect]) -> Vec<Point> {

@@ -2,13 +2,16 @@ use pb_core::{Document, FrameData, Object, ObjectData, ObjectId, ObjectKind};
 use pb_geom::ink::polyline_distance;
 use pb_geom::kurbo::{Point, Rect};
 
+/// `point` grown by `tolerance` on every side, to look objects up in.
+fn around(point: Point, tolerance: f64) -> Rect {
+    Rect::from_center_size(point, (2.0 * tolerance, 2.0 * tolerance))
+}
+
 /// Topmost top-level object or group under `point`. `tolerance` (world units) makes thin
 /// shapes easier to hit.
-///
-/// TODO: query an R-tree instead of scanning every object.
 pub fn object_at(doc: &Document, point: Point, tolerance: f64) -> Option<ObjectId> {
-    doc.objects()
-        .iter()
+    doc.objects_in(around(point, tolerance))
+        .into_iter()
         .rev()
         .find(|o| object_hits(doc, o, point, tolerance))
         .map(|o| doc.top_level(o.id))
@@ -17,8 +20,10 @@ pub fn object_at(doc: &Document, point: Point, tolerance: f64) -> Option<ObjectI
 /// The frame whose title is under `point` at `zoom`, topmost first. Frames are hit only
 /// there, so pressing inside one selects what is in it or starts a marquee.
 pub fn frame_title_at(doc: &Document, point: Point, zoom: f64) -> Option<ObjectId> {
-    doc.objects()
-        .iter()
+    // Titles sit above their frames: look below the point by a title's height.
+    let band = FrameData::title_band(Rect::ZERO, zoom).height();
+    doc.objects_in(Rect::new(point.x, point.y, point.x, point.y + band))
+        .into_iter()
         .rev()
         .filter(|o| o.data.kind.is_frame())
         .find(|o| FrameData::title_band(o.data.bounds, zoom).contains(point))
@@ -27,8 +32,8 @@ pub fn frame_title_at(doc: &Document, point: Point, zoom: f64) -> Option<ObjectI
 
 /// Topmost object (not group) under `point` that connectors can attach to.
 pub fn attachable_at(doc: &Document, point: Point, tolerance: f64) -> Option<&Object> {
-    doc.objects()
-        .iter()
+    doc.objects_in(around(point, tolerance))
+        .into_iter()
         .rev()
         .filter(|o| pb_core::connector::can_attach(&o.data.kind))
         .find(|o| hits(&o.data, point, tolerance))
@@ -139,7 +144,7 @@ pub(crate) fn hits(data: &ObjectData, point: Point, tolerance: f64) -> bool {
 /// Unlocked top-level objects and groups touched by `area`, in z-order.
 pub fn objects_in(doc: &Document, area: Rect) -> Vec<ObjectId> {
     let mut ids = Vec::new();
-    for object in doc.objects() {
+    for object in doc.objects_in(area) {
         let id = doc.top_level(object.id);
         let touched = match &object.data.kind {
             ObjectKind::Connector(_) => {

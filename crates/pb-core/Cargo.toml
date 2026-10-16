@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 kurbo.workspace = true
+rstar.workspace = true
 pb-geom.workspace = true
 loro.workspace = true
 blake3.workspace = true

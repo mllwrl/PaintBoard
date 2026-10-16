@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+
+use rstar::{AABB, RTree, RTreeObject};
 use std::fmt;
 use std::sync::Arc;
 
@@ -140,9 +142,39 @@ pub struct Document {
     revision: u64,
     /// Connectors' resolved ends and paths, by connector id; rebuilt with `objects`.
     connectors: HashMap<ObjectId, Resolved>,
+    /// Bounds of `objects` for finding those in an area; rebuilt with `objects`.
+    spatial: RTree<Placed>,
     /// Files used by images. They are not part of the CRDT and never removed while the board
     /// is open, so undoing the deletion of an image finds its file again.
     assets: Assets,
+}
+
+/// An object in the spatial index: its world bounds (outline included) and its place in
+/// paint order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Placed {
+    bounds: AABB<[f64; 2]>,
+    slot: usize,
+}
+
+impl RTreeObject for Placed {
+    type Envelope = AABB<[f64; 2]>;
+
+    fn envelope(&self) -> Self::Envelope {
+        self.bounds
+    }
+}
+
+fn envelope(r: Rect) -> AABB<[f64; 2]> {
+    AABB::from_corners([r.x0, r.y0], [r.x1, r.y1])
+}
+
+fn placed(slot: usize, data: &ObjectData) -> Placed {
+    let pad = data.style.stroke_width / 2.0;
+    Placed {
+        bounds: envelope(data.frame().aabb().inflate(pad, pad)),
+        slot,
+    }
 }
 
 /// Where a connector runs now.
@@ -201,6 +233,7 @@ impl Document {
             revision: 0,
             assets: Assets::default(),
             connectors: HashMap::new(),
+            spatial: RTree::new(),
         };
         document.refresh();
         document
@@ -769,29 +802,61 @@ impl Document {
         self.groups.clear();
         self.nodes.clear();
         self.roots = self.read_children(TreeParentId::Root, None);
+        // Everything but connectors first: connectors route around it.
+        let placed_objects = self
+            .objects
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| !matches!(o.data.kind, ObjectKind::Connector(_)))
+            .map(|(i, o)| placed(i, &o.data))
+            .collect();
+        self.spatial = RTree::bulk_load(placed_objects);
         self.resolve_connectors();
+        for (i, o) in self.objects.iter().enumerate() {
+            if matches!(o.data.kind, ObjectKind::Connector(_)) {
+                self.spatial.insert(placed(i, &o.data));
+            }
+        }
         self.revision += 1;
+    }
+
+    /// Where object `id` is in paint order (its index in [`Self::objects`]).
+    pub fn paint_order(&self, id: ObjectId) -> Option<usize> {
+        self.index.get(&id).copied()
+    }
+
+    /// Objects whose bounds (outline included) reach into `area`, back to front.
+    pub fn objects_in(&self, area: Rect) -> Vec<&Object> {
+        let mut slots: Vec<usize> = self
+            .spatial
+            .locate_in_envelope_intersecting(&envelope(area))
+            .map(|p| p.slot)
+            .collect();
+        slots.sort_unstable();
+        slots.into_iter().map(|i| &self.objects[i]).collect()
+    }
+
+    /// The bounds of the obstacles (see [`connector::obstacle`]) reaching into `area`.
+    fn obstacles_in(&self, area: Rect) -> Vec<Rect> {
+        self.objects_in(area)
+            .into_iter()
+            .filter_map(|o| connector::obstacle(&o.data))
+            .collect()
     }
 
     /// Works out where connectors run now, and gives them bounds to match.
     fn resolve_connectors(&mut self) {
         self.connectors.clear();
         let lookup = |id| self.get(id).map(|o| &o.data);
-        let obstacles: Vec<_> = self
-            .objects
-            .iter()
-            .filter_map(|o| connector::obstacle(&o.data))
-            .collect();
         let resolved: Vec<_> = self
             .objects
             .iter()
             .enumerate()
             .filter_map(|(i, o)| match &o.data.kind {
                 ObjectKind::Connector(c) => {
-                    let (s, e) = connector::resolve(c, lookup);
-                    let caps = (c.start_cap, c.end_cap);
                     let width = o.data.style.stroke_width;
-                    let path = pb_geom::connector::layout(c.route, s, e, caps, width, &obstacles);
+                    let (s, e, path) =
+                        connector::layout(c, width, lookup, |area| self.obstacles_in(area));
                     let label = c.label.rect(&path);
                     Some((i, o.id, s, e, path, label))
                 }
@@ -2072,6 +2137,69 @@ mod tests {
         assert!(doc.get(id).unwrap().data.kind.spans().is_empty());
         doc.undo().unwrap();
         assert_eq!(doc.get(id).unwrap().data.kind.spans(), &[span(0, 4)]);
+    }
+
+    #[test]
+    fn spatial_index_finds_objects_in_paint_order() {
+        let mut doc = Document::new();
+        let a = create(&mut doc, rect(0.0, 0.0, 10.0, 10.0));
+        let b = create(&mut doc, rect(5.0, 5.0, 10.0, 10.0));
+        let far = create(&mut doc, rect(1000.0, 1000.0, 10.0, 10.0));
+        let line = create(
+            &mut doc,
+            connector(
+                End::Free(Point::new(500.0, -50.0)),
+                End::Free(Point::new(500.0, 50.0)),
+            ),
+        );
+        let ids = |doc: &Document, r: Rect| -> Vec<ObjectId> {
+            doc.objects_in(r).into_iter().map(|o| o.id).collect()
+        };
+        assert_eq!(ids(&doc, Rect::new(6.0, 6.0, 7.0, 7.0)), vec![a, b]);
+        assert_eq!(ids(&doc, Rect::new(495.0, 0.0, 505.0, 1.0)), vec![line]);
+        assert!(ids(&doc, Rect::new(200.0, 200.0, 300.0, 300.0)).is_empty());
+        // It follows edits and undo.
+        doc.apply(Command::Move {
+            ids: vec![far],
+            delta: Vec2::new(-1000.0, -1000.0),
+        })
+        .unwrap();
+        assert_eq!(ids(&doc, Rect::new(6.0, 6.0, 7.0, 7.0)), vec![a, b, far]);
+        doc.undo().unwrap();
+        assert_eq!(ids(&doc, Rect::new(6.0, 6.0, 7.0, 7.0)), vec![a, b]);
+        // Bringing one forward changes the order.
+        doc.apply(Command::Reorder {
+            ids: vec![a],
+            to: ZOrder::Front,
+        })
+        .unwrap();
+        assert_eq!(ids(&doc, Rect::new(6.0, 6.0, 7.0, 7.0)), vec![b, a]);
+    }
+
+    #[test]
+    #[ignore = "timing, run by hand"]
+    fn big_board_timing() {
+        let mut doc = Document::new();
+        let items: Vec<Content> = (0..20_000)
+            .map(|i| rect((i % 200) as f64 * 30.0, (i / 200) as f64 * 30.0, 20.0, 20.0).into())
+            .collect();
+        let t = std::time::Instant::now();
+        doc.apply(Command::Create(items)).unwrap();
+        eprintln!("create 20k: {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        for i in 0..1000 {
+            let x = f64::from(i % 100) * 50.0;
+            assert!(!doc.objects_in(Rect::new(x, x, x + 1.0, x + 1.0)).is_empty() || x > 0.0);
+        }
+        eprintln!("1000 point queries: {:?}", t.elapsed());
+        let id = doc.objects()[0].id;
+        let t = std::time::Instant::now();
+        doc.apply(Command::Move {
+            ids: vec![id],
+            delta: Vec2::new(1.0, 1.0),
+        })
+        .unwrap();
+        eprintln!("one move: {:?}", t.elapsed());
     }
 
     #[test]
