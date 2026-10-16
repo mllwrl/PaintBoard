@@ -95,7 +95,7 @@ fn moves(deltas: impl Iterator<Item = (ObjectId, Vec2)>) -> Option<Command> {
 
 #[cfg(test)]
 mod tests {
-    use pb_core::{ObjectData, ObjectKind, Style};
+    use pb_core::{ObjectData, ShapeKind, Style};
 
     use super::*;
 
@@ -105,7 +105,7 @@ mod tests {
             .iter()
             .map(|&bounds| {
                 ObjectData {
-                    kind: ObjectKind::Rectangle,
+                    kind: ShapeKind::Rectangle.into(),
                     bounds,
                     rotation: 0.0,
                     style: Style::default(),

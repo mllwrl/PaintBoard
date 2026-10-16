@@ -10,9 +10,10 @@ pub fn object_at(doc: &Document, point: Point, tolerance: f64) -> Option<ObjectI
         .iter()
         .rev()
         .find(|o| match o.data.kind {
-            ObjectKind::Rectangle => {
+            ObjectKind::Shape(shape) => {
                 let pad = tolerance + o.data.style.stroke_width / 2.0;
-                o.data.frame().contains(point, pad)
+                let local = o.data.frame().to_local(point);
+                shape.hit(o.data.bounds, local, pad)
             }
         })
         .map(|o| doc.top_level(o.id))
@@ -32,7 +33,7 @@ pub fn objects_in(doc: &Document, area: Rect) -> Vec<ObjectId> {
 
 #[cfg(test)]
 mod tests {
-    use pb_core::{Command, ObjectData, Style};
+    use pb_core::{Command, ObjectData, ShapeKind, Style};
 
     use super::*;
 
@@ -42,7 +43,7 @@ mod tests {
             .iter()
             .map(|&bounds| {
                 let data = ObjectData {
-                    kind: ObjectKind::Rectangle,
+                    kind: ShapeKind::Rectangle.into(),
                     bounds,
                     rotation: 0.0,
                     style: Style::default(),
@@ -72,6 +73,24 @@ mod tests {
         // Default stroke is 2 wide, so the painted edge already reaches 11.
         assert_eq!(object_at(&doc, Point::new(13.0, 5.0), 0.0), None);
         assert_eq!(object_at(&doc, Point::new(13.0, 5.0), 3.0), Some(ids[0]));
+    }
+
+    #[test]
+    fn hits_follow_the_shape_outline() {
+        let mut doc = Document::new();
+        let data = ObjectData {
+            kind: ShapeKind::Ellipse.into(),
+            bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+            rotation: 0.0,
+            style: Style::default(),
+        };
+        let id = doc
+            .apply(Command::Create(vec![data.into()]))
+            .unwrap()
+            .created[0];
+        assert_eq!(object_at(&doc, Point::new(50.0, 50.0), 0.0), Some(id));
+        // The corner of the bounds is outside the circle.
+        assert_eq!(object_at(&doc, Point::new(5.0, 5.0), 0.0), None);
     }
 
     #[test]

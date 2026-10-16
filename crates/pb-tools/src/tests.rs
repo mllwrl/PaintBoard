@@ -27,7 +27,7 @@ fn doc_with(rects: &[Rect]) -> (Document, Vec<ObjectId>) {
         .iter()
         .map(|&bounds| {
             doc.apply(Command::Create(vec![
-                shape(ObjectKind::Rectangle, bounds).into(),
+                shape(ShapeKind::Rectangle.into(), bounds).into(),
             ]))
             .unwrap()
             .created[0]
@@ -63,7 +63,7 @@ fn created_bounds(cmd: Option<Command>) -> Rect {
 fn drag_creates_rectangle_and_returns_to_select() {
     let doc = Document::new();
     let mut tools = Tools::default();
-    tools.set_active(ToolKind::Rectangle);
+    tools.set_active(ToolKind::Shape(ShapeKind::Rectangle));
     tools.pointer_down(&doc, at(50.0, 50.0));
     tools.pointer_move(&doc, at(10.0, 80.0));
     assert_eq!(
@@ -80,7 +80,7 @@ fn drag_creates_rectangle_and_returns_to_select() {
 fn click_creates_default_size_centered() {
     let doc = Document::new();
     let mut tools = Tools::default();
-    tools.set_active(ToolKind::Rectangle);
+    tools.set_active(ToolKind::Shape(ShapeKind::Rectangle));
     let bounds = created_bounds(drag(&mut tools, &doc, at(0.0, 0.0), at(1.0, 1.0)));
     assert_eq!(bounds.center(), Point::ZERO);
     assert_eq!(bounds.width(), DEFAULT_SHAPE_SIZE);
@@ -90,7 +90,7 @@ fn click_creates_default_size_centered() {
 fn click_slop_is_measured_on_screen() {
     let doc = Document::new();
     let mut tools = Tools::default();
-    tools.set_active(ToolKind::Rectangle);
+    tools.set_active(ToolKind::Shape(ShapeKind::Rectangle));
     // 3 world units at 10x zoom are 30 screen pixels: a drag, not a click.
     let zoomed = |x, y| Pointer {
         zoom: 10.0,
@@ -104,7 +104,7 @@ fn click_slop_is_measured_on_screen() {
 fn shift_constrains_to_square() {
     let doc = Document::new();
     let mut tools = Tools::default();
-    tools.set_active(ToolKind::Rectangle);
+    tools.set_active(ToolKind::Shape(ShapeKind::Rectangle));
     let bounds = created_bounds(drag(&mut tools, &doc, at(0.0, 0.0), shift(at(-40.0, 10.0))));
     assert_eq!(bounds, Rect::new(-40.0, 0.0, 0.0, 40.0));
 }
@@ -113,11 +113,11 @@ fn shift_constrains_to_square() {
 fn cancel_drops_shape_gesture() {
     let doc = Document::new();
     let mut tools = Tools::default();
-    tools.set_active(ToolKind::Rectangle);
+    tools.set_active(ToolKind::Shape(ShapeKind::Rectangle));
     tools.pointer_down(&doc, at(0.0, 0.0));
     assert!(tools.cancel());
     assert!(tools.pointer_up(&doc, at(50.0, 50.0)).is_none());
-    assert_eq!(tools.active(), ToolKind::Rectangle);
+    assert_eq!(tools.active(), ToolKind::Shape(ShapeKind::Rectangle));
 }
 
 // Selection
@@ -354,7 +354,10 @@ fn rotating_group_orbits_children() {
 fn resizing_rotated_object_keeps_opposite_edge() {
     use std::f64::consts::FRAC_PI_2;
     let mut doc = Document::new();
-    let mut data = shape(ObjectKind::Rectangle, Rect::new(0.0, 0.0, 100.0, 20.0));
+    let mut data = shape(
+        ShapeKind::Rectangle.into(),
+        Rect::new(0.0, 0.0, 100.0, 20.0),
+    );
     data.rotation = FRAC_PI_2;
     let id = doc
         .apply(Command::Create(vec![data.into()]))
@@ -375,7 +378,10 @@ fn resizing_rotated_object_keeps_opposite_edge() {
 fn rotated_objects_hit_by_real_shape() {
     use std::f64::consts::FRAC_PI_2;
     let mut doc = Document::new();
-    let mut data = shape(ObjectKind::Rectangle, Rect::new(0.0, 0.0, 100.0, 20.0));
+    let mut data = shape(
+        ShapeKind::Rectangle.into(),
+        Rect::new(0.0, 0.0, 100.0, 20.0),
+    );
     data.rotation = FRAC_PI_2;
     doc.apply(Command::Create(vec![data.into()])).unwrap();
     let mut tools = Tools::default();
@@ -639,7 +645,7 @@ fn resize_snaps_dragged_edge() {
 fn shape_corners_snap() {
     let (doc, _) = doc_with(&[Rect::new(0.0, 0.0, 100.0, 100.0)]);
     let mut tools = Tools::default();
-    tools.set_active(ToolKind::Rectangle);
+    tools.set_active(ToolKind::Shape(ShapeKind::Rectangle));
     let bounds = created_bounds(drag(&mut tools, &doc, at(103.0, -2.0), at(197.0, 52.0)));
     assert_eq!(bounds, Rect::new(100.0, 0.0, 197.0, 50.0));
 }
@@ -652,4 +658,27 @@ fn alt_drag_copies_snap_to_the_original() {
     let bounds = created_bounds(tools.pointer_up(&doc, alt(at(153.0, 52.0))));
     // Left edge 103 snaps to the original's right edge, top 2 to its top.
     assert_eq!(bounds, Rect::new(100.0, 0.0, 200.0, 100.0));
+}
+
+// Shape kinds
+
+#[test]
+fn shape_tool_draws_the_chosen_kind_and_cycles() {
+    let doc = Document::new();
+    let mut tools = Tools::default();
+    tools.cycle_shape();
+    assert_eq!(tools.active(), ToolKind::Shape(ShapeKind::Rectangle));
+    tools.cycle_shape();
+    assert_eq!(tools.active(), ToolKind::Shape(ShapeKind::RoundedRectangle));
+    tools.set_active(ToolKind::Shape(ShapeKind::Star));
+    let cmd = drag(&mut tools, &doc, at(0.0, 0.0), at(50.0, 50.0));
+    match cmd {
+        Some(Command::Create(items)) => {
+            assert!(matches!(&items[..], [Content::Object(d)] if d.kind == ShapeKind::Star.into()));
+        }
+        other => panic!("expected Create, got {other:?}"),
+    }
+    // Back to Select after drawing; the shape tool remembers the star.
+    tools.cycle_shape();
+    assert_eq!(tools.active(), ToolKind::Shape(ShapeKind::Star));
 }

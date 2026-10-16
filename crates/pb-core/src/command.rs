@@ -1,7 +1,7 @@
 use kurbo::Vec2;
 use pb_geom::Frame;
 
-use crate::{Content, ObjectId};
+use crate::{Content, ObjectId, StyleChange};
 
 /// A user-level edit. Each applied command is one undo step and, later, one unit of sync.
 ///
@@ -30,6 +30,11 @@ pub enum Command {
     Group(Vec<ObjectId>),
     /// Dissolves groups; their children take the group's place. Other ids are ignored.
     Ungroup(Vec<ObjectId>),
+    /// Changes colors, outline or opacity; a group restyles everything inside it.
+    SetStyle {
+        ids: Vec<ObjectId>,
+        change: StyleChange,
+    },
     /// Locked objects cannot be moved, resized or deleted from the canvas.
     SetLocked {
         ids: Vec<ObjectId>,

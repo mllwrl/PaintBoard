@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use pb_core::{Command, Document, Object, ZOrder};
+use pb_core::{Command, Document, Object, ShapeKind, ZOrder};
 use pb_geom::Camera;
 use pb_geom::kurbo::{Point, Size, Vec2};
 use pb_render::vello::Scene;
@@ -273,7 +273,9 @@ impl App {
             KeyCode::KeyZ if ctrl => self.undo(),
             KeyCode::KeyY if ctrl => self.redo(),
             KeyCode::KeyV if !ctrl => self.tools.set_active(ToolKind::Select),
-            KeyCode::KeyR if !ctrl => self.tools.set_active(ToolKind::Rectangle),
+            KeyCode::KeyR if !ctrl => self.tools.set_active(ToolKind::Shape(ShapeKind::Rectangle)),
+            KeyCode::KeyO if !ctrl => self.tools.set_active(ToolKind::Shape(ShapeKind::Ellipse)),
+            KeyCode::KeyS if !ctrl => self.tools.cycle_shape(),
             KeyCode::KeyA if ctrl => self.tools.select_all(&self.document),
             KeyCode::KeyC if ctrl => {
                 self.clipboard.copy(&self.document, self.tools.selection());

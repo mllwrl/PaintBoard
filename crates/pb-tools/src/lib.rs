@@ -14,7 +14,9 @@ pub use clipboard::{Clipboard, duplicate};
 pub use handles::{Handle, rotation_knob};
 pub use selection::{Selection, selection_frame, unit_frame};
 
-use pb_core::{Command, Content, Document, Object, ObjectData, ObjectId, ObjectKind, Style};
+use pb_core::{
+    Command, Content, Document, Object, ObjectData, ObjectId, ObjectKind, ShapeKind, Style,
+};
 use pb_geom::kurbo::{Line, Point, Rect, Vec2};
 use pb_geom::{Frame, GridLevel, Snapper, xs_of, ys_of};
 
@@ -35,14 +37,14 @@ const ROTATION_SNAP: f64 = std::f64::consts::PI / 12.0;
 pub enum ToolKind {
     #[default]
     Select,
-    Rectangle,
+    Shape(ShapeKind),
 }
 
 impl ToolKind {
     pub fn name(self) -> &'static str {
         match self {
             Self::Select => "Select",
-            Self::Rectangle => "Rectangle",
+            Self::Shape(shape) => shape.name(),
         }
     }
 }
@@ -129,7 +131,6 @@ enum Gesture {
     },
 }
 
-#[derive(Default)]
 pub struct Tools {
     active: ToolKind,
     selection: Selection,
@@ -139,6 +140,23 @@ pub struct Tools {
     /// Rotation of the frame owning `hover_grip`, to orient its resize cursor.
     hover_rotation: f64,
     snap_to_grid: bool,
+    /// Shape the shape tool starts with.
+    last_shape: ShapeKind,
+}
+
+impl Default for Tools {
+    fn default() -> Self {
+        Self {
+            active: ToolKind::default(),
+            selection: Selection::default(),
+            gesture: None,
+            hover: None,
+            hover_grip: None,
+            hover_rotation: 0.0,
+            snap_to_grid: false,
+            last_shape: ShapeKind::Rectangle,
+        }
+    }
 }
 
 impl Tools {
@@ -147,10 +165,22 @@ impl Tools {
     }
 
     pub fn set_active(&mut self, tool: ToolKind) {
+        if let ToolKind::Shape(shape) = tool {
+            self.last_shape = shape;
+        }
         self.active = tool;
         self.gesture = None;
         self.hover = None;
         self.hover_grip = None;
+    }
+
+    /// Picks the shape tool: the next kind if it is already active, else the last one used.
+    pub fn cycle_shape(&mut self) {
+        let shape = match self.active {
+            ToolKind::Shape(shape) => shape.next(),
+            ToolKind::Select => self.last_shape,
+        };
+        self.set_active(ToolKind::Shape(shape));
     }
 
     pub fn snap_to_grid(&self) -> bool {
@@ -243,9 +273,9 @@ impl Tools {
     /// Returns true if the view needs a redraw.
     pub fn pointer_down(&mut self, doc: &Document, pointer: Pointer) -> bool {
         let p = pointer.world;
-        if let ToolKind::Rectangle = self.active {
+        if let ToolKind::Shape(shape) = self.active {
             self.gesture = Some(Gesture::Shape {
-                kind: ObjectKind::Rectangle,
+                kind: shape.into(),
                 start: p,
                 anchor: self.snap_point(doc, pointer).0,
                 current: pointer,

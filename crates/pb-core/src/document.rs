@@ -6,11 +6,14 @@ use loro::{
     ExportMode, LoroDoc, LoroError, LoroMap, LoroTree, LoroValue, TreeID, TreeParentId,
     UndoManager, ValueOrContainer,
 };
+#[cfg(test)]
+use pb_geom::ShapeKind;
 use pb_geom::normalize_angle;
 
 use crate::command::reorder;
 use crate::{
-    Applied, Command, Content, Group, Object, ObjectData, ObjectId, ObjectKind, Rgba, Style, ZOrder,
+    Applied, Command, Content, Group, Object, ObjectData, ObjectId, ObjectKind, Rgba, Style,
+    StyleChange, ZOrder,
 };
 
 /// Bump when the stored layout changes incompatibly, and add a migration.
@@ -32,6 +35,7 @@ mod key {
     pub const FILL: &str = "fill";
     pub const STROKE: &str = "stroke";
     pub const STROKE_WIDTH: &str = "strokeWidth";
+    pub const OPACITY: &str = "opacity";
     pub const LOCKED: &str = "locked";
 
     /// `kind` of group nodes.
@@ -309,6 +313,18 @@ impl Document {
                     self.tree.delete(node)?;
                 }
             }
+            Command::SetStyle { ids, change } => {
+                self.check_exist(&ids)?;
+                let mut done = HashSet::new();
+                for &id in &ids {
+                    for object in self.leaves(id) {
+                        if done.insert(object.id) {
+                            let meta = self.tree.get_meta(self.nodes[&object.id])?;
+                            write_style_change(&meta, &change, object.data.style)?;
+                        }
+                    }
+                }
+            }
             Command::SetLocked { ids, locked } => {
                 self.check_exist(&ids)?;
                 for id in ids {
@@ -547,9 +563,31 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
     meta.insert(key::KIND, data.kind.as_str())?;
     write_bounds(meta, data.bounds.abs())?;
     meta.insert(key::ROTATION, normalize_angle(data.rotation))?;
-    meta.insert(key::FILL, i64::from(data.style.fill.0))?;
-    meta.insert(key::STROKE, i64::from(data.style.stroke.0))?;
-    meta.insert(key::STROKE_WIDTH, data.style.stroke_width)?;
+    let style = data.style;
+    let all = StyleChange {
+        fill: Some(style.fill),
+        stroke: Some(style.stroke),
+        stroke_width: Some(style.stroke_width),
+        opacity: Some(style.opacity),
+    };
+    write_style_change(meta, &all, style)
+}
+
+/// Writes only the properties the change sets, each under its own key.
+fn write_style_change(meta: &LoroMap, change: &StyleChange, current: Style) -> Result<()> {
+    let style = change.apply_to(current);
+    if change.fill.is_some() {
+        meta.insert(key::FILL, i64::from(style.fill.0))?;
+    }
+    if change.stroke.is_some() {
+        meta.insert(key::STROKE, i64::from(style.stroke.0))?;
+    }
+    if change.stroke_width.is_some() {
+        meta.insert(key::STROKE_WIDTH, style.stroke_width)?;
+    }
+    if change.opacity.is_some() {
+        meta.insert(key::OPACITY, style.opacity)?;
+    }
     Ok(())
 }
 
@@ -583,6 +621,7 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
             fill: color(key::FILL).unwrap_or(defaults.fill),
             stroke: color(key::STROKE).unwrap_or(defaults.stroke),
             stroke_width: num(key::STROKE_WIDTH).unwrap_or(defaults.stroke_width),
+            opacity: num(key::OPACITY).unwrap_or(defaults.opacity),
         },
     })
 }
@@ -595,7 +634,7 @@ mod tests {
 
     fn rect(x: f64, y: f64, w: f64, h: f64) -> ObjectData {
         ObjectData {
-            kind: ObjectKind::Rectangle,
+            kind: ShapeKind::Rectangle.into(),
             bounds: Rect::new(x, y, x + w, y + h),
             rotation: 0.0,
             style: Style::default(),
@@ -994,6 +1033,79 @@ mod tests {
         assert_eq!(copied.children.len(), 2);
         assert!(doc.group(copied.children[0]).is_some());
         assert_eq!(doc.objects().len(), 7);
+    }
+
+    // Shapes and styles
+
+    #[test]
+    fn every_shape_kind_roundtrips() {
+        let mut doc = Document::new();
+        for shape in ShapeKind::ALL {
+            let mut data = rect(0.0, 0.0, 10.0, 10.0);
+            data.kind = shape.into();
+            let id = create(&mut doc, data);
+            assert_eq!(doc.get(id).unwrap().data.kind, ObjectKind::Shape(shape));
+        }
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(loaded.objects(), doc.objects());
+    }
+
+    #[test]
+    fn set_style_changes_only_given_properties() {
+        let mut doc = Document::new();
+        let [a, b, c, _] = four(&mut doc);
+        let g = group(&mut doc, &[a, b]);
+        let red = Rgba::rgb(0xFF, 0, 0);
+        doc.apply(Command::SetStyle {
+            ids: vec![g, c],
+            change: StyleChange {
+                fill: Some(red),
+                opacity: Some(7.0),
+                ..StyleChange::default()
+            },
+        })
+        .unwrap();
+        for id in [a, b, c] {
+            let style = doc.get(id).unwrap().data.style;
+            assert_eq!(style.fill, red);
+            assert_eq!(style.opacity, 1.0);
+            assert_eq!(style.stroke, Style::default().stroke);
+        }
+        doc.undo().unwrap();
+        assert_eq!(doc.get(a).unwrap().data.style, Style::default());
+    }
+
+    #[test]
+    fn concurrent_style_edits_of_different_properties_merge() {
+        let mut doc = Document::new();
+        let a = create(&mut doc, rect(0.0, 0.0, 10.0, 10.0));
+        let mut other = Document::from_snapshot(&doc.snapshot()).unwrap();
+        let red = Rgba::rgb(0xFF, 0, 0);
+        let set = |doc: &mut Document, change| {
+            doc.apply(Command::SetStyle {
+                ids: vec![a],
+                change,
+            })
+            .unwrap();
+        };
+        set(
+            &mut doc,
+            StyleChange {
+                fill: Some(red),
+                ..StyleChange::default()
+            },
+        );
+        set(
+            &mut other,
+            StyleChange {
+                opacity: Some(0.5),
+                ..StyleChange::default()
+            },
+        );
+        doc.doc.import(&other.snapshot()).unwrap();
+        doc.refresh();
+        let style = doc.get(a).unwrap().data.style;
+        assert_eq!((style.fill, style.opacity), (red, 0.5));
     }
 
     #[test]

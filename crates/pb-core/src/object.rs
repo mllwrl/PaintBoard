@@ -2,7 +2,7 @@ use std::fmt;
 
 use kurbo::{Rect, Vec2};
 use loro::TreeID;
-use pb_geom::Frame;
+use pb_geom::{Frame, ShapeKind};
 
 /// Stable identifier of a board object, unique across replicas.
 ///
@@ -47,22 +47,38 @@ impl fmt::Display for ObjectId {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObjectKind {
-    Rectangle,
+    Shape(ShapeKind),
 }
 
 impl ObjectKind {
     /// Name stored in the document. Never change existing names: old files depend on them.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            Self::Rectangle => "rect",
+            Self::Shape(shape) => match shape {
+                ShapeKind::Rectangle => "rect",
+                ShapeKind::RoundedRectangle => "roundRect",
+                ShapeKind::Ellipse => "ellipse",
+                ShapeKind::Diamond => "diamond",
+                ShapeKind::Triangle => "triangle",
+                ShapeKind::Star => "star",
+                ShapeKind::Arrow => "arrow",
+                ShapeKind::DoubleArrow => "doubleArrow",
+                ShapeKind::Cloud => "cloud",
+            },
         }
     }
 
     pub(crate) fn parse(s: &str) -> Option<Self> {
-        match s {
-            "rect" => Some(Self::Rectangle),
-            _ => None,
-        }
+        ShapeKind::ALL
+            .into_iter()
+            .map(Self::Shape)
+            .find(|kind| kind.as_str() == s)
+    }
+}
+
+impl From<ShapeKind> for ObjectKind {
+    fn from(shape: ShapeKind) -> Self {
+        Self::Shape(shape)
     }
 }
 
@@ -84,8 +100,10 @@ impl Rgba {
 pub struct Style {
     pub fill: Rgba,
     pub stroke: Rgba,
-    /// In world units, so it scales with zoom.
+    /// In world units, so it scales with zoom. Zero means no outline.
     pub stroke_width: f64,
+    /// Opacity of the whole object in `[0, 1]`, applied on top of the colors' own alpha.
+    pub opacity: f64,
 }
 
 impl Default for Style {
@@ -94,6 +112,29 @@ impl Default for Style {
             fill: Rgba::rgb(0xFF, 0xFF, 0xFF),
             stroke: Rgba::rgb(0x1F, 0x29, 0x37),
             stroke_width: 2.0,
+            opacity: 1.0,
+        }
+    }
+}
+
+/// A partial style edit: only the set fields change, so concurrent edits of different
+/// properties all survive a merge.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StyleChange {
+    pub fill: Option<Rgba>,
+    pub stroke: Option<Rgba>,
+    pub stroke_width: Option<f64>,
+    pub opacity: Option<f64>,
+}
+
+impl StyleChange {
+    /// `style` with this change applied, values clamped to their valid ranges.
+    pub fn apply_to(&self, style: Style) -> Style {
+        Style {
+            fill: self.fill.unwrap_or(style.fill),
+            stroke: self.stroke.unwrap_or(style.stroke),
+            stroke_width: self.stroke_width.unwrap_or(style.stroke_width).max(0.0),
+            opacity: self.opacity.unwrap_or(style.opacity).clamp(0.0, 1.0),
         }
     }
 }

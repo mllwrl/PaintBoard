@@ -81,14 +81,14 @@ pub(crate) fn offset(items: &[Content], delta: Vec2) -> Vec<Content> {
 
 #[cfg(test)]
 mod tests {
-    use pb_core::{ObjectData, ObjectKind, Style};
+    use pb_core::{ObjectData, ShapeKind, Style};
     use pb_geom::kurbo::Rect;
 
     use super::*;
 
     fn rect(x: f64) -> Content {
         ObjectData {
-            kind: ObjectKind::Rectangle,
+            kind: ShapeKind::Rectangle.into(),
             bounds: Rect::new(x, 0.0, x + 10.0, 10.0),
             rotation: 0.0,
             style: Style::default(),
