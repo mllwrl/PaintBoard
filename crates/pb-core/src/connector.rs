@@ -230,14 +230,35 @@ pub fn resolve<'a>(
     (start, end)
 }
 
-/// The drawable path of a connector object.
+/// The drawable path of a connector object; elbow connectors go around `obstacles` (see
+/// [`obstacle`]).
 pub fn layout<'a>(
     c: &Connector,
     width: f64,
     lookup: impl Fn(ObjectId) -> Option<&'a ObjectData>,
+    obstacles: &[Rect],
 ) -> ConnectorPath {
     let (start, end) = resolve(c, lookup);
-    geom::layout(c.route, start, end, (c.start_cap, c.end_cap), width)
+    geom::layout(
+        c.route,
+        start,
+        end,
+        (c.start_cap, c.end_cap),
+        width,
+        obstacles,
+    )
+}
+
+/// What elbow connectors go around for an object: its world bounds, for shapes, sticky
+/// notes, text and images. Ink, connectors and frames are crossed.
+pub fn obstacle(data: &ObjectData) -> Option<Rect> {
+    match data.kind {
+        ObjectKind::Shape(_)
+        | ObjectKind::Sticky(_)
+        | ObjectKind::Text(_)
+        | ObjectKind::Image(_) => Some(data.frame().aabb()),
+        ObjectKind::Ink(_) | ObjectKind::Connector(_) | ObjectKind::Frame(_) => None,
+    }
 }
 
 #[cfg(test)]

@@ -1,7 +1,9 @@
 //! Connector geometry: where a connector meets an object's outline, and the path between
 //! its two ends.
 //!
-//! TODO: route elbow connectors around other objects (A* on a sparse grid).
+//! Elbow connectors go around other objects, see [`crate::route`].
+
+use crate::route;
 
 use kurbo::{
     BezPath, Line, ParamCurve, ParamCurveArclen, ParamCurveNearest, PathSeg, Point, Rect, Shape,
@@ -173,17 +175,18 @@ impl ConnectorPath {
 }
 
 /// The path of a connector between `start` and `end`, with arrowheads per `caps` sized for
-/// a line `width` wide.
+/// a line `width` wide. Elbow connectors go around `obstacles` (world bounds of objects).
 pub fn layout(
     route: Route,
     start: EndPoint,
     end: EndPoint,
     caps: (Cap, Cap),
     width: f64,
+    obstacles: &[Rect],
 ) -> ConnectorPath {
     let mut raw = match route {
         Route::Straight => Raw::Poly(vec![start.point, end.point]),
-        Route::Elbow => Raw::Poly(elbow(start, end)),
+        Route::Elbow => Raw::Poly(elbow_around(start, end, obstacles)),
         Route::Curved => curve(start, end),
     };
     let length = (width * ARROW_LENGTH).max(ARROW_MIN);
@@ -305,6 +308,56 @@ fn axis(v: Vec2) -> Vec2 {
         Vec2::new(if v.x < 0.0 { -1.0 } else { 1.0 }, 0.0)
     } else {
         Vec2::new(0.0, if v.y < 0.0 { -1.0 } else { 1.0 })
+    }
+}
+
+/// How far around a connector obstacles matter, relative to the distance between its ends,
+/// and at least.
+const ROUTE_REACH: f64 = 0.75;
+const ROUTE_REACH_MIN: f64 = 200.0;
+
+/// [`elbow`], unless that runs through one of `obstacles`: then the shortest way around
+/// them with the fewest bends, if there is one.
+fn elbow_around(start: EndPoint, end: EndPoint, obstacles: &[Rect]) -> Vec<Point> {
+    let plain = elbow(start, end);
+    let (s, e) = (start.point, end.point);
+    // The objects the ends are on: a non-rectangular outline lies inside its bounds, so
+    // the stubs always cross them.
+    let own = |r: &Rect| {
+        let r = r.inflate(1e-6, 1e-6);
+        r.contains(s) || r.contains(e)
+    };
+    let others: Vec<Rect> = obstacles.iter().copied().filter(|r| !own(r)).collect();
+    if !route::blocked(&plain, &others, 0.0) {
+        return plain;
+    }
+    let stub = |p: Point, normal: Option<Vec2>| match normal {
+        Some(n) => (p + axis(n) * ELBOW_MARGIN, axis(n)),
+        None => (p, Vec2::ZERO),
+    };
+    let (a, out) = stub(s, start.normal);
+    let (b, back) = stub(e, end.normal);
+    let reach = ((b - a).hypot() * ROUTE_REACH).max(ROUTE_REACH_MIN);
+    let area = Rect::from_points(a, b).inflate(reach, reach);
+    let clear = route::CLEARANCE;
+    // Obstacles the stubs end in (a free end dropped on an object) are not avoided.
+    let near: Vec<Rect> = obstacles
+        .iter()
+        .copied()
+        .filter(|r| r.overlaps(area))
+        .filter(|r| {
+            let wall = r.inflate(clear, clear);
+            !wall.contains(a) && !wall.contains(b)
+        })
+        .collect();
+    match route::route(a, out, b, -back, &near) {
+        Some(middle) => {
+            let mut points = vec![s];
+            points.extend(middle);
+            points.push(e);
+            simplify(points)
+        }
+        None => plain,
     }
 }
 
@@ -469,6 +522,7 @@ mod tests {
             EndPoint::free(Point::new(100.0, 0.0)),
             (Cap::None, Cap::Arrow),
             2.0,
+            &[],
         );
         let line = points(&path.line);
         assert_eq!(line[0], Point::ZERO);
@@ -486,6 +540,7 @@ mod tests {
             on(Point::new(200.0, 100.0), Vec2::new(-1.0, 0.0)),
             (Cap::None, Cap::None),
             2.0,
+            &[],
         );
         let line = points(&path.line);
         assert_eq!(
@@ -497,6 +552,34 @@ mod tests {
                 Point::new(200.0, 100.0),
             ]
         );
+    }
+
+    #[test]
+    fn elbow_goes_around_what_is_in_the_way() {
+        let from = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let middle = Rect::new(250.0, 0.0, 350.0, 100.0);
+        let to = Rect::new(500.0, 0.0, 600.0, 100.0);
+        let start = on(Point::new(100.0, 50.0), Vec2::new(1.0, 0.0));
+        let end = on(Point::new(500.0, 50.0), Vec2::new(-1.0, 0.0));
+        let all = [from, middle, to];
+        let path = layout(Route::Elbow, start, end, (Cap::None, Cap::None), 2.0, &all);
+        let line = points(&path.line);
+        assert_eq!(line.first(), Some(&start.point));
+        assert_eq!(line.last(), Some(&end.point));
+        assert!(!route::blocked(&line, &[middle], 0.0), "{line:?}");
+        for w in line.windows(2) {
+            assert!(w[0].x == w[1].x || w[0].y == w[1].y, "{line:?}");
+        }
+        // With nothing in the way, the usual straight line.
+        let free = layout(
+            Route::Elbow,
+            start,
+            end,
+            (Cap::None, Cap::None),
+            2.0,
+            &[from, to],
+        );
+        assert_eq!(points(&free.line).len(), 2);
     }
 
     #[test]
@@ -516,6 +599,7 @@ mod tests {
                         on(end, ne),
                         (Cap::None, Cap::None),
                         2.0,
+                        &[],
                     );
                     let line = points(&path.line);
                     assert_eq!(line[0], Point::ZERO);
@@ -537,6 +621,7 @@ mod tests {
             on(Point::new(100.0, 0.0), Vec2::new(0.0, 1.0)),
             (Cap::None, Cap::None),
             2.0,
+            &[],
         );
         // Both ends point down, so the curve dips below them.
         assert!(path.line.bounding_box().y1 > 20.0);
@@ -552,6 +637,7 @@ mod tests {
             on(Point::new(100.0, 100.0), Vec2::new(0.0, -1.0)),
             (Cap::None, Cap::None),
             2.0,
+            &[],
         );
         assert!((path.point_at(0.5) - Point::new(100.0, 0.0)).hypot() < 1e-6);
         assert!((path.point_at(0.75) - Point::new(100.0, 50.0)).hypot() < 1e-6);
@@ -564,6 +650,7 @@ mod tests {
             on(Point::new(100.0, 0.0), Vec2::new(0.0, 1.0)),
             (Cap::None, Cap::None),
             2.0,
+            &[],
         );
         // Symmetric, so its middle is on the axis.
         assert!((curve.point_at(0.5).x - 50.0).abs() < 1e-3);
@@ -579,6 +666,7 @@ mod tests {
             EndPoint::free(Point::new(100.0, 5.0)),
             (Cap::None, Cap::None),
             2.0,
+            &[],
         );
         assert!(touches(&path, Rect::new(-10.0, 0.0, 10.0, 10.0)));
         assert!(!touches(&path, Rect::new(-10.0, 20.0, 10.0, 30.0)));

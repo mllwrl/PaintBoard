@@ -104,10 +104,15 @@ pub fn build_scene(
     let frames = shown.iter().filter(|d| d.kind.is_frame());
     let others = shown.iter().filter(|d| !d.kind.is_frame());
     let zoom = view.camera.zoom();
+    let obstacles: Vec<_> = shown
+        .iter()
+        .filter_map(|d| pb_core::connector::obstacle(d))
+        .collect();
     for data in frames.chain(others).copied().chain(view.previews) {
         if let ObjectKind::Connector(c) = &data.kind {
             let width = data.style.stroke_width;
-            let path = pb_core::connector::layout(c, width, |id| current.get(&id).copied());
+            let lookup = |id| current.get(&id).copied();
+            let path = pb_core::connector::layout(c, width, lookup, &obstacles);
             let label = c.label.rect(&path).map(|r| (&c.label, r));
             let area = path.bounds().inflate(width, width);
             let area = label.map_or(area, |(_, r)| area.union(r));

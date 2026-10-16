@@ -777,6 +777,11 @@ impl Document {
     fn resolve_connectors(&mut self) {
         self.connectors.clear();
         let lookup = |id| self.get(id).map(|o| &o.data);
+        let obstacles: Vec<_> = self
+            .objects
+            .iter()
+            .filter_map(|o| connector::obstacle(&o.data))
+            .collect();
         let resolved: Vec<_> = self
             .objects
             .iter()
@@ -786,7 +791,7 @@ impl Document {
                     let (s, e) = connector::resolve(c, lookup);
                     let caps = (c.start_cap, c.end_cap);
                     let width = o.data.style.stroke_width;
-                    let path = pb_geom::connector::layout(c.route, s, e, caps, width);
+                    let path = pb_geom::connector::layout(c.route, s, e, caps, width, &obstacles);
                     let label = c.label.rect(&path);
                     Some((i, o.id, s, e, path, label))
                 }

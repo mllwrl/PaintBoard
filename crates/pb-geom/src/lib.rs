@@ -5,6 +5,7 @@ pub mod connector;
 mod frame;
 mod grid;
 pub mod ink;
+pub mod route;
 mod shape;
 mod snap;
 
