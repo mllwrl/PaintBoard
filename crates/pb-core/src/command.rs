@@ -39,6 +39,13 @@ pub enum Command {
         text: Arc<str>,
         bounds: Rect,
     },
+    /// Shows another part of an image's picture (see `Image::crop`) over new bounds.
+    /// Takes an image only.
+    SetCrop {
+        id: ObjectId,
+        crop: Rect,
+        bounds: Rect,
+    },
     /// Changes colors, outline or opacity; a group restyles everything inside it.
     SetStyle {
         ids: Vec<ObjectId>,

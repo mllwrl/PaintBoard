@@ -377,6 +377,17 @@ impl Document {
                 meta.insert(key::TEXT, &*text)?;
                 write_bounds(&meta, bounds.abs())?;
             }
+            Command::SetCrop { id, crop, bounds } => {
+                if !matches!(
+                    self.get(id).map(|o| &o.data.kind),
+                    Some(ObjectKind::Image(_))
+                ) {
+                    return Err(Error::UnknownObject(id));
+                }
+                let meta = self.tree.get_meta(self.nodes[&id])?;
+                write_crop(&meta, crop)?;
+                write_bounds(&meta, bounds.abs())?;
+            }
             Command::SetLocked { ids, locked } => {
                 self.check_exist(&ids)?;
                 for id in ids {
@@ -635,11 +646,7 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
         ObjectKind::Sticky(sticky) => meta.insert(key::TEXT, &*sticky.text)?,
         ObjectKind::Image(image) => {
             meta.insert(key::ASSET, image.asset.to_string())?;
-            let c = image.crop;
-            meta.insert(key::CROP_X0, c.x0)?;
-            meta.insert(key::CROP_Y0, c.y0)?;
-            meta.insert(key::CROP_X1, c.x1)?;
-            meta.insert(key::CROP_Y1, c.y1)?;
+            write_crop(meta, image.crop)?;
         }
         ObjectKind::Shape(_) => {}
     }
@@ -670,6 +677,15 @@ fn write_style_change(meta: &LoroMap, change: &StyleChange, current: Style) -> R
     if change.opacity.is_some() {
         meta.insert(key::OPACITY, style.opacity)?;
     }
+    Ok(())
+}
+
+fn write_crop(meta: &LoroMap, crop: Rect) -> Result<()> {
+    let c = crop.abs();
+    meta.insert(key::CROP_X0, c.x0)?;
+    meta.insert(key::CROP_Y0, c.y0)?;
+    meta.insert(key::CROP_X1, c.x1)?;
+    meta.insert(key::CROP_Y1, c.y1)?;
     Ok(())
 }
 
@@ -1345,6 +1361,21 @@ mod tests {
         assert_eq!(doc.used_assets(), vec![asset]);
         let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
         assert_eq!(loaded.get(id).unwrap().data, data);
+        let crop = Rect::new(0.5, 0.5, 1.0, 1.0);
+        let bounds = Rect::new(5.0, 5.0, 25.0, 20.0);
+        doc.apply(Command::SetCrop { id, crop, bounds }).unwrap();
+        let stored = &doc.get(id).unwrap().data;
+        assert_eq!(stored.kind, ObjectKind::Image(Image { asset, crop }));
+        assert_eq!(stored.bounds, bounds);
+        let square = doc.roots()[2];
+        assert!(
+            doc.apply(Command::SetCrop {
+                id: square,
+                crop,
+                bounds
+            })
+            .is_err()
+        );
         // Deleting an image keeps its file for undo.
         doc.apply(Command::Delete(doc.roots().to_vec())).unwrap();
         assert!(doc.used_assets().is_empty());

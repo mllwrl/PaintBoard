@@ -5,6 +5,7 @@
 
 mod arrange;
 mod clipboard;
+mod crop;
 mod handles;
 mod hit;
 mod ink;
@@ -13,6 +14,7 @@ mod selection;
 
 pub use arrange::{Align, Axis, align, distribute};
 pub use clipboard::{Clipboard, duplicate};
+pub use crop::Crop;
 pub use handles::{Handle, rotation_knob};
 pub use ink::{ERASER_RADIUS, InkStyle};
 pub use selection::{Selection, selection_frame, unit_frame};

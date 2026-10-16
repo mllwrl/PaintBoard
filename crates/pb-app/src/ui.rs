@@ -49,6 +49,8 @@ pub enum Action {
     Reorder(ZOrder),
     /// Ask for image files and put them on the board.
     InsertImage,
+    /// Start cropping the selected image.
+    Crop,
     /// Replace the selected handwriting with typed text.
     ToText,
     /// Solve the selected handwritten expression.
@@ -89,6 +91,8 @@ pub struct SelectionInfo {
     /// Only ink is selected and handwriting can be recognized: `Some(busy)`, where `busy`
     /// says a recognition is already running.
     pub handwriting: Option<bool>,
+    /// A single unlocked image is selected.
+    pub can_crop: bool,
     pub several: bool,
     pub locked: bool,
 }
@@ -617,6 +621,14 @@ fn selection_toolbar(
                             }
                         });
                         ui.separator();
+                    }
+                    if selection.can_crop
+                        && ui
+                            .button("Crop")
+                            .on_hover_text("Double click or Enter; Enter or a click outside to finish, Esc to cancel")
+                            .clicked()
+                    {
+                        actions.push(Action::Crop);
                     }
                     let opacity = format!("{:.0}%", style.opacity * 100.0);
                     let opacity = ui.button(opacity).on_hover_text("Opacity");

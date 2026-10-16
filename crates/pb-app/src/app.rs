@@ -13,13 +13,13 @@ use pb_platform::{clipboard, dialog, handwriting};
 use pb_render::vello::Scene;
 use pb_render::{Gpu, GridStyle, ImageCache, Overlay, TextRenderer, Theme, View, build_scene};
 use pb_tools::{
-    Align, Axis, Clipboard, CursorHint, Pointer, ToolKind, Tools, math, rotation_knob,
+    Align, Axis, Clipboard, Crop, CursorHint, Pointer, ToolKind, Tools, math, rotation_knob,
     selection_frame, unit_frame,
 };
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, MouseButton, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::editing::{self, KeyOutcome, NEW_TEXT_SIZE, TextEdit};
@@ -95,6 +95,8 @@ pub struct App {
     dropped: Vec<PathBuf>,
     /// The text being typed into, if any.
     editing: Option<TextEdit>,
+    /// The image being cropped, if any.
+    cropping: Option<Crop>,
     /// Color of new sticky notes.
     sticky_color: Rgba,
     /// Time and screen position of the last left press, to detect double clicks.
@@ -128,6 +130,7 @@ impl App {
             images: ImageCache::default(),
             dropped: Vec::new(),
             editing: None,
+            cropping: None,
             sticky_color: STICKY_COLORS[0],
             last_press: None,
             recognition: None,
@@ -191,6 +194,16 @@ impl App {
                 winit::dpi::LogicalSize::new((b.x - a.x).max(1.0), (b.y - a.y).max(1.0)),
             );
         }
+        let mut hidden = self.tools.hidden().to_vec();
+        if let Some(crop) = &self.cropping {
+            hidden.push(crop.id);
+            previews.extend(crop.previews());
+            overlay.selection = Some(crop.area_frame());
+            overlay.selected.clear();
+            overlay.show_handles = true;
+            overlay.rotate_knob = None;
+            overlay.hover = None;
+        }
         build_scene(
             &mut self.scene,
             &View {
@@ -202,7 +215,7 @@ impl App {
                 objects: self.document.objects(),
                 assets: self.document.assets(),
                 overrides: &overrides,
-                hidden: self.tools.hidden(),
+                hidden: &hidden,
                 previews: &previews,
                 overlay: &overlay,
             },
@@ -255,7 +268,10 @@ impl App {
 
     /// What the selection toolbar needs; nothing while a gesture is in progress.
     fn selection_info(&self) -> Option<SelectionInfo> {
-        if self.editing.is_some() || self.tools.is_busy() || self.tools.active() != ToolKind::Select
+        if self.editing.is_some()
+            || self.cropping.is_some()
+            || self.tools.is_busy()
+            || self.tools.active() != ToolKind::Select
         {
             return None;
         }
@@ -297,6 +313,7 @@ impl App {
             handwriting: (handwriting::is_available()
                 && leaves.iter().all(|o| o.data.kind.is_ink()))
             .then_some(self.recognition.is_some()),
+            can_crop: matches!(ids, [id] if Crop::new(&self.document, *id).is_some()),
             several: ids.len() > 1,
             locked: selection.has_locked(&self.document),
         })
@@ -352,6 +369,11 @@ impl App {
             Action::Delete => self.apply_with(Tools::delete_selected),
             Action::Reorder(to) => self.reorder(to),
             Action::InsertImage => self.insert_image_files(),
+            Action::Crop => {
+                if let [id] = self.tools.selection().ids() {
+                    self.start_crop(*id);
+                }
+            }
             Action::ToText => self.recognize(Recognition::ToText),
             Action::Calculate => self.recognize(Recognition::Calculate),
         }
@@ -369,8 +391,31 @@ impl App {
         }
     }
 
-    /// Ends text editing, keeping the edit as one command.
+    /// Starts cropping an image; returns false for other objects.
+    fn start_crop(&mut self, id: ObjectId) -> bool {
+        let Some(crop) = Crop::new(&self.document, id) else {
+            return false;
+        };
+        self.finish_editing();
+        self.tools.cancel();
+        self.tools.select_only([id]);
+        self.cropping = Some(crop);
+        true
+    }
+
+    /// Ends cropping, keeping the new crop or (`keep` false, Escape) dropping it.
+    fn finish_crop(&mut self, keep: bool) {
+        if let Some(crop) = self.cropping.take()
+            && keep
+            && let Some(command) = crop.finish()
+        {
+            self.apply(command);
+        }
+    }
+
+    /// Ends text editing or cropping, keeping the edit as one command.
     fn finish_editing(&mut self) {
+        self.finish_crop(true);
         let Some(edit) = self.editing.take() else {
             return;
         };
@@ -506,7 +551,7 @@ impl App {
             return false;
         };
         let Some(mut edit) = TextEdit::existing(self.text.engine(), &object.clone()) else {
-            return false;
+            return self.start_crop(*id);
         };
         edit.select_all(self.text.engine());
         self.start_editing(edit);
@@ -522,6 +567,13 @@ impl App {
                 && (pos - screen).hypot() <= DOUBLE_CLICK_DISTANCE
         });
         self.last_press = Some((now, screen));
+        if let Some(crop) = &mut self.cropping {
+            if crop.press(pointer.world, pointer.zoom) {
+                return true;
+            }
+            // A click beside the picture keeps the crop and then does what it normally does.
+            self.finish_crop(true);
+        }
         let pad = 4.0 / pointer.zoom;
         if let Some(edit) = &mut self.editing {
             let engine = self.text.engine();
@@ -560,12 +612,16 @@ impl App {
                 .object_at(&self.document, pointer)
                 .filter(|&id| !self.document.is_locked(id))
                 .and_then(|id| self.document.get(id).cloned());
-            if let Some(object) = target
-                && let Some(mut edit) = TextEdit::existing(self.text.engine(), &object)
-            {
-                edit.press(self.text.engine(), pointer.world, false, false);
-                self.start_editing(edit);
-                return true;
+            if let Some(object) = target {
+                if let Some(mut edit) = TextEdit::existing(self.text.engine(), &object) {
+                    edit.press(self.text.engine(), pointer.world, false, false);
+                    self.start_editing(edit);
+                    return true;
+                }
+                // Double click on an image crops it, like in Miro.
+                if self.start_crop(object.id) {
+                    return true;
+                }
             }
         }
         false
@@ -788,6 +844,7 @@ impl App {
     }
 
     fn redo(&mut self) {
+        self.finish_editing();
         self.tools.cancel();
         if let Err(err) = self.document.redo() {
             log::error!("redo failed: {err}");
@@ -827,8 +884,14 @@ impl App {
         if self.tools.active() == ToolKind::Sticky {
             return CursorIcon::Crosshair;
         }
+        let hint = match (&self.cropping, self.navigation.cursor()) {
+            (Some(crop), Some(cursor)) => {
+                crop.cursor(self.camera.screen_to_world(cursor), self.camera.zoom())
+            }
+            _ => self.tools.cursor(),
+        };
         match self.navigation.cursor_icon() {
-            CursorIcon::Default => match self.tools.cursor() {
+            CursorIcon::Default => match hint {
                 CursorHint::Default => CursorIcon::Default,
                 CursorHint::Crosshair => CursorIcon::Crosshair,
                 CursorHint::Move => CursorIcon::Move,
@@ -841,6 +904,30 @@ impl App {
             },
             icon => icon,
         }
+    }
+
+    /// A key while cropping: Enter keeps the crop and Escape drops it. Other keys keep it
+    /// and do what they normally do, except modifiers (Shift keeps proportions) and Space
+    /// (panning), which leave cropping on.
+    fn crop_key(&mut self, event: &KeyEvent) -> bool {
+        let pressed = event.state == ElementState::Pressed;
+        match &event.logical_key {
+            Key::Named(NamedKey::Enter) if pressed => self.finish_crop(true),
+            Key::Named(NamedKey::Escape) if pressed => self.finish_crop(false),
+            Key::Named(
+                NamedKey::Shift
+                | NamedKey::Control
+                | NamedKey::Alt
+                | NamedKey::Super
+                | NamedKey::Space,
+            ) => return self.handle_key(event),
+            _ if !pressed => return self.handle_key(event),
+            _ => {
+                self.finish_crop(true);
+                return self.handle_key(event);
+            }
+        }
+        true
     }
 
     /// Applies a command built from the current selection, if there is one.
@@ -1153,6 +1240,8 @@ impl ApplicationHandler<UserEvent> for App {
                 let typing = self.ui.as_ref().is_some_and(Ui::wants_keyboard);
                 if typing {
                     false
+                } else if self.cropping.is_some() {
+                    self.crop_key(&event)
                 } else if let Some(edit) = &mut self.editing {
                     let modifiers = self.navigation.modifiers();
                     match edit.key(self.text.engine(), &event, modifiers) {
@@ -1186,6 +1275,14 @@ impl ApplicationHandler<UserEvent> for App {
                     (Some(edit), Some(p)) => edit.drag(self.text.engine(), p.world),
                     _ => false,
                 };
+                let text_drag = text_drag
+                    || match (&mut self.cropping, pointer) {
+                        (Some(crop), Some(p)) if crop.is_dragging() => {
+                            crop.drag_to(p.world, p.shift);
+                            true
+                        }
+                        _ => false,
+                    };
                 let tool_changed = if text_drag {
                     true
                 } else if over_ui {
@@ -1211,12 +1308,13 @@ impl ApplicationHandler<UserEvent> for App {
                     if left {
                         self.canvas_drag = state == ElementState::Pressed && !consumed;
                     }
-                    if !consumed
-                        && left
-                        && state == ElementState::Released
-                        && let Some(edit) = &mut self.editing
-                    {
-                        edit.release();
+                    if !consumed && left && state == ElementState::Released {
+                        if let Some(edit) = &mut self.editing {
+                            edit.release();
+                        }
+                        if let Some(crop) = &mut self.cropping {
+                            crop.release();
+                        }
                     }
                     let screen = self.navigation.cursor();
                     let text = !consumed
