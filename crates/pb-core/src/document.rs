@@ -1,5 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
+use std::sync::Mutex;
+
+use loro::event::{Diff, DiffEvent};
+use loro::{Index, Subscription};
 use rstar::{AABB, RTree, RTreeObject};
 use std::fmt;
 use std::sync::Arc;
@@ -146,6 +150,12 @@ pub struct Document {
     connectors: HashMap<ObjectId, Resolved>,
     /// Bounds of `objects` for finding those in an area; rebuilt with `objects`.
     spatial: RTree<Placed>,
+    /// What each tree node held when last read, so a refresh reads only nodes that changed.
+    node_cache: HashMap<TreeID, NodeData>,
+    /// Nodes changed since the last refresh, collected from the CRDT's events.
+    changes: Arc<Mutex<Changes>>,
+    /// Keeps the events coming.
+    _events: Subscription,
     /// Files used by images. They are not part of the CRDT and never removed while the board
     /// is open, so undoing the deletion of an image finds its file again.
     assets: Assets,
@@ -176,6 +186,55 @@ fn placed(slot: usize, data: &ObjectData) -> Placed {
     Placed {
         bounds: envelope(data.frame().aabb().inflate(pad, pad)),
         slot,
+    }
+}
+
+/// A tree node's contents as last read.
+#[derive(Clone, Debug)]
+enum NodeData {
+    Group {
+        id: ObjectId,
+        locked: bool,
+    },
+    Object {
+        id: ObjectId,
+        data: Box<ObjectData>,
+        locked: bool,
+    },
+    /// An object of a kind this version does not know, or not readable: skipped.
+    Unknown {
+        id: ObjectId,
+    },
+}
+
+/// Changes reported by the CRDT since the last refresh.
+#[derive(Debug, Default)]
+struct Changes {
+    nodes: HashSet<TreeID>,
+    /// Something changed that cannot be tied to nodes: read everything again.
+    all: bool,
+}
+
+impl Changes {
+    fn record(&mut self, event: &DiffEvent<'_>) {
+        for diff in &event.events {
+            let mut found = false;
+            for (_, index) in diff.path {
+                if let Index::Node(node) = index {
+                    self.nodes.insert(*node);
+                    found = true;
+                }
+            }
+            if let Diff::Tree(tree) = &diff.diff {
+                for item in &tree.diff {
+                    self.nodes.insert(item.target);
+                }
+                found = true;
+            }
+            if !found || diff.is_unknown {
+                self.all = true;
+            }
+        }
     }
 }
 
@@ -223,6 +282,16 @@ impl Document {
         let tree = doc.get_tree(key::OBJECTS);
         tree.enable_fractional_index(0);
         let undo = UndoManager::new(&doc);
+        let changes = Arc::new(Mutex::new(Changes {
+            all: true,
+            ..Changes::default()
+        }));
+        let sink = changes.clone();
+        let events = doc.subscribe_root(Arc::new(move |event| {
+            if let Ok(mut changes) = sink.lock() {
+                changes.record(&event);
+            }
+        }));
         let mut document = Self {
             doc,
             tree,
@@ -236,6 +305,9 @@ impl Document {
             assets: Assets::default(),
             connectors: HashMap::new(),
             spatial: RTree::new(),
+            node_cache: HashMap::new(),
+            changes,
+            _events: events,
         };
         document.refresh();
         document
@@ -816,6 +888,21 @@ impl Document {
         self.index.clear();
         self.groups.clear();
         self.nodes.clear();
+        let changes = self
+            .changes
+            .lock()
+            .map(|mut c| std::mem::take(&mut *c))
+            .unwrap_or(Changes {
+                all: true,
+                ..Changes::default()
+            });
+        if changes.all {
+            self.node_cache.clear();
+        } else {
+            for node in &changes.nodes {
+                self.node_cache.remove(node);
+            }
+        }
         self.roots = self.read_children(TreeParentId::Root, None);
         // Everything but connectors first: connectors route around it.
         let placed_objects = self
@@ -945,23 +1032,19 @@ impl Document {
     fn read_children(&mut self, parent: TreeParentId, group: Option<ObjectId>) -> Vec<ObjectId> {
         let mut ids = Vec::new();
         for node in self.tree.children(parent).unwrap_or_default() {
-            let Ok(meta) = self.tree.get_meta(node) else {
+            let Some(read) = self.node_data(node) else {
                 continue;
             };
-            let id = match meta.get(key::ID) {
-                Some(ValueOrContainer::Value(LoroValue::String(s))) => ObjectId::parse(&s),
-                _ => None,
-            }
-            .unwrap_or_else(|| ObjectId::from_node(node));
+            let id = match &read {
+                NodeData::Group { id, .. }
+                | NodeData::Object { id, .. }
+                | NodeData::Unknown { id } => *id,
+            };
             // Two replicas undoing the same deletion can each restore the object; keep one.
             if self.nodes.contains_key(&id) {
                 continue;
             }
-            let locked = matches!(
-                meta.get(key::LOCKED),
-                Some(ValueOrContainer::Value(LoroValue::Bool(true)))
-            );
-            if is_group(&meta) {
+            if let NodeData::Group { locked, .. } = read {
                 self.nodes.insert(id, node);
                 let children = self.read_children(TreeParentId::Node(node), Some(id));
                 // A group emptied by a concurrent edit has nothing to show or select.
@@ -979,14 +1062,14 @@ impl Document {
                 );
             } else {
                 // Objects of kinds this version does not know are skipped, not dropped.
-                let Some(data) = read_data(&meta) else {
+                let NodeData::Object { data, locked, .. } = read else {
                     continue;
                 };
                 self.nodes.insert(id, node);
                 self.index.insert(id, self.objects.len());
                 self.objects.push(Object {
                     id,
-                    data,
+                    data: *data,
                     parent: group,
                     locked,
                 });
@@ -994,6 +1077,37 @@ impl Document {
             ids.push(id);
         }
         ids
+    }
+
+    /// What `node` holds: cached, or read from the CRDT if it changed since.
+    fn node_data(&mut self, node: TreeID) -> Option<NodeData> {
+        if let Some(cached) = self.node_cache.get(&node) {
+            return Some(cached.clone());
+        }
+        let meta = self.tree.get_meta(node).ok()?;
+        let id = match meta.get(key::ID) {
+            Some(ValueOrContainer::Value(LoroValue::String(s))) => ObjectId::parse(&s),
+            _ => None,
+        }
+        .unwrap_or_else(|| ObjectId::from_node(node));
+        let locked = matches!(
+            meta.get(key::LOCKED),
+            Some(ValueOrContainer::Value(LoroValue::Bool(true)))
+        );
+        let read = if is_group(&meta) {
+            NodeData::Group { id, locked }
+        } else {
+            match read_data(&meta) {
+                Some(data) => NodeData::Object {
+                    id,
+                    data: Box::new(data),
+                    locked,
+                },
+                None => NodeData::Unknown { id },
+            }
+        };
+        self.node_cache.insert(node, read.clone());
+        Some(read)
     }
 }
 
@@ -1921,6 +2035,54 @@ mod tests {
         doc.refresh();
         let style = doc.get(a).unwrap().data.style;
         assert_eq!((style.fill, style.opacity), (red, 0.5));
+    }
+
+    /// The cached view after a mix of edits matches one read afresh from the CRDT.
+    #[test]
+    fn cache_matches_a_fresh_read() {
+        let fresh = |doc: &Document| Document::from_snapshot(&doc.snapshot()).unwrap();
+        let same = |doc: &Document| {
+            let other = fresh(doc);
+            assert_eq!(doc.objects(), other.objects());
+            assert_eq!(doc.roots(), other.roots());
+        };
+        let mut doc = Document::new();
+        let [a, b, c, d] = four(&mut doc);
+        same(&doc);
+        doc.apply(Command::Move {
+            ids: vec![a, c],
+            delta: Vec2::new(5.0, 5.0),
+        })
+        .unwrap();
+        let g = group(&mut doc, &[b, c]);
+        lock(&mut doc, &[d], true);
+        same(&doc);
+        doc.undo().unwrap();
+        same(&doc);
+        doc.redo().unwrap();
+        doc.apply(Command::Ungroup(vec![g])).unwrap();
+        doc.apply(Command::Delete(vec![a])).unwrap();
+        same(&doc);
+        doc.undo().unwrap();
+        same(&doc);
+        // Edits from another replica, merged in.
+        let mut other = fresh(&doc);
+        other
+            .apply(Command::Move {
+                ids: vec![b],
+                delta: Vec2::new(0.0, 100.0),
+            })
+            .unwrap();
+        other.apply(Command::Delete(vec![d])).unwrap();
+        create(&mut other, rect(500.0, 500.0, 10.0, 10.0));
+        doc.doc.import(&other.snapshot()).unwrap();
+        doc.refresh();
+        same(&doc);
+        assert_eq!(doc.objects().len(), other.objects().len());
+        assert_eq!(
+            doc.get(b).unwrap().data.bounds.y0,
+            other.get(b).unwrap().data.bounds.y0
+        );
     }
 
     #[test]
