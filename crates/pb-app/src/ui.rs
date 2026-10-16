@@ -47,6 +47,8 @@ pub enum Action {
     Duplicate,
     Delete,
     Reorder(ZOrder),
+    /// Ask for image files and put them on the board.
+    InsertImage,
     /// Replace the selected handwriting with typed text.
     ToText,
     /// Solve the selected handwritten expression.
@@ -80,6 +82,8 @@ pub struct SelectionInfo {
     pub has_fill: bool,
     /// Something with an outline width (shape or ink) is selected.
     pub has_width: bool,
+    /// Something other than images is selected, so there is an outline or text color.
+    pub has_stroke: bool,
     /// What the outline color is called for this selection.
     pub stroke_label: &'static str,
     /// Only ink is selected and handwriting can be recognized: `Some(busy)`, where `busy`
@@ -327,6 +331,7 @@ fn board_menu(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                             ("Open…", "Ctrl+O", Action::Open),
                             ("Save", "Ctrl+S", Action::Save),
                             ("Save as…", "Ctrl+Shift+S", Action::SaveAs),
+                            ("Insert image…", "", Action::InsertImage),
                         ];
                         for (label, shortcut, action) in items {
                             if ui.add(Button::new(label).shortcut_text(shortcut)).clicked() {
@@ -385,6 +390,10 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         if model.tool == tool {
                             ink_button = button.rect;
                         }
+                    }
+                    let image = icon_button(ui, false, "Image (or drop, paste)", paint_image);
+                    if image.clicked() {
+                        actions.push(Action::InsertImage);
                     }
                     ui.separator();
                     let undo = ui.add_enabled_ui(model.can_undo, |ui| {
@@ -584,8 +593,11 @@ fn selection_toolbar(
                         let fill = swatch_button(ui, style.fill, false, "Fill color");
                         toggle(popup, Popup::Fill, fill.clicked());
                     }
-                    let stroke = swatch_button(ui, style.stroke, true, selection.stroke_label);
-                    toggle(popup, Popup::Stroke, stroke.clicked());
+                    if selection.has_stroke {
+                        let label = selection.stroke_label;
+                        let stroke = swatch_button(ui, style.stroke, true, label);
+                        toggle(popup, Popup::Stroke, stroke.clicked());
+                    }
                     if let Some(busy) = selection.handwriting {
                         ui.add_enabled_ui(!busy, |ui| {
                             let label = if busy { "Recognizing…" } else { "To text" };
@@ -895,6 +907,27 @@ fn paint_sticky(painter: &Painter, rect: Rect, color: Color32) {
             Stroke::new(1.4, color),
         );
     }
+}
+
+fn paint_image(painter: &Painter, rect: Rect, color: Color32) {
+    let frame = rect.shrink(1.0);
+    let stroke = Stroke::new(1.6, color);
+    painter.rect_stroke(frame, 2, stroke, egui::StrokeKind::Middle);
+    let at = |x: f32, y: f32| {
+        Pos2::new(
+            frame.left() + frame.width() * x,
+            frame.top() + frame.height() * y,
+        )
+    };
+    painter.circle_stroke(at(0.68, 0.32), frame.width() * 0.1, Stroke::new(1.4, color));
+    let hills = vec![
+        at(0.0, 0.85),
+        at(0.35, 0.5),
+        at(0.6, 0.75),
+        at(0.75, 0.62),
+        at(1.0, 0.85),
+    ];
+    painter.add(Shape::line(hills, stroke));
 }
 
 fn paint_shape(painter: &Painter, rect: Rect, color: Color32, kind: ShapeKind) {

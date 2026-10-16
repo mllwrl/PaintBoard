@@ -13,8 +13,8 @@ use pb_geom::normalize_angle;
 
 use crate::command::reorder;
 use crate::{
-    Applied, Command, Content, Group, Ink, Object, ObjectData, ObjectId, ObjectKind, Rgba, Sticky,
-    Style, StyleChange, Text, ZOrder,
+    Applied, AssetId, Assets, Command, Content, Group, Image, Ink, Object, ObjectData, ObjectId,
+    ObjectKind, Rgba, Sticky, Style, StyleChange, Text, ZOrder,
 };
 
 /// Font size of text objects stored without one.
@@ -45,6 +45,13 @@ mod key {
     pub const POINTS: &str = "points";
     pub const TEXT: &str = "text";
     pub const FONT_SIZE: &str = "fontSize";
+    /// Hash of an image's file, see `AssetId`.
+    pub const ASSET: &str = "asset";
+    /// Shown part of an image, see `Image::crop`.
+    pub const CROP_X0: &str = "cropX0";
+    pub const CROP_Y0: &str = "cropY0";
+    pub const CROP_X1: &str = "cropX1";
+    pub const CROP_Y1: &str = "cropY1";
 
     /// `kind` of group nodes.
     pub const GROUP: &str = "group";
@@ -102,6 +109,9 @@ pub struct Document {
     /// Tree node currently holding each object or group.
     nodes: HashMap<ObjectId, TreeID>,
     revision: u64,
+    /// Files used by images. They are not part of the CRDT and never removed while the board
+    /// is open, so undoing the deletion of an image finds its file again.
+    assets: Assets,
 }
 
 impl Document {
@@ -141,6 +151,7 @@ impl Document {
             roots: Vec::new(),
             nodes: HashMap::new(),
             revision: 0,
+            assets: Assets::default(),
         };
         document.refresh();
         document
@@ -150,6 +161,31 @@ impl Document {
         self.doc
             .export(ExportMode::Snapshot)
             .expect("snapshot export of a committed document cannot fail")
+    }
+
+    pub fn assets(&self) -> &Assets {
+        &self.assets
+    }
+
+    /// Adds a file for images to use. Not an edit: it does not change the revision or the
+    /// undo history.
+    pub fn add_asset(&mut self, bytes: impl Into<std::sync::Arc<[u8]>>) -> AssetId {
+        self.assets.insert(bytes)
+    }
+
+    /// Assets that objects on the board use, each once, in a stable order.
+    pub fn used_assets(&self) -> Vec<AssetId> {
+        let mut ids: Vec<_> = self
+            .objects
+            .iter()
+            .filter_map(|o| match &o.data.kind {
+                ObjectKind::Image(image) => Some(image.asset),
+                _ => None,
+            })
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
     }
 
     /// All objects in paint order, back to front, with groups flattened.
@@ -597,6 +633,14 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
             meta.insert(key::FONT_SIZE, text.size)?;
         }
         ObjectKind::Sticky(sticky) => meta.insert(key::TEXT, &*sticky.text)?,
+        ObjectKind::Image(image) => {
+            meta.insert(key::ASSET, image.asset.to_string())?;
+            let c = image.crop;
+            meta.insert(key::CROP_X0, c.x0)?;
+            meta.insert(key::CROP_Y0, c.y0)?;
+            meta.insert(key::CROP_X1, c.x1)?;
+            meta.insert(key::CROP_Y1, c.y1)?;
+        }
         ObjectKind::Shape(_) => {}
     }
     write_bounds(meta, data.bounds.abs())?;
@@ -665,6 +709,26 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
                 _ => Arc::from(""),
             };
             ObjectKind::Sticky(Sticky { text })
+        }
+        ValueOrContainer::Value(LoroValue::String(s)) if &**s == "image" => {
+            let asset = match meta.get(key::ASSET)? {
+                ValueOrContainer::Value(LoroValue::String(a)) => AssetId::parse(&a)?,
+                _ => return None,
+            };
+            let num = |k| match meta.get(k) {
+                Some(ValueOrContainer::Value(LoroValue::Double(v))) => Some(v),
+                _ => None,
+            };
+            let crop = match (
+                num(key::CROP_X0),
+                num(key::CROP_Y0),
+                num(key::CROP_X1),
+                num(key::CROP_Y1),
+            ) {
+                (Some(x0), Some(y0), Some(x1), Some(y1)) => Rect::new(x0, y0, x1, y1),
+                _ => Image::FULL,
+            };
+            ObjectKind::Image(Image { asset, crop })
         }
         ValueOrContainer::Value(LoroValue::String(s)) => {
             ObjectKind::Shape(ObjectKind::parse_shape(&s)?)
@@ -1264,6 +1328,27 @@ mod tests {
         let stored = &doc.get(id).unwrap().data;
         assert_eq!(stored.kind.text(), Some("идея"));
         assert_eq!(stored.bounds, data.bounds);
+    }
+
+    #[test]
+    fn image_roundtrips_and_lists_its_asset() {
+        let mut doc = Document::new();
+        let asset = doc.add_asset(b"fake png".to_vec());
+        let mut data = rect(0.0, 0.0, 40.0, 30.0);
+        data.kind = ObjectKind::Image(Image {
+            asset,
+            crop: Rect::new(0.25, 0.0, 1.0, 0.5),
+        });
+        let id = create(&mut doc, data.clone());
+        create(&mut doc, data.clone());
+        create(&mut doc, rect(0.0, 0.0, 1.0, 1.0));
+        assert_eq!(doc.used_assets(), vec![asset]);
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(loaded.get(id).unwrap().data, data);
+        // Deleting an image keeps its file for undo.
+        doc.apply(Command::Delete(doc.roots().to_vec())).unwrap();
+        assert!(doc.used_assets().is_empty());
+        assert!(doc.assets().contains(asset));
     }
 
     #[test]

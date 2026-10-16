@@ -12,4 +12,5 @@ workspace = true
 kurbo.workspace = true
 pb-geom.workspace = true
 loro.workspace = true
+blake3.workspace = true
 log.workspace = true

@@ -11,3 +11,4 @@ workspace = true
 [dependencies]
 pb-core.workspace = true
 pb-platform.workspace = true
+image.workspace = true

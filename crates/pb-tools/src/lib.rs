@@ -803,7 +803,8 @@ impl Tools {
 
     /// Frame-local bounds the resize gesture in progress leads to, with snapping guides.
     ///
-    /// Only axis-aligned frames snap, and not while Shift keeps a corner's aspect ratio.
+    /// Only axis-aligned frames snap, and not while a corner keeps the aspect ratio: with
+    /// Shift held, or by default when images are selected (then Shift stretches them).
     fn resize_target(&self, doc: &Document) -> Option<(Rect, Vec<Line>)> {
         let Some(Gesture::Resize {
             handle,
@@ -816,7 +817,12 @@ impl Tools {
         };
         // Resize happens in the frame's own (unrotated) space.
         let mut delta = from.vec_to_local(current.world - *start);
-        let keep_aspect = current.shift;
+        let has_image = self.selection.ids().iter().any(|&id| {
+            doc.leaves(id)
+                .iter()
+                .any(|o| matches!(o.data.kind, ObjectKind::Image(_)))
+        });
+        let keep_aspect = current.shift != has_image;
         let snapper = (from.rotation == 0.0 && !(keep_aspect && handle.is_corner()))
             .then(|| self.snapper(doc, current, self.selection.ids()))
             .flatten();

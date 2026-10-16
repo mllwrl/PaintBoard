@@ -15,6 +15,12 @@ pub fn pick_open(file_type: &FileType) -> Option<PathBuf> {
     imp::pick_open(file_type)
 }
 
+/// Asks for any number of files with one of `extensions` (without dots), offered under
+/// `name`. Empty if cancelled.
+pub fn pick_open_many(name: &str, extensions: &[&str]) -> Vec<PathBuf> {
+    imp::pick_open_many(name, extensions)
+}
+
 /// Asks where to save, suggesting `suggested` (a file name or a full path).
 pub fn pick_save(file_type: &FileType, suggested: &Path) -> Option<PathBuf> {
     imp::pick_save(file_type, suggested)
@@ -49,6 +55,13 @@ mod imp {
         FileDialog::new()
             .add_filter(file_type.name, &[file_type.extension])
             .pick_file()
+    }
+
+    pub fn pick_open_many(name: &str, extensions: &[&str]) -> Vec<PathBuf> {
+        FileDialog::new()
+            .add_filter(name, extensions)
+            .pick_files()
+            .unwrap_or_default()
     }
 
     pub fn pick_save(file_type: &FileType, suggested: &Path) -> Option<PathBuf> {
@@ -98,6 +111,10 @@ mod imp {
 
     pub fn pick_open(_file_type: &FileType) -> Option<PathBuf> {
         None
+    }
+
+    pub fn pick_open_many(_name: &str, _extensions: &[&str]) -> Vec<PathBuf> {
+        Vec::new()
     }
 
     pub fn ask(_title: &str, _message: &str) -> Answer {

@@ -1,4 +1,6 @@
-use pb_core::{Command, Content, Document};
+use std::sync::Arc;
+
+use pb_core::{Command, Content, Document, ObjectKind};
 use pb_geom::kurbo::{Point, Vec2};
 
 use crate::Selection;
@@ -13,6 +15,8 @@ const PASTE_OFFSET: f64 = 20.0;
 #[derive(Default)]
 pub struct Clipboard {
     items: Vec<Content>,
+    /// Files of the copied images, so they can be pasted into another board.
+    assets: Vec<Arc<[u8]>>,
     /// Pastes since the last copy, so repeated pastes cascade instead of stacking.
     pastes: u32,
 }
@@ -28,9 +32,22 @@ impl Clipboard {
         if items.is_empty() {
             return false;
         }
+        self.assets = items
+            .iter()
+            .flat_map(Content::shapes)
+            .filter_map(|data| match data.kind {
+                ObjectKind::Image(image) => doc.assets().get(image.asset).cloned(),
+                _ => None,
+            })
+            .collect();
         self.items = items;
         self.pastes = 0;
         true
+    }
+
+    /// Files the pasted images need; add them to the board before applying a paste.
+    pub fn assets(&self) -> &[Arc<[u8]>] {
+        &self.assets
     }
 
     /// Pastes centered on `at` (the pointer), or else offset from the originals.
@@ -140,6 +157,28 @@ mod tests {
         // Group spans x 0..210, y 0..10: center (105, 5).
         let pasted = created(clipboard.paste(Some(Point::new(1105.0, 505.0))));
         assert_eq!(pasted[0], Rect::new(1000.0, 500.0, 1010.0, 510.0));
+    }
+
+    #[test]
+    fn copy_takes_image_files_along() {
+        let mut doc = Document::new();
+        let asset = doc.add_asset(b"picture".to_vec());
+        let data = ObjectData {
+            kind: ObjectKind::Image(pb_core::Image::new(asset)),
+            bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+            rotation: 0.0,
+            style: Style::default(),
+        };
+        let ids = doc
+            .apply(Command::Create(vec![data.into(), rect(50.0)]))
+            .unwrap()
+            .created;
+        let mut selection = Selection::default();
+        selection.set(ids);
+        let mut clipboard = Clipboard::default();
+        clipboard.copy(&doc, &selection);
+        assert_eq!(clipboard.assets().len(), 1);
+        assert_eq!(&*clipboard.assets()[0], b"picture");
     }
 
     #[test]

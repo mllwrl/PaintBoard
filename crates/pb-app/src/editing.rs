@@ -137,7 +137,7 @@ impl TextEdit {
                 data.rotation,
                 data.style,
             )),
-            ObjectKind::Shape(_) | ObjectKind::Ink(_) => None,
+            ObjectKind::Shape(_) | ObjectKind::Ink(_) | ObjectKind::Image(_) => None,
         }
     }
 

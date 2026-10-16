@@ -1,11 +1,11 @@
-use pb_core::{ObjectData, ObjectKind, Rgba, Sticky};
+use pb_core::{Assets, Image, ObjectData, ObjectKind, Rgba, Sticky};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use pb_geom::ink::{smooth_path, variable_outline};
 use pb_text::{TextAlign, TextEngine};
 use vello::Scene;
-use vello::kurbo::{Affine, Cap, Join, Rect, Stroke};
+use vello::kurbo::{Affine, Cap, Join, Line, Rect, Stroke};
 use vello::peniko::{Blob, FontData};
 use vello::peniko::{Color, Fill, Mix};
 
@@ -16,6 +16,10 @@ const MIN_PRESSURE: f64 = 0.15;
 const SHADOW_OFFSET: f64 = 0.015;
 const SHADOW_BLUR: f64 = 0.025;
 const SHADOW_COLOR: Color = Color::from_rgba8(0, 0, 0, 0x30);
+/// Drawn in place of an image whose file is missing or cannot be read.
+const PLACEHOLDER_FILL: Color = Color::from_rgb8(0xE4, 0xE4, 0xE0);
+const PLACEHOLDER_LINE: Color = Color::from_rgb8(0xA0, 0xA0, 0x9A);
+
 /// Fitted sizes kept by [`TextRenderer`]; the cache is dropped when it grows past this.
 const FIT_CACHE_LIMIT: usize = 4096;
 
@@ -101,13 +105,25 @@ impl Default for TextRenderer {
     }
 }
 
+/// What drawing objects needs besides the scene.
+pub(crate) struct Resources<'a> {
+    pub text: &'a mut TextRenderer,
+    pub images: &'a mut crate::ImageCache,
+    pub assets: &'a Assets,
+}
+
 /// Draws one object. `transform` maps world to physical pixels.
-pub fn draw_object(
+pub(crate) fn draw_object(
     scene: &mut Scene,
     transform: Affine,
     data: &ObjectData,
-    text: &mut TextRenderer,
+    resources: Resources<'_>,
 ) {
+    let Resources {
+        text,
+        images,
+        assets,
+    } = resources;
     let transform = transform * data.frame().transform();
     let style = &data.style;
     if style.opacity <= 0.0 {
@@ -190,6 +206,10 @@ pub fn draw_object(
                 );
             }
         }
+        ObjectKind::Image(image) => match images.get(assets, image.asset) {
+            Some(brush) => draw_image(scene, transform, data.bounds, image, brush),
+            None => draw_placeholder(scene, transform, data.bounds),
+        },
         ObjectKind::Ink(ink) => {
             let points = ink.points_in(data.bounds);
             let ink_color = color(style.stroke);
@@ -216,6 +236,49 @@ pub fn draw_object(
     }
 }
 
+/// The cropped part of `brush` stretched over `bounds`.
+fn draw_image(
+    scene: &mut Scene,
+    transform: Affine,
+    bounds: Rect,
+    image: &Image,
+    brush: &vello::peniko::ImageBrush,
+) {
+    let (w, h) = (f64::from(brush.image.width), f64::from(brush.image.height));
+    let crop = image.crop;
+    if crop.width() <= 0.0 || crop.height() <= 0.0 {
+        return;
+    }
+    // Image pixels -> crop rectangle at the origin -> bounds.
+    let brush_transform = Affine::translate(bounds.origin().to_vec2())
+        * Affine::scale_non_uniform(
+            bounds.width() / (crop.width() * w),
+            bounds.height() / (crop.height() * h),
+        )
+        * Affine::translate((-crop.x0 * w, -crop.y0 * h));
+    scene.fill(
+        Fill::NonZero,
+        transform,
+        brush,
+        Some(brush_transform),
+        &bounds,
+    );
+}
+
+/// A gray box with a cross, for an image that cannot be shown.
+fn draw_placeholder(scene: &mut Scene, transform: Affine, b: Rect) {
+    scene.fill(Fill::NonZero, transform, PLACEHOLDER_FILL, None, &b);
+    let width = b.width().min(b.height()) * 0.01;
+    let stroke = Stroke::new(width.max(0.5));
+    scene.stroke(&stroke, transform, PLACEHOLDER_LINE, None, &b);
+    for line in [
+        Line::new((b.x0, b.y0), (b.x1, b.y1)),
+        Line::new((b.x1, b.y0), (b.x0, b.y1)),
+    ] {
+        scene.stroke(&stroke, transform, PLACEHOLDER_LINE, None, &line);
+    }
+}
+
 /// World-space axis-aligned area an object paints, including its stroke.
 pub fn painted_bounds(data: &ObjectData) -> Rect {
     let pad = paint_padding(data);
@@ -229,6 +292,7 @@ fn paint_padding(data: &ObjectData) -> f64 {
             let side = data.bounds.width().min(data.bounds.height());
             side * (SHADOW_OFFSET + SHADOW_BLUR * 2.5)
         }
+        ObjectKind::Image(_) => 0.0,
         _ => data.style.stroke_width / 2.0,
     }
 }

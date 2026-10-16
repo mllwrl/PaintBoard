@@ -20,7 +20,10 @@ fn touches(data: &ObjectData, area: Rect) -> bool {
         return false;
     }
     match &data.kind {
-        ObjectKind::Shape(_) | ObjectKind::Text(_) | ObjectKind::Sticky(_) => true,
+        ObjectKind::Shape(_)
+        | ObjectKind::Text(_)
+        | ObjectKind::Sticky(_)
+        | ObjectKind::Image(_) => true,
         ObjectKind::Ink(ink) => {
             let frame = data.frame();
             let points: Vec<_> = ink
@@ -71,6 +74,8 @@ pub(crate) fn hits(data: &ObjectData, point: Point, tolerance: f64) -> bool {
         ObjectKind::Text(_) | ObjectKind::Sticky(_) => {
             data.bounds.inflate(pad, pad).contains(local)
         }
+        // Images ignore their outline width.
+        ObjectKind::Image(_) => data.bounds.inflate(tolerance, tolerance).contains(local),
         // Ink is hit along its line, not anywhere in its bounds.
         ObjectKind::Ink(ink) => {
             if !data.bounds.inflate(pad, pad).contains(local) {

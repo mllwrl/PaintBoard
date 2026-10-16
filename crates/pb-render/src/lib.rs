@@ -2,18 +2,20 @@
 
 mod gpu;
 mod grid;
+mod images;
 mod objects;
 mod overlay;
 
 pub use gpu::{FrameTarget, Gpu};
 pub use grid::{GridColors, GridStyle, draw_grid};
+pub use images::ImageCache;
 pub use objects::{TextRenderer, sticky_font_size};
 pub use overlay::{Overlay, OverlayColors, TextEditOverlay};
 pub use vello;
 
 use std::collections::HashMap;
 
-use pb_core::{Object, ObjectData, ObjectId};
+use pb_core::{Assets, Object, ObjectData, ObjectId};
 use pb_geom::Camera;
 use vello::Scene;
 use vello::kurbo::{Affine, Size};
@@ -54,6 +56,8 @@ pub struct View<'a> {
     pub theme: &'a Theme,
     /// Board objects in z-order, back to front.
     pub objects: &'a [Object],
+    /// Files of the board's images.
+    pub assets: &'a Assets,
     /// Objects mid-gesture (moved, resized) that replace their stored state.
     pub overrides: &'a [Object],
     /// Objects not to draw (about to be erased).
@@ -64,7 +68,12 @@ pub struct View<'a> {
 }
 
 /// Rebuilds `scene` for the given view.
-pub fn build_scene(scene: &mut Scene, view: &View<'_>, text: &mut TextRenderer) {
+pub fn build_scene(
+    scene: &mut Scene,
+    view: &View<'_>,
+    text: &mut TextRenderer,
+    images: &mut ImageCache,
+) {
     scene.reset();
     draw_grid(
         scene,
@@ -86,7 +95,12 @@ pub fn build_scene(scene: &mut Scene, view: &View<'_>, text: &mut TextRenderer) 
         .map(|o| overrides.get(&o.id).copied().unwrap_or(&o.data))
         .filter(|data| objects::painted_bounds(data).overlaps(visible));
     for data in on_screen.chain(view.previews) {
-        objects::draw_object(scene, transform, data, text);
+        let resources = objects::Resources {
+            text: &mut *text,
+            images: &mut *images,
+            assets: view.assets,
+        };
+        objects::draw_object(scene, transform, data, resources);
     }
 
     overlay::draw_overlay(

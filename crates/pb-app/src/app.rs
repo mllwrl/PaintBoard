@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use pb_core::{
@@ -8,9 +9,9 @@ use pb_core::{
 use pb_geom::Camera;
 use pb_geom::kurbo::{Point, Size, Vec2};
 use pb_platform::Instant;
-use pb_platform::{dialog, handwriting};
+use pb_platform::{clipboard, dialog, handwriting};
 use pb_render::vello::Scene;
-use pb_render::{Gpu, GridStyle, Overlay, TextRenderer, Theme, View, build_scene};
+use pb_render::{Gpu, GridStyle, ImageCache, Overlay, TextRenderer, Theme, View, build_scene};
 use pb_tools::{
     Align, Axis, Clipboard, CursorHint, Pointer, ToolKind, Tools, math, rotation_knob,
     selection_frame, unit_frame,
@@ -23,6 +24,7 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::editing::{self, KeyOutcome, NEW_TEXT_SIZE, TextEdit};
 use crate::navigation::Navigation;
+use crate::pictures::{self, Picture};
 use crate::session::Session;
 use crate::ui::{Action, Model, STICKY_COLORS, SelectionInfo, Ui};
 
@@ -87,6 +89,10 @@ pub struct App {
     /// Pressure of a pen touching the screen or tablet; `None` for a mouse.
     pen_pressure: Option<f64>,
     text: TextRenderer,
+    images: ImageCache,
+    /// Files dropped on the window since the last pass of the event loop; dropping several
+    /// files sends one event each, and they are placed together.
+    dropped: Vec<PathBuf>,
     /// The text being typed into, if any.
     editing: Option<TextEdit>,
     /// Color of new sticky notes.
@@ -119,6 +125,8 @@ impl App {
             style_drag: false,
             pen_pressure: None,
             text: TextRenderer::new(),
+            images: ImageCache::default(),
+            dropped: Vec::new(),
             editing: None,
             sticky_color: STICKY_COLORS[0],
             last_press: None,
@@ -192,12 +200,14 @@ impl App {
                 grid: self.grid,
                 theme: &self.theme,
                 objects: self.document.objects(),
+                assets: self.document.assets(),
                 overrides: &overrides,
                 hidden: self.tools.hidden(),
                 previews: &previews,
                 overlay: &overlay,
             },
             &mut self.text,
+            &mut self.images,
         );
 
         let board = self.session.name();
@@ -271,6 +281,9 @@ impl App {
             has_width: leaves
                 .iter()
                 .any(|o| matches!(o.data.kind, ObjectKind::Shape(_) | ObjectKind::Ink(_))),
+            has_stroke: leaves
+                .iter()
+                .any(|o| !matches!(o.data.kind, ObjectKind::Image(_))),
             stroke_label: if leaves
                 .iter()
                 .any(|o| matches!(o.data.kind, ObjectKind::Shape(_)))
@@ -338,6 +351,7 @@ impl App {
             }
             Action::Delete => self.apply_with(Tools::delete_selected),
             Action::Reorder(to) => self.reorder(to),
+            Action::InsertImage => self.insert_image_files(),
             Action::ToText => self.recognize(Recognition::ToText),
             Action::Calculate => self.recognize(Recognition::Calculate),
         }
@@ -366,6 +380,90 @@ impl App {
         if let Some(command) = edit.finish(self.text.engine()) {
             self.apply(command);
         }
+    }
+
+    /// Asks for image files and places them in the middle of the view.
+    fn insert_image_files(&mut self) {
+        let paths = dialog::pick_open_many("Images", pb_io::image::EXTENSIONS);
+        self.insert_files(&paths, None);
+    }
+
+    /// Places image files at `at` (world), or in the middle of the view. Other files are
+    /// skipped; unreadable images are reported.
+    fn insert_files(&mut self, paths: &[PathBuf], at: Option<Point>) {
+        let mut errors = Vec::new();
+        let pictures: Vec<_> = paths
+            .iter()
+            .filter(|p| pictures::is_image_file(p))
+            .filter_map(|p| Picture::from_file(p).map_err(|e| errors.push(e)).ok())
+            .collect();
+        self.insert_pictures(pictures, at);
+        if !errors.is_empty() {
+            dialog::show_error("Some images could not be added", &errors.join("\n"));
+        }
+    }
+
+    /// Adds pictures side by side as one undo step, and selects them.
+    fn insert_pictures(&mut self, pictures: Vec<Picture>, at: Option<Point>) {
+        if pictures.is_empty() {
+            return;
+        }
+        self.finish_editing();
+        self.tools.set_active(ToolKind::Select);
+        let viewport = self.viewport();
+        let visible = self.camera.visible_world_rect(viewport);
+        let at = at.unwrap_or(visible.center());
+        let sizes: Vec<_> = pictures.iter().map(|p| (p.width, p.height)).collect();
+        let pixels_per_unit = self.camera.zoom() * self.scale();
+        let bounds = pictures::place(&sizes, at, pixels_per_unit, visible);
+        let items = pictures
+            .into_iter()
+            .zip(bounds)
+            .map(|(picture, bounds)| {
+                let asset = self.document.add_asset(picture.bytes);
+                pictures::image_object(asset, bounds).into()
+            })
+            .collect();
+        self.apply(Command::Create(items));
+        self.request_redraw();
+    }
+
+    /// Ctrl+V: a picture or image files from the system clipboard, or else board objects
+    /// copied in the app. Lands at the pointer, like Miro; copied objects cascade when it is
+    /// off the window.
+    fn paste(&mut self) {
+        let at = self
+            .navigation
+            .hovered_cursor()
+            .map(|c| self.camera.screen_to_world(c));
+        if let Some(image) = clipboard::image() {
+            match Picture::from_clipboard(image) {
+                Ok(picture) => self.insert_pictures(vec![picture], at),
+                Err(err) => dialog::show_error("Could not paste the image", &err.to_string()),
+            }
+            return;
+        }
+        let files = clipboard::files();
+        if files.iter().any(|f| pictures::is_image_file(f)) {
+            self.insert_files(&files, at);
+            return;
+        }
+        for bytes in self.clipboard.assets().to_vec() {
+            self.document.add_asset(bytes);
+        }
+        if let Some(command) = self.clipboard.paste(at) {
+            self.apply(command);
+        }
+    }
+
+    /// Copies the selection inside the app. The system clipboard is emptied, so an older
+    /// picture there does not win over it on paste.
+    fn copy_selection(&mut self) -> bool {
+        let copied = self.clipboard.copy(&self.document, self.tools.selection());
+        if copied {
+            clipboard::clear();
+        }
+        copied
     }
 
     /// Tab on a sticky note: keeps it and starts the next one beside it, in view.
@@ -798,6 +896,7 @@ impl App {
     /// Shows another board (opened or new) from a clean slate.
     fn replace_document(&mut self, document: Document) {
         self.document = document;
+        self.images.clear();
         self.tools.cancel();
         self.tools.clear_selection();
         self.tools.sync(&self.document);
@@ -854,25 +953,16 @@ impl App {
             KeyCode::KeyE if !ctrl => self.tools.set_active(ToolKind::Eraser),
             KeyCode::KeyA if ctrl => self.tools.select_all(&self.document),
             KeyCode::KeyC if ctrl => {
-                self.clipboard.copy(&self.document, self.tools.selection());
+                self.copy_selection();
             }
             KeyCode::KeyX if ctrl => {
-                if self.clipboard.copy(&self.document, self.tools.selection())
+                if self.copy_selection()
                     && let Some(command) = self.tools.delete_selected(&self.document)
                 {
                     self.apply(command);
                 }
             }
-            KeyCode::KeyV if ctrl => {
-                // Paste where the pointer is, like Miro; cascade when it is off the canvas.
-                let at = self
-                    .navigation
-                    .hovered_cursor()
-                    .map(|c| self.camera.screen_to_world(c));
-                if let Some(command) = self.clipboard.paste(at) {
-                    self.apply(command);
-                }
-            }
+            KeyCode::KeyV if ctrl => self.paste(),
             KeyCode::KeyG if ctrl && modifiers.shift_key() => {
                 self.apply_with(Tools::ungroup_selected);
             }
@@ -984,6 +1074,15 @@ impl ApplicationHandler<UserEvent> for App {
 
     /// Runs after each batch of events: autosaves when due and wakes up for the next one.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.dropped.is_empty() {
+            let paths = std::mem::take(&mut self.dropped);
+            // Windows sends no cursor moves during a drag: this is the last known position.
+            let at = self
+                .navigation
+                .cursor()
+                .map(|c| self.camera.screen_to_world(c));
+            self.insert_files(&paths, at);
+        }
         let now = Instant::now();
         self.session.tick(&self.document, now);
         let ui_repaint = self.ui.as_ref().and_then(Ui::repaint_at);
@@ -1145,6 +1244,10 @@ impl ApplicationHandler<UserEvent> for App {
                     TouchPhase::Ended | TouchPhase::Cancelled => None,
                     _ => touch.force.map(|f| f.normalized()),
                 };
+                false
+            }
+            WindowEvent::DroppedFile(path) => {
+                self.dropped.push(path);
                 false
             }
             WindowEvent::PinchGesture { delta, .. } => {

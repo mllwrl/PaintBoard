@@ -643,6 +643,33 @@ fn resize_snaps_dragged_edge() {
 }
 
 #[test]
+fn image_corners_keep_aspect_unless_shift() {
+    let mut doc = Document::new();
+    let asset = doc.add_asset(b"img".to_vec());
+    let mut data = shape(
+        ShapeKind::Rectangle.into(),
+        Rect::new(0.0, 0.0, 200.0, 100.0),
+    );
+    data.kind = ObjectKind::Image(pb_core::Image::new(asset));
+    let id = doc
+        .apply(Command::Create(vec![data.into()]))
+        .unwrap()
+        .created[0];
+    let mut tools = Tools::default();
+    tools.select_only([id]);
+    let kept = frame_of_cmd(drag(&mut tools, &doc, at(200.0, 100.0), at(400.0, 120.0)));
+    let r = kept[0].rect;
+    assert!((r.width() / r.height() - 2.0).abs() < 1e-9, "{r:?}");
+    let free = frame_of_cmd(drag(
+        &mut tools,
+        &doc,
+        shift(at(200.0, 100.0)),
+        shift(at(400.0, 120.0)),
+    ));
+    assert_eq!(free[0].rect, Rect::new(0.0, 0.0, 400.0, 120.0));
+}
+
+#[test]
 fn shape_corners_snap() {
     let (doc, _) = doc_with(&[Rect::new(0.0, 0.0, 100.0, 100.0)]);
     let mut tools = Tools::default();

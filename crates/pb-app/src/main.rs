@@ -3,6 +3,7 @@
 mod app;
 mod editing;
 mod navigation;
+mod pictures;
 mod session;
 mod ui;
 

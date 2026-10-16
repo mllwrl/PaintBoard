@@ -6,6 +6,8 @@ use kurbo::{Point, Rect, Vec2};
 use loro::TreeID;
 use pb_geom::{Frame, ShapeKind};
 
+use crate::AssetId;
+
 /// Stable identifier of a board object, unique across replicas.
 ///
 /// It is taken from the tree node that first held the object, but it is stored in the
@@ -57,6 +59,8 @@ pub enum ObjectKind {
     /// A sticky note: a square of the fill color with text in the outline color, sized to
     /// fit. It has no outline.
     Sticky(Sticky),
+    /// A picture, stretched over the object's bounds. It ignores colors and outline.
+    Image(Image),
 }
 
 impl ObjectKind {
@@ -66,6 +70,7 @@ impl ObjectKind {
             Self::Ink(_) => "ink",
             Self::Text(_) => "text",
             Self::Sticky(_) => "sticky",
+            Self::Image(_) => "image",
             Self::Shape(shape) => match shape {
                 ShapeKind::Rectangle => "rect",
                 ShapeKind::RoundedRectangle => "roundRect",
@@ -96,7 +101,7 @@ impl ObjectKind {
         match self {
             Self::Text(text) => Some(&text.text),
             Self::Sticky(sticky) => Some(&sticky.text),
-            Self::Shape(_) | Self::Ink(_) => None,
+            Self::Shape(_) | Self::Ink(_) | Self::Image(_) => None,
         }
     }
 }
@@ -202,6 +207,27 @@ impl Sticky {
     /// The font size used when even a single short line fits.
     pub fn max_font_size(bounds: Rect) -> f64 {
         bounds.width().min(bounds.height()) * Self::MAX_FONT
+    }
+}
+
+/// A picture on the board.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Image {
+    /// The image file, in [`crate::Assets`].
+    pub asset: AssetId,
+    /// The part of the picture shown, as fractions of its width and height: [`Image::FULL`]
+    /// shows all of it.
+    pub crop: Rect,
+}
+
+impl Image {
+    pub const FULL: Rect = Rect::new(0.0, 0.0, 1.0, 1.0);
+
+    pub fn new(asset: AssetId) -> Self {
+        Self {
+            asset,
+            crop: Self::FULL,
+        }
     }
 }
 
