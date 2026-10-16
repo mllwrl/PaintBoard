@@ -33,10 +33,34 @@ pub enum Motion {
 /// Width of the caret, in the text's units relative to the font size.
 const CARET_WIDTH: f32 = 0.08;
 
+/// What an edit did, to merge runs of the same edit into one undo step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditKind {
+    Typing,
+    Deleting,
+    /// Paste, cut, a newline or an IME commit: always a step of its own.
+    Other,
+}
+
+/// Text and selection (anchor, focus as byte offsets) before an edit.
+#[derive(Clone, Debug, PartialEq)]
+struct Snapshot {
+    text: String,
+    anchor: usize,
+    focus: usize,
+}
+
 /// An editable text with the same layout as displayed text (see [`TextEngine::layout`]).
+///
+/// Keeps its own undo history while it lives: consecutive typing or deleting is one step,
+/// and a space, a cursor move or another kind of edit starts the next.
 pub struct TextEditor {
     editor: PlainEditor<()>,
     size: f64,
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
+    /// The kind of the last edit, while further edits of that kind join its step.
+    last_edit: Option<EditKind>,
 }
 
 impl TextEditor {
@@ -55,7 +79,13 @@ impl TextEditor {
         styles.insert(StyleProperty::LineHeight(
             parley::LineHeight::FontSizeRelative(LINE_HEIGHT),
         ));
-        let mut this = Self { editor, size };
+        let mut this = Self {
+            editor,
+            size,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            last_edit: None,
+        };
         this.driver(engine).move_to_text_end();
         this
     }
@@ -102,33 +132,131 @@ impl TextEditor {
         self.editor.is_composing()
     }
 
-    /// Types `text` over the selection.
+    fn snapshot(&self) -> Snapshot {
+        let selection = self.editor.raw_selection();
+        Snapshot {
+            text: self.text(),
+            anchor: selection.anchor().index(),
+            focus: selection.focus().index(),
+        }
+    }
+
+    fn restore(&mut self, engine: &mut TextEngine, snapshot: &Snapshot) {
+        self.editor.set_text(&snapshot.text);
+        self.driver(engine)
+            .select_byte_range(snapshot.anchor, snapshot.focus);
+    }
+
+    /// Runs an edit, recording an undo step if it changed the text and does not continue
+    /// the previous step.
+    fn edit(&mut self, kind: EditKind, joins: bool, f: impl FnOnce(&mut Self)) {
+        let before = self.snapshot();
+        f(self);
+        if self.editor.text() == before.text.as_str() {
+            return;
+        }
+        let continues = joins && kind != EditKind::Other && self.last_edit == Some(kind);
+        if !continues {
+            self.undo.push(before);
+        }
+        self.redo.clear();
+        self.last_edit = Some(kind);
+    }
+
+    /// Ends the current undo step, so the next edit starts another.
+    fn break_step(&mut self) {
+        self.last_edit = None;
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
+
+    /// Reverts the last undo step; returns false when there is none.
+    pub fn undo(&mut self, engine: &mut TextEngine) -> bool {
+        let Some(snapshot) = self.undo.pop() else {
+            return false;
+        };
+        self.redo.push(self.snapshot());
+        self.restore(engine, &snapshot);
+        self.break_step();
+        true
+    }
+
+    /// Repeats the last undone step; returns false when there is none.
+    pub fn redo(&mut self, engine: &mut TextEngine) -> bool {
+        let Some(snapshot) = self.redo.pop() else {
+            return false;
+        };
+        self.undo.push(self.snapshot());
+        self.restore(engine, &snapshot);
+        self.break_step();
+        true
+    }
+
+    /// Types `text` over the selection. Typing joins the previous step unless it starts a
+    /// word or contains a line break.
     pub fn insert(&mut self, engine: &mut TextEngine, text: &str) {
-        self.driver(engine).insert_or_replace_selection(text);
+        let typing = text.chars().count() == 1 && text != "\n";
+        let kind = if typing {
+            EditKind::Typing
+        } else {
+            EditKind::Other
+        };
+        // A word starts after whitespace, so each word is a step.
+        let after_space = self.editor.raw_text()[..self.cursor_index()]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace);
+        let joins = !(after_space && !text.starts_with(char::is_whitespace));
+        let replaces = !self.editor.raw_selection().is_collapsed();
+        self.edit(kind, joins && !replaces, |this| {
+            this.driver(engine).insert_or_replace_selection(text);
+        });
+    }
+
+    fn cursor_index(&self) -> usize {
+        let raw = self.editor.raw_text();
+        let mut index = self.editor.raw_selection().focus().index().min(raw.len());
+        while !raw.is_char_boundary(index) {
+            index -= 1;
+        }
+        index
     }
 
     /// Backspace: deletes the selection, or the character (or word) before the cursor.
     pub fn backspace(&mut self, engine: &mut TextEngine, word: bool) {
-        let mut driver = self.driver(engine);
-        if word {
-            driver.backdelete_word();
-        } else {
-            driver.backdelete();
-        }
+        let joins = !word && self.editor.raw_selection().is_collapsed();
+        self.edit(EditKind::Deleting, joins, |this| {
+            let mut driver = this.driver(engine);
+            if word {
+                driver.backdelete_word();
+            } else {
+                driver.backdelete();
+            }
+        });
     }
 
     /// Delete: deletes the selection, or the character (or word) after the cursor.
     pub fn delete(&mut self, engine: &mut TextEngine, word: bool) {
-        let mut driver = self.driver(engine);
-        if word {
-            driver.delete_word();
-        } else {
-            driver.delete();
-        }
+        let joins = !word && self.editor.raw_selection().is_collapsed();
+        self.edit(EditKind::Deleting, joins, |this| {
+            let mut driver = this.driver(engine);
+            if word {
+                driver.delete_word();
+            } else {
+                driver.delete();
+            }
+        });
     }
 
     /// Moves the cursor; `extend` (Shift) grows the selection instead.
     pub fn motion(&mut self, engine: &mut TextEngine, motion: Motion, extend: bool) {
+        self.break_step();
         let mut d = self.driver(engine);
         match (motion, extend) {
             (Motion::Left, false) => d.move_left(),
@@ -155,11 +283,13 @@ impl TextEditor {
     }
 
     pub fn select_all(&mut self, engine: &mut TextEngine) {
+        self.break_step();
         self.driver(engine).select_all();
     }
 
     /// A click at a point in layout coordinates; `extend` (Shift) selects up to it.
     pub fn click(&mut self, engine: &mut TextEngine, x: f64, y: f64, extend: bool) {
+        self.break_step();
         let mut driver = self.driver(engine);
         if extend {
             driver.shift_click_extension(x as f32, y as f32);
@@ -175,6 +305,7 @@ impl TextEditor {
     }
 
     pub fn select_word_at(&mut self, engine: &mut TextEngine, x: f64, y: f64) {
+        self.break_step();
         self.driver(engine).select_word_at_point(x as f32, y as f32);
     }
 
@@ -240,6 +371,66 @@ fn rect(b: parley::BoundingBox) -> TextRect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn type_chars(ed: &mut TextEditor, engine: &mut TextEngine, text: &str) {
+        for c in text.chars() {
+            ed.insert(engine, &c.to_string());
+        }
+    }
+
+    #[test]
+    fn undo_steps_are_words_and_runs_of_deletes() {
+        let mut engine = TextEngine::new();
+        let mut ed = TextEditor::new(&mut engine, "", 20.0);
+        assert!(!ed.can_undo());
+        type_chars(&mut ed, &mut engine, "один два");
+        ed.backspace(&mut engine, false);
+        ed.backspace(&mut engine, false);
+        assert_eq!(ed.text(), "один д");
+        assert!(ed.undo(&mut engine));
+        assert_eq!(ed.text(), "один два");
+        assert!(ed.undo(&mut engine));
+        // A space ends the word it follows.
+        assert_eq!(ed.text(), "один ");
+        assert!(ed.undo(&mut engine));
+        assert_eq!(ed.text(), "");
+        assert!(!ed.undo(&mut engine));
+        assert!(ed.redo(&mut engine));
+        assert!(ed.redo(&mut engine));
+        assert_eq!(ed.text(), "один два");
+        // The cursor is back where it was, so typing goes on at the end.
+        ed.insert(&mut engine, "!");
+        assert_eq!(ed.text(), "один два!");
+        assert!(!ed.redo(&mut engine), "a new edit drops what was undone");
+    }
+
+    #[test]
+    fn moving_the_cursor_and_pasting_start_new_steps() {
+        let mut engine = TextEngine::new();
+        let mut ed = TextEditor::new(&mut engine, "ab", 20.0);
+        type_chars(&mut ed, &mut engine, "cd");
+        ed.motion(&mut engine, Motion::TextStart, false);
+        type_chars(&mut ed, &mut engine, "x");
+        ed.insert(&mut engine, "pasted");
+        assert_eq!(ed.text(), "xpastedabcd");
+        ed.undo(&mut engine);
+        assert_eq!(ed.text(), "xabcd");
+        ed.undo(&mut engine);
+        assert_eq!(ed.text(), "abcd");
+        ed.undo(&mut engine);
+        assert_eq!(ed.text(), "ab");
+        // Deleting nothing is not a step.
+        ed.motion(&mut engine, Motion::TextStart, false);
+        ed.backspace(&mut engine, false);
+        assert!(!ed.can_undo());
+        // Typing over a selection starts a step, and the selection comes back with it.
+        type_chars(&mut ed, &mut engine, "q");
+        ed.select_all(&mut engine);
+        type_chars(&mut ed, &mut engine, "zz");
+        ed.undo(&mut engine);
+        assert_eq!(ed.text(), "qab");
+        assert_eq!(ed.selected_text().as_deref(), Some("qab"));
+    }
 
     #[test]
     fn typing_and_deleting() {

@@ -10,7 +10,7 @@ use pb_core::{
 };
 use pb_geom::kurbo::{Point, Rect, Size, Vec2};
 use pb_geom::{Frame, ShapeKind};
-use pb_platform::clipboard;
+use pb_platform::{Duration, Instant, clipboard};
 use pb_render::{TextEditOverlay, fitted_font_size, text_align};
 use pb_text::{Motion, TextAlign, TextEditor, TextEngine, TextRect};
 use winit::event::{ElementState, Ime, KeyEvent};
@@ -20,8 +20,16 @@ use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 pub const NEW_TEXT_SIZE: f64 = 24.0;
 /// An empty text box is still this wide, relative to its font size, so it can be clicked.
 const MIN_WIDTH: f64 = 0.5;
+/// Text objects wrap a hair wider than their bounds, so text measured to fit exactly does
+/// not wrap; the same as in `pb_render`.
+const WRAP_SLACK: f64 = 0.5;
 /// Space between a sticky note and the next one added with Tab, relative to its size.
 const STICKY_GAP: f64 = 0.1;
+/// How long the caret is shown, then hidden, while it blinks (the Windows default).
+const BLINK: Duration = Duration::from_millis(530);
+/// The caret stops blinking and stays shown this long after the last input, so an idle
+/// edit does not keep waking the app.
+const BLINK_FOR: Duration = Duration::from_secs(20);
 
 /// What the editor did with a key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,8 +57,8 @@ pub enum Target {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Placement {
     /// A text object: the box grows with the text from its top-left corner (world, before
-    /// rotation).
-    Free { origin: Point },
+    /// rotation). With a `width`, lines wrap there and only the height grows.
+    Free { origin: Point, width: Option<f64> },
     /// A sticky note, or a shape of the given kind: the text is fitted and centered in the
     /// object's fixed bounds.
     Fitted {
@@ -87,6 +95,10 @@ pub struct TextEdit {
     /// Text when editing started, to skip edits that change nothing.
     original: String,
     selecting: bool,
+    /// Last input; the caret blinks from then on, starting shown.
+    active_at: Instant,
+    /// Whether the last overlay showed the caret.
+    caret_drawn: bool,
     /// The connector whose label this is.
     connector: Option<ObjectData>,
 }
@@ -101,6 +113,7 @@ impl TextEdit {
             editor,
             placement: Placement::Free {
                 origin: at - Vec2::new(0.0, line / 2.0),
+                width: None,
             },
             rotation: 0.0,
             style: Style {
@@ -112,6 +125,8 @@ impl TextEdit {
             },
             original: String::new(),
             selecting: false,
+            active_at: Instant::now(),
+            caret_drawn: false,
             connector: None,
         }
     }
@@ -145,10 +160,28 @@ impl TextEdit {
             style,
             original: text.to_owned(),
             selecting: false,
+            active_at: Instant::now(),
+            caret_drawn: false,
             connector: None,
         };
         this.refit(engine);
         this
+    }
+
+    /// The width a text object with `bounds` wraps at: its own when it was made narrower
+    /// than its longest line, otherwise none, so it grows as it is typed into.
+    fn wrap_width(engine: &mut TextEngine, text: &Text, bounds: Rect) -> Option<f64> {
+        let natural = engine.layout(&text.text, text.size, None).content_width;
+        (natural > bounds.width() + WRAP_SLACK).then_some(bounds.width())
+    }
+
+    fn text_editor(engine: &mut TextEngine, text: &Text, bounds: Rect) -> TextEditor {
+        let mut editor = TextEditor::new(engine, &text.text, text.size);
+        if let Some(width) = Self::wrap_width(engine, text, bounds) {
+            // Wrapped as drawn, see `pb_render`.
+            editor.set_wrap(Some(width + WRAP_SLACK), TextAlign::Start);
+        }
+        editor
     }
 
     /// Edits an existing text object, sticky note, shape or connector label; `None` for other
@@ -165,14 +198,17 @@ impl TextEdit {
         match &data.kind {
             ObjectKind::Text(text) => Some(Self {
                 target,
-                editor: TextEditor::new(engine, &text.text, text.size),
+                editor: Self::text_editor(engine, text, data.bounds),
                 placement: Placement::Free {
                     origin: data.bounds.origin(),
+                    width: Self::wrap_width(engine, text, data.bounds),
                 },
                 rotation: data.rotation,
                 style: data.style,
                 original: text.text.to_string(),
                 selecting: false,
+                active_at: Instant::now(),
+                caret_drawn: false,
                 connector: None,
             }),
             ObjectKind::Sticky(sticky) => Some(Self::fitted(
@@ -216,6 +252,8 @@ impl TextEdit {
                     style: data.style,
                     original: c.label.text.to_string(),
                     selecting: false,
+                    active_at: Instant::now(),
+                    caret_drawn: false,
                     connector: Some(data.clone()),
                 })
             }
@@ -252,9 +290,9 @@ impl TextEdit {
     /// The text box as it is now, in world space.
     pub fn frame(&mut self, engine: &mut TextEngine) -> Frame {
         let rect = match self.placement {
-            Placement::Free { origin } => {
+            Placement::Free { origin, width } => {
                 let layout = self.editor.layout(engine);
-                let width = layout.width.max(self.editor.size() * MIN_WIDTH);
+                let width = width.unwrap_or(layout.width.max(self.editor.size() * MIN_WIDTH));
                 Rect::from_origin_size(origin, (width, layout.height))
             }
             Placement::Fitted { bounds, .. } => bounds,
@@ -270,7 +308,7 @@ impl TextEdit {
     /// Top-left corner of the text layout, in the box's unrotated coordinates.
     fn text_origin(&mut self, engine: &mut TextEngine) -> Point {
         match self.placement {
-            Placement::Free { origin } => origin,
+            Placement::Free { origin, .. } => origin,
             Placement::Fitted { .. } => {
                 let text_box = self.placement.text_box(&self.style);
                 let text_box = text_box.expect("fitted placement");
@@ -300,8 +338,35 @@ impl TextEdit {
         self.frame(engine).contains(world, pad)
     }
 
+    /// Restarts the caret's blinking, shown, after input.
+    fn touch(&mut self) {
+        self.active_at = Instant::now();
+    }
+
+    /// Whether the blinking caret is in its shown phase at `now`.
+    fn caret_shown(&self, now: Instant) -> bool {
+        let t = now.saturating_duration_since(self.active_at);
+        t >= BLINK_FOR || (t.as_millis() / BLINK.as_millis()).is_multiple_of(2)
+    }
+
+    /// When the caret next appears or disappears; `None` once it has stopped blinking.
+    pub fn next_blink(&self, now: Instant) -> Option<Instant> {
+        let t = now.saturating_duration_since(self.active_at);
+        if t >= BLINK_FOR {
+            return None;
+        }
+        let phases = (t.as_millis() / BLINK.as_millis()) as u32 + 1;
+        Some(self.active_at + BLINK * phases)
+    }
+
+    /// Whether the caret should be drawn differently from the last overlay.
+    pub fn needs_blink_redraw(&self, now: Instant) -> bool {
+        self.caret_shown(now) != self.caret_drawn
+    }
+
     /// A press inside the box: places the cursor, or selects a word on a double click.
     pub fn press(&mut self, engine: &mut TextEngine, world: Point, shift: bool, double: bool) {
+        self.touch();
         let p = self.layout_point(engine, world);
         if double {
             self.editor.select_word_at(engine, p.x, p.y);
@@ -316,6 +381,7 @@ impl TextEdit {
         if !self.selecting {
             return false;
         }
+        self.touch();
         let p = self.layout_point(engine, world);
         self.editor.drag_to(engine, p.x, p.y);
         true
@@ -338,6 +404,7 @@ impl TextEdit {
         if event.state != ElementState::Pressed {
             return KeyOutcome::Handled;
         }
+        self.touch();
         let ctrl = modifiers.control_key();
         let shift = modifiers.shift_key();
         let ed = &mut self.editor;
@@ -361,7 +428,19 @@ impl TextEdit {
                         ed.insert(engine, &text.replace("\r\n", "\n"));
                     }
                 }
-                KeyCode::KeyS | KeyCode::KeyO | KeyCode::KeyN | KeyCode::KeyZ | KeyCode::KeyY => {
+                // Undo and redo work inside the edit; before anything is typed, they
+                // reach the board.
+                KeyCode::KeyZ | KeyCode::KeyY => {
+                    if !ed.can_undo() && !ed.can_redo() {
+                        return KeyOutcome::FinishAndPass;
+                    }
+                    if code == KeyCode::KeyZ && !shift {
+                        ed.undo(engine);
+                    } else {
+                        ed.redo(engine);
+                    }
+                }
+                KeyCode::KeyS | KeyCode::KeyO | KeyCode::KeyN => {
                     return KeyOutcome::FinishAndPass;
                 }
                 _ => {}
@@ -423,6 +502,7 @@ impl TextEdit {
     }
 
     pub fn ime(&mut self, engine: &mut TextEngine, ime: &Ime) {
+        self.touch();
         match ime {
             Ime::Preedit(text, cursor) => self.editor.set_preedit(engine, text, *cursor),
             Ime::Commit(text) => {
@@ -480,12 +560,14 @@ impl TextEdit {
         }
     }
 
-    /// Box, selection and caret for the overlay, in world space.
-    pub fn overlay(&mut self, engine: &mut TextEngine) -> TextEditOverlay {
+    /// Box, selection and caret for the overlay at `now`, in world space.
+    pub fn overlay(&mut self, engine: &mut TextEngine, now: Instant) -> TextEditOverlay {
         let rects = self.editor.selection(engine);
         let selection: Vec<_> = rects.iter().map(|r| self.quad(engine, *r)).collect();
         // Like most editors, no caret while text is selected.
-        let caret = self.editor.caret(engine).filter(|_| selection.is_empty());
+        let shown = selection.is_empty() && self.caret_shown(now);
+        self.caret_drawn = shown;
+        let caret = self.editor.caret(engine).filter(|_| shown);
         let caret = caret.map(|r| {
             let x = (r.x0 + r.x1) / 2.0;
             let top = self.world_point(engine, Point::new(x, r.y0));
@@ -754,9 +836,64 @@ mod tests {
         let mut edit = TextEdit::existing(&mut e, &doc, id, None).unwrap();
         edit.editor.motion(&mut e, Motion::TextEnd, false);
         let area = Shape::text_box(pb_geom::ShapeKind::Rectangle, bounds, &style).area;
-        let (top, _) = edit.overlay(&mut e).caret.unwrap();
+        let (top, _) = edit.overlay(&mut e, Instant::now()).caret.unwrap();
         assert!((top.x - area.x1).abs() < 2.0, "{top:?} vs {area:?}");
         assert!((top.y - area.y0).abs() < 1.0, "{top:?} vs {area:?}");
+    }
+
+    #[test]
+    fn caret_blinks_after_input_then_stays() {
+        let mut e = engine();
+        let (doc, object) = text_object("abc");
+        let mut edit = TextEdit::existing(&mut e, &doc, object, None).unwrap();
+        let start = edit.active_at;
+        let at = |ms| start + Duration::from_millis(ms);
+        assert!(edit.overlay(&mut e, at(0)).caret.is_some());
+        assert_eq!(edit.next_blink(at(0)), Some(at(530)));
+        assert!(edit.needs_blink_redraw(at(600)));
+        assert!(edit.overlay(&mut e, at(600)).caret.is_none());
+        assert!(!edit.needs_blink_redraw(at(700)));
+        assert!(edit.overlay(&mut e, at(1100)).caret.is_some());
+        // Idle: it stays shown and stops waking the app.
+        let idle = at(BLINK_FOR.as_millis() as u64 + 300);
+        assert!(edit.overlay(&mut e, idle).caret.is_some());
+        assert_eq!(edit.next_blink(idle), None);
+    }
+
+    #[test]
+    fn narrowed_text_keeps_its_width_while_edited() {
+        let mut e = engine();
+        let (mut doc, object) = text_object("one two three four");
+        // Wider than the text first, then narrowed to wrap.
+        let natural = Rect::new(10.0, 10.0, 400.0, 34.0);
+        doc.apply(Command::SetGeometry(vec![(
+            object,
+            Frame::new(natural, 0.0),
+        )]))
+        .unwrap();
+        let mut edit = TextEdit::existing(&mut e, &doc, object, None).unwrap();
+        edit.editor.insert(&mut e, " five");
+        let wide = edit.frame(&mut e).rect;
+        assert!(
+            wide.width() < natural.width(),
+            "unwrapped text takes its own width"
+        );
+        assert!(wide.height() < 30.0, "on one line: {wide:?}");
+        let narrow = Rect::new(10.0, 10.0, 70.0, 34.0);
+        doc.apply(Command::SetGeometry(vec![(
+            object,
+            Frame::new(narrow, 0.0),
+        )]))
+        .unwrap();
+        let mut edit = TextEdit::existing(&mut e, &doc, object, None).unwrap();
+        edit.editor.insert(&mut e, " five");
+        let rect = edit.frame(&mut e).rect;
+        assert_eq!(rect.width(), narrow.width());
+        assert!(rect.height() > narrow.height(), "{rect:?}");
+        let Some(Command::SetText { bounds, .. }) = edit.finish(&mut e) else {
+            panic!("expected SetText");
+        };
+        assert_eq!(bounds.width(), narrow.width());
     }
 
     #[test]
@@ -769,7 +906,7 @@ mod tests {
         assert!(!edit.contains(&mut e, Point::new(0.0, 0.0), 0.0));
         // Double click on the first word selects it.
         edit.press(&mut e, Point::new(15.0, 20.0), false, true);
-        let overlay = edit.overlay(&mut e);
+        let overlay = edit.overlay(&mut e, Instant::now());
         assert_eq!(overlay.selection.len(), 1);
         assert!(overlay.caret.is_none());
     }

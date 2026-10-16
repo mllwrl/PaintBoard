@@ -192,7 +192,7 @@ impl App {
             overlay.selected.clear();
             overlay.show_handles = false;
             overlay.rotate_knob = None;
-            overlay.text_edit = Some(edit.overlay(engine));
+            overlay.text_edit = Some(edit.overlay(engine, Instant::now()));
             let area = edit.ime_area(engine);
             let a = self.camera.world_to_screen(area.origin());
             let b = self.camera.world_to_screen(Point::new(area.x1, area.y1));
@@ -1228,10 +1228,20 @@ impl ApplicationHandler<UserEvent> for App {
         if ui_repaint.is_some_and(|at| at <= now) {
             self.request_redraw();
         }
-        let wake = [self.session.deadline(), ui_repaint.filter(|&at| at > now)]
-            .into_iter()
-            .flatten()
-            .min();
+        let blink = self.editing.as_ref().and_then(|edit| {
+            if edit.needs_blink_redraw(now) {
+                self.request_redraw();
+            }
+            edit.next_blink(now)
+        });
+        let wake = [
+            self.session.deadline(),
+            ui_repaint.filter(|&at| at > now),
+            blink,
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         event_loop.set_control_flow(match wake {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
