@@ -598,6 +598,7 @@ impl ObjectData {
         if let ObjectKind::Connector(c) = &mut self.kind {
             c.start.translate(delta);
             c.end.translate(delta);
+            c.bends = c.bends.iter().map(|&p| p + delta).collect();
         }
     }
 }

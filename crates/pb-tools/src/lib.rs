@@ -4,6 +4,7 @@
 //! read the document, so the same input logic will drive local and remote edits.
 
 mod arrange;
+pub mod bend;
 mod clipboard;
 mod connect;
 mod crop;
@@ -22,6 +23,7 @@ pub use handles::{Handle, rotation_knob};
 pub use ink::{ERASER_RADIUS, InkStyle};
 pub use selection::{Selection, selection_frame, unit_frame};
 
+use bend::BendGrip;
 use pb_core::{
     Cap, Command, Connector, ConnectorChange, Content, Document, End, FrameData, Label, Object,
     ObjectData, ObjectId, ObjectKind, Route, ShapeKind, Style,
@@ -133,6 +135,8 @@ enum Grip {
     End(Which),
     /// The label of the selected connector.
     Label,
+    /// A bend handle of the selected connector.
+    Bend(BendGrip),
 }
 
 /// What a drawing gesture makes.
@@ -204,6 +208,13 @@ enum Gesture {
         current: Pointer,
     },
     /// Sliding the label of a selected connector along its line.
+    /// Dragging a bend handle of connector `id`; `bends` is the result so far.
+    MoveBend {
+        id: ObjectId,
+        grip: BendGrip,
+        start: Point,
+        bends: Option<Vec<Point>>,
+    },
     MoveLabel {
         id: ObjectId,
         label: Label,
@@ -489,6 +500,17 @@ impl Tools {
                         current: pointer,
                     }
                 }
+                Grip::Bend(grip) => {
+                    let Some((id, _)) = self.single_connector(doc) else {
+                        return false;
+                    };
+                    Gesture::MoveBend {
+                        id,
+                        grip,
+                        start: p,
+                        bends: None,
+                    }
+                }
                 Grip::Label => {
                     let Some((id, connector)) = self.single_connector(doc) else {
                         return false;
@@ -625,6 +647,18 @@ impl Tools {
                 *end = connect::end_at(doc, &pointer, other.object());
                 true
             }
+            Some(Gesture::MoveBend {
+                id,
+                grip,
+                start,
+                bends,
+            }) => {
+                if bends.is_none() && pointer.screen_distance(*start) < CLICK_SLOP {
+                    return false;
+                }
+                *bends = bend::dragged(doc, *id, *grip, pointer.world - *start);
+                true
+            }
             Some(Gesture::MoveLabel {
                 id,
                 label,
@@ -749,6 +783,15 @@ impl Tools {
                 label: label.clone(),
             }),
             Gesture::MoveLabel { .. } => None,
+            Gesture::MoveBend {
+                id,
+                bends: Some(bends),
+                ..
+            } => Some(Command::SetBends {
+                id: *id,
+                bends: bends.clone().into(),
+            }),
+            Gesture::MoveBend { .. } => None,
         };
         self.gesture = None;
         command
@@ -763,6 +806,35 @@ impl Tools {
         let (id, _) = self.single_connector(doc)?;
         let (s, e) = doc.connector_ends(id)?;
         Some([s.point, e.point])
+    }
+
+    /// Bend handles of the selected connector, when its end handles show.
+    pub fn bend_handles(&self, doc: &Document) -> Vec<Point> {
+        if self.connector_handles(doc).is_none() {
+            return Vec::new();
+        }
+        self.single_connector(doc)
+            .map(|(id, _)| bend::handles(doc, id).into_iter().map(|(p, _)| p).collect())
+            .unwrap_or_default()
+    }
+
+    /// Puts the selected connectors back on their automatic paths.
+    pub fn reset_bends_selected(&self, doc: &Document) -> Option<Command> {
+        let ids: Vec<_> = self
+            .unlocked(doc)
+            .into_iter()
+            .filter(|&id| {
+                matches!(doc.get(id).map(|o| &o.data.kind),
+                    Some(ObjectKind::Connector(c)) if !c.bends.is_empty())
+            })
+            .collect();
+        match ids[..] {
+            [id] => Some(Command::SetBends {
+                id,
+                bends: Default::default(),
+            }),
+            _ => None,
+        }
     }
 
     /// Connection points to show while placing a connector end, and the one it snaps to.
@@ -825,6 +897,19 @@ impl Tools {
                     Which::End => c.end = *end,
                 }
                 o.data.kind = ObjectKind::Connector(c);
+                vec![o]
+            }
+            Some(Gesture::MoveBend {
+                id,
+                bends: Some(bends),
+                ..
+            }) => {
+                let Some(mut o) = doc.get(*id).cloned() else {
+                    return Vec::new();
+                };
+                if let ObjectKind::Connector(c) = &mut o.data.kind {
+                    c.bends = bends.clone().into();
+                }
                 vec![o]
             }
             Some(Gesture::MoveLabel {
@@ -952,13 +1037,13 @@ impl Tools {
             Some(Gesture::Shape { .. } | Gesture::Connect { .. } | Gesture::MoveEnd { .. }) => {
                 CursorHint::Crosshair
             }
-            Some(Gesture::MoveLabel { .. }) => CursorHint::Move,
+            Some(Gesture::MoveLabel { .. } | Gesture::MoveBend { .. }) => CursorHint::Move,
             _ if self.active != ToolKind::Select => CursorHint::Crosshair,
             _ => match self.hover_grip {
                 Some(Grip::Resize(handle)) => handle.cursor(self.hover_rotation),
                 Some(Grip::Rotate) => CursorHint::Rotate,
                 Some(Grip::End(_)) => CursorHint::Crosshair,
-                Some(Grip::Label) => CursorHint::Move,
+                Some(Grip::Label | Grip::Bend(_)) => CursorHint::Move,
                 None => CursorHint::Default,
             },
         }
@@ -1050,7 +1135,11 @@ impl Tools {
             let on_label = doc
                 .connector_label(id)
                 .is_some_and(|r| r.contains(pointer.world));
-            return end.or(on_label.then_some((frame, Grip::Label)));
+            let bend = bend::handles(doc, id)
+                .into_iter()
+                .find(|&(p, _)| near(p))
+                .map(|(_, grip)| (frame, Grip::Bend(grip)));
+            return end.or(bend).or(on_label.then_some((frame, Grip::Label)));
         }
         if self.can_rotate(doc)
             && (rotation_knob(frame, pointer.zoom) - pointer.world).hypot() <= radius
@@ -1275,6 +1364,7 @@ impl Tools {
 fn connector(start: End, end: End, route: Route) -> ObjectData {
     ObjectData {
         kind: ObjectKind::Connector(Connector {
+            bends: Default::default(),
             start,
             end,
             route,

@@ -83,6 +83,8 @@ mod key {
     pub const LABEL_AT: &str = "labelAt";
     pub const LABEL_W: &str = "labelW";
     pub const LABEL_H: &str = "labelH";
+    /// ...and the points it runs through when set by hand: little-endian `f64` pairs.
+    pub const BENDS: &str = "bends";
 
     /// `kind` of group nodes.
     pub const GROUP: &str = "group";
@@ -422,6 +424,9 @@ impl Document {
                         };
                         write_end(&meta, key::START, &map(c.start))?;
                         write_end(&meta, key::END, &map(c.end))?;
+                        let bends: Vec<_> =
+                            c.bends.iter().map(|&p| map_point(p, from, frame)).collect();
+                        write_bends(&meta, &bends)?;
                         write_bounds(&meta, frame.aabb())?;
                         meta.insert(key::ROTATION, 0.0)?;
                         continue;
@@ -527,6 +532,15 @@ impl Document {
                     let meta = self.tree.get_meta(self.nodes[&id])?;
                     write_connector(&meta, &change.apply_to(c), &change)?;
                 }
+            }
+            Command::SetBends { id, bends } => {
+                if !matches!(
+                    self.get(id).map(|o| &o.data.kind),
+                    Some(ObjectKind::Connector(_))
+                ) {
+                    return Err(Error::UnknownObject(id));
+                }
+                write_bends(&self.tree.get_meta(self.nodes[&id])?, &bends)?;
             }
             Command::SetLabel { id, label } => {
                 if !matches!(
@@ -704,6 +718,7 @@ impl Document {
                     if let ObjectKind::Connector(c) = &data.kind {
                         write_end(&meta, key::START, &c.start)?;
                         write_end(&meta, key::END, &c.end)?;
+                        write_bends(&meta, &c.bends)?;
                     }
                     write_bounds(&meta, data.bounds)?;
                 }
@@ -1046,6 +1061,7 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
             };
             write_connector(meta, c, &all)?;
             write_label(meta, &c.label)?;
+            write_bends(meta, &c.bends)?;
         }
         ObjectKind::Shape(shape) => {
             if !shape.text.is_empty() {
@@ -1152,6 +1168,7 @@ fn write_connector(meta: &LoroMap, c: &Connector, change: &crate::ConnectorChang
     }
     if change.route.is_some() {
         meta.insert(key::ROUTE, route_name(c.route))?;
+        write_bends(meta, &c.bends)?;
     }
     if change.start_cap.is_some() {
         meta.insert(key::START_CAP, cap_name(c.start_cap))?;
@@ -1160,6 +1177,38 @@ fn write_connector(meta: &LoroMap, c: &Connector, change: &crate::ConnectorChang
         meta.insert(key::END_CAP, cap_name(c.end_cap))?;
     }
     Ok(())
+}
+
+/// Writes a connector's hand-set bends, or removes them when there are none.
+fn write_bends(meta: &LoroMap, bends: &[Point]) -> Result<()> {
+    if bends.is_empty() {
+        if meta.get(key::BENDS).is_some() {
+            meta.delete(key::BENDS)?;
+        }
+        return Ok(());
+    }
+    let mut bytes = Vec::with_capacity(bends.len() * 16);
+    for p in bends {
+        bytes.extend_from_slice(&p.x.to_le_bytes());
+        bytes.extend_from_slice(&p.y.to_le_bytes());
+    }
+    meta.insert(key::BENDS, bytes)?;
+    Ok(())
+}
+
+fn read_bends(meta: &LoroMap) -> Arc<[Point]> {
+    let Some(ValueOrContainer::Value(LoroValue::Binary(bytes))) = meta.get(key::BENDS) else {
+        return Arc::from([]);
+    };
+    let (chunks, _) = bytes.as_chunks::<16>();
+    chunks
+        .iter()
+        .map(|c| {
+            let f = |b: &[u8]| f64::from_le_bytes(b.try_into().expect("8 bytes"));
+            Point::new(f(&c[0..8]), f(&c[8..16]))
+        })
+        .filter(|p| p.x.is_finite() && p.y.is_finite())
+        .collect()
 }
 
 fn write_label(meta: &LoroMap, label: &Label) -> Result<()> {
@@ -1268,6 +1317,7 @@ fn read_connector(meta: &LoroMap) -> Option<Connector> {
         start_cap: cap(key::START_CAP),
         end_cap: cap(key::END_CAP),
         label: read_label(meta),
+        bends: read_bends(meta),
     })
 }
 
@@ -2241,6 +2291,7 @@ mod tests {
     fn connector(start: End, end: End) -> ObjectData {
         ObjectData {
             kind: ObjectKind::Connector(Connector {
+                bends: Default::default(),
                 start,
                 end,
                 route: Route::Straight,

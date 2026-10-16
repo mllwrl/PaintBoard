@@ -132,6 +132,7 @@ pub fn link(
     let (start, finish) = (end(a, side), end(b, side.opposite()));
     Some(ObjectData {
         kind: ObjectKind::Connector(Connector {
+            bends: Default::default(),
             start,
             end: finish,
             route,

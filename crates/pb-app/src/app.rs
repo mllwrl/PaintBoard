@@ -491,6 +491,11 @@ impl App {
             Action::NextGrid => self.grid = self.grid.next(),
             Action::ToggleSnap => self.tools.set_snap_to_grid(!self.tools.snap_to_grid()),
             Action::ToggleMinimap => self.show_minimap = !self.show_minimap,
+            Action::ResetBends => {
+                if let Some(command) = self.tools.reset_bends_selected(&self.document) {
+                    self.apply(command);
+                }
+            }
             Action::LookAt(at) => {
                 let zoom = self.camera.zoom();
                 self.camera.look_at(at, zoom, viewport);
@@ -1722,6 +1727,7 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
         lines,
         gaps,
         end_handles: end_handles.map(Vec::from).unwrap_or_default(),
+        bend_handles: tools.bend_handles(document),
         connection_points,
         connection_active,
     }

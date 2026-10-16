@@ -55,6 +55,12 @@ pub enum Command {
         ids: Vec<ObjectId>,
         change: ConnectorChange,
     },
+    /// Sets the points a connector's line runs through; empty for its automatic path.
+    /// Takes a connector only.
+    SetBends {
+        id: ObjectId,
+        bends: Arc<[kurbo::Point]>,
+    },
     /// Replaces a connector's label. Takes a connector only.
     SetLabel {
         id: ObjectId,

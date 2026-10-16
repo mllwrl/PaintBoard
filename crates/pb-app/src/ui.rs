@@ -67,6 +67,8 @@ pub enum Action {
     MarkColor(Option<Rgba>),
     /// Shows or hides the minimap.
     ToggleMinimap,
+    /// Puts the selected connector back on its automatic path.
+    ResetBends,
     /// Centers the view on a world point (from the minimap).
     LookAt(kurbo::Point),
     /// Replace the selected handwriting with typed text.
@@ -677,6 +679,14 @@ fn connector_controls(ui: &mut egui::Ui, c: &Connector, actions: &mut Vec<Action
             end_cap: Some(toggled(c.end_cap)),
             ..ConnectorChange::default()
         }));
+    }
+    if !c.bends.is_empty()
+        && ui
+            .button("Reset path")
+            .on_hover_text("Drop the bends set by hand")
+            .clicked()
+    {
+        actions.push(Action::ResetBends);
     }
     ui.separator();
 }

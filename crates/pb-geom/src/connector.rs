@@ -175,7 +175,8 @@ impl ConnectorPath {
 }
 
 /// The path of a connector between `start` and `end`, with arrowheads per `caps` sized for
-/// a line `width` wide. Elbow connectors go around `obstacles` (world bounds of objects).
+/// a line `width` wide. It runs through `bends` (world points set by hand) if there are
+/// any; otherwise elbow connectors go around `obstacles` (world bounds of objects).
 pub fn layout(
     route: Route,
     start: EndPoint,
@@ -183,11 +184,19 @@ pub fn layout(
     caps: (Cap, Cap),
     width: f64,
     obstacles: &[Rect],
+    bends: &[Point],
 ) -> ConnectorPath {
-    let mut raw = match route {
-        Route::Straight => Raw::Poly(vec![start.point, end.point]),
-        Route::Elbow => Raw::Poly(elbow_around(start, end, obstacles)),
-        Route::Curved => curve(start, end),
+    let mut raw = match (route, bends.is_empty()) {
+        (Route::Straight, _) => {
+            let mut points = vec![start.point];
+            points.extend_from_slice(bends);
+            points.push(end.point);
+            Raw::Poly(points)
+        }
+        (Route::Elbow, true) => Raw::Poly(elbow_around(start, end, obstacles)),
+        (Route::Elbow, false) => Raw::Poly(elbow_through(start, end, bends)),
+        (Route::Curved, true) => curve(start, end),
+        (Route::Curved, false) => curve_through(start, end, bends),
     };
     let length = (width * ARROW_LENGTH).max(ARROW_MIN);
     let mut heads = Vec::new();
@@ -212,7 +221,8 @@ pub fn layout(
 /// A connector path before it becomes a `BezPath`.
 enum Raw {
     Poly(Vec<Point>),
-    Cubic([Point; 4]),
+    /// Cubic segments, each starting where the previous one ends.
+    Curve(Vec<[Point; 4]>),
 }
 
 impl Raw {
@@ -220,7 +230,10 @@ impl Raw {
     fn start_dir(&self) -> Option<Vec2> {
         match self {
             Self::Poly(points) => unit(points[0] - *points.get(1)?),
-            Self::Cubic([p0, c1, _, p3]) => unit(*p0 - *c1).or_else(|| unit(*p0 - *p3)),
+            Self::Curve(segments) => {
+                let [p0, c1, _, p3] = *segments.first()?;
+                unit(p0 - c1).or_else(|| unit(p0 - p3))
+            }
         }
     }
 
@@ -231,7 +244,10 @@ impl Raw {
                 let n = points.len();
                 unit(points[n - 1] - *points.get(n.checked_sub(2)?)?)
             }
-            Self::Cubic([p0, _, c2, p3]) => unit(*p3 - *c2).or_else(|| unit(*p3 - *p0)),
+            Self::Curve(segments) => {
+                let [p0, _, c2, p3] = *segments.last()?;
+                unit(p3 - c2).or_else(|| unit(p3 - p0))
+            }
         }
     }
 
@@ -243,7 +259,11 @@ impl Raw {
                 let first = points[0] - points[1];
                 points[0] -= limit(by, first);
             }
-            Self::Cubic(c) => c[0] -= by,
+            Self::Curve(segments) => {
+                if let Some(c) = segments.first_mut() {
+                    c[0] -= by;
+                }
+            }
         }
     }
 
@@ -254,7 +274,11 @@ impl Raw {
                 let last = points[n - 1] - points[n - 2];
                 points[n - 1] -= limit(by, last);
             }
-            Self::Cubic(c) => c[3] -= by,
+            Self::Curve(segments) => {
+                if let Some(c) = segments.last_mut() {
+                    c[3] -= by;
+                }
+            }
         }
     }
 
@@ -265,9 +289,13 @@ impl Raw {
                 path.move_to(points[0]);
                 points[1..].iter().for_each(|&p| path.line_to(p));
             }
-            Self::Cubic([p0, c1, c2, p3]) => {
-                path.move_to(*p0);
-                path.curve_to(*c1, *c2, *p3);
+            Self::Curve(segments) => {
+                if let Some(first) = segments.first() {
+                    path.move_to(first[0]);
+                }
+                for [_, c1, c2, p3] in segments {
+                    path.curve_to(*c1, *c2, *p3);
+                }
             }
         }
         path
@@ -455,7 +483,67 @@ fn curve(start: EndPoint, end: EndPoint) -> Raw {
     let k = (e - s).hypot() * CURVE_TENSION;
     let ds = start.normal.or_else(|| unit(e - s)).unwrap_or_default();
     let de = end.normal.or_else(|| unit(s - e)).unwrap_or_default();
-    Raw::Cubic([s, s + ds * k, e + de * k, e])
+    Raw::Curve(vec![[s, s + ds * k, e + de * k, e]])
+}
+
+/// A smooth curve through `bends` (Catmull-Rom), leaving and entering along the ends'
+/// normals when they have them.
+fn curve_through(start: EndPoint, end: EndPoint, bends: &[Point]) -> Raw {
+    let mut points = vec![start.point];
+    points.extend_from_slice(bends);
+    points.push(end.point);
+    let n = points.len();
+    let tangent = |i: usize| -> Vec2 {
+        if i == 0 {
+            let len = (points[1] - points[0]).hypot();
+            start.normal.map_or(points[1] - points[0], |d| d * len)
+        } else if i == n - 1 {
+            let len = (points[n - 1] - points[n - 2]).hypot();
+            end.normal
+                .map_or(points[n - 1] - points[n - 2], |d| -d * len)
+        } else {
+            (points[i + 1] - points[i - 1]) / 2.0
+        }
+    };
+    let segments = (0..n - 1)
+        .map(|i| {
+            let (p, q) = (points[i], points[i + 1]);
+            [p, p + tangent(i) / 3.0, q - tangent(i + 1) / 3.0, q]
+        })
+        .collect();
+    Raw::Curve(segments)
+}
+
+/// An elbow path through `bends` set by hand. Consecutive points that are not lined up get
+/// a corner between them; the first and last turns follow the ends' normals, so the line
+/// still leaves and enters objects straight.
+fn elbow_through(start: EndPoint, end: EndPoint, bends: &[Point]) -> Vec<Point> {
+    let mut points = vec![start.point];
+    let mut targets: Vec<Point> = bends.to_vec();
+    targets.push(end.point);
+    let last = targets.len() - 1;
+    for (i, t) in targets.into_iter().enumerate() {
+        let from = *points.last().expect("starts with a point");
+        if from.x != t.x && from.y != t.y {
+            let horizontal_first = if i == last {
+                // Arrive along the end's normal.
+                end.normal.is_none_or(|n| axis(n).x == 0.0)
+            } else if points.len() >= 2 {
+                // Turn: after a vertical run go across, after a horizontal one go down.
+                points[points.len() - 2].x == from.x
+            } else {
+                start.normal.is_none_or(|n| axis(n).x != 0.0)
+            };
+            let corner = if horizontal_first {
+                Point::new(t.x, from.y)
+            } else {
+                Point::new(from.x, t.y)
+            };
+            points.push(corner);
+        }
+        points.push(t);
+    }
+    simplify(points)
 }
 
 /// Whether any part of the connector's line lies inside `area` (marquee selection).
@@ -530,6 +618,7 @@ mod tests {
             (Cap::None, Cap::Arrow),
             2.0,
             &[],
+            &[],
         );
         let line = points(&path.line);
         assert_eq!(line[0], Point::ZERO);
@@ -547,6 +636,7 @@ mod tests {
             on(Point::new(200.0, 100.0), Vec2::new(-1.0, 0.0)),
             (Cap::None, Cap::None),
             2.0,
+            &[],
             &[],
         );
         let line = points(&path.line);
@@ -569,7 +659,15 @@ mod tests {
         let start = on(Point::new(100.0, 50.0), Vec2::new(1.0, 0.0));
         let end = on(Point::new(500.0, 50.0), Vec2::new(-1.0, 0.0));
         let all = [from, middle, to];
-        let path = layout(Route::Elbow, start, end, (Cap::None, Cap::None), 2.0, &all);
+        let path = layout(
+            Route::Elbow,
+            start,
+            end,
+            (Cap::None, Cap::None),
+            2.0,
+            &all,
+            &[],
+        );
         let line = points(&path.line);
         assert_eq!(line.first(), Some(&start.point));
         assert_eq!(line.last(), Some(&end.point));
@@ -585,6 +683,7 @@ mod tests {
             (Cap::None, Cap::None),
             2.0,
             &[from, to],
+            &[],
         );
         assert_eq!(points(&free.line).len(), 2);
     }
@@ -606,6 +705,7 @@ mod tests {
                         on(end, ne),
                         (Cap::None, Cap::None),
                         2.0,
+                        &[],
                         &[],
                     );
                     let line = points(&path.line);
@@ -629,6 +729,7 @@ mod tests {
             (Cap::None, Cap::None),
             2.0,
             &[],
+            &[],
         );
         // Both ends point down, so the curve dips below them.
         assert!(path.line.bounding_box().y1 > 20.0);
@@ -645,6 +746,7 @@ mod tests {
             (Cap::None, Cap::None),
             2.0,
             &[],
+            &[],
         );
         assert!((path.point_at(0.5) - Point::new(100.0, 0.0)).hypot() < 1e-6);
         assert!((path.point_at(0.75) - Point::new(100.0, 50.0)).hypot() < 1e-6);
@@ -657,6 +759,7 @@ mod tests {
             on(Point::new(100.0, 0.0), Vec2::new(0.0, 1.0)),
             (Cap::None, Cap::None),
             2.0,
+            &[],
             &[],
         );
         // Symmetric, so its middle is on the axis.
@@ -673,6 +776,7 @@ mod tests {
             EndPoint::free(Point::new(100.0, 5.0)),
             (Cap::None, Cap::None),
             2.0,
+            &[],
             &[],
         );
         assert!(touches(&path, Rect::new(-10.0, 0.0, 10.0, 10.0)));

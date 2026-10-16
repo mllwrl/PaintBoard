@@ -34,6 +34,8 @@ pub struct Overlay {
     pub gaps: Vec<Rect>,
     /// Handles on the ends of a selected connector (world).
     pub end_handles: Vec<Point>,
+    /// Handles that bend a selected connector (world).
+    pub bend_handles: Vec<Point>,
     /// Where a connector can attach on the object under the pointer (world), and the one it
     /// would snap to.
     pub connection_points: Vec<Point>,
@@ -172,6 +174,11 @@ pub fn draw_overlay(
         let handle = Circle::new(to_px(end), HANDLE_RADIUS * scale);
         scene.fill(Fill::NonZero, id, colors.handle_fill, None, &handle);
         scene.stroke(&handle_stroke, id, colors.accent, None, &handle);
+    }
+    for &point in &overlay.bend_handles {
+        let handle = Circle::new(to_px(point), HANDLE_RADIUS * 0.75 * scale);
+        scene.fill(Fill::NonZero, id, colors.accent, None, &handle);
+        scene.stroke(&handle_stroke, id, colors.handle_fill, None, &handle);
     }
     for &point in &overlay.connection_points {
         let active = overlay.connection_active == Some(point);

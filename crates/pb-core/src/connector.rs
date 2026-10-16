@@ -63,6 +63,9 @@ pub struct Connector {
     pub start_cap: Cap,
     pub end_cap: Cap,
     pub label: Label,
+    /// Points the line runs through, set by hand (world); empty for the automatic path.
+    /// They move with the connector, not with the objects it attaches to.
+    pub bends: Arc<[Point]>,
 }
 
 /// Text on a connector's line, in the connector's color. The line breaks around it.
@@ -126,6 +129,11 @@ impl ConnectorChange {
             start_cap: self.start_cap.unwrap_or(c.start_cap),
             end_cap: self.end_cap.unwrap_or(c.end_cap),
             label: c.label.clone(),
+            // Bends made for one kind of path make no sense on another.
+            bends: match self.route {
+                Some(route) if route != c.route => Arc::from([]),
+                _ => c.bends.clone(),
+            },
         }
     }
 }
@@ -240,13 +248,13 @@ pub fn layout<'a>(
     obstacles_in: impl FnOnce(Rect) -> Vec<Rect>,
 ) -> (EndPoint, EndPoint, ConnectorPath) {
     let (start, end) = resolve(c, lookup);
-    let obstacles = if c.route == Route::Elbow {
+    let obstacles = if c.route == Route::Elbow && c.bends.is_empty() {
         obstacles_in(geom::obstacle_area(start.point, end.point))
     } else {
         Vec::new()
     };
     let caps = (c.start_cap, c.end_cap);
-    let path = geom::layout(c.route, start, end, caps, width, &obstacles);
+    let path = geom::layout(c.route, start, end, caps, width, &obstacles, &c.bends);
     (start, end, path)
 }
 
@@ -308,6 +316,7 @@ mod tests {
             (b, rect(300.0, 0.0, 100.0, 100.0)),
         ]);
         let c = Connector {
+            bends: Default::default(),
             start: attached(a, Anchor::Auto),
             end: attached(b, Anchor::Auto),
             route: Route::Straight,
@@ -328,6 +337,7 @@ mod tests {
             (b, rect(300.0, 400.0, 100.0, 100.0)),
         ]);
         let c = Connector {
+            bends: Default::default(),
             start: attached(a, Anchor::Auto),
             end: attached(b, Anchor::Auto),
             route: Route::Elbow,
@@ -349,6 +359,7 @@ mod tests {
         turned.rotation = std::f64::consts::FRAC_PI_2;
         let objects = HashMap::from([(a, turned)]);
         let c = Connector {
+            bends: Default::default(),
             start: attached(a, Anchor::Fixed(Point::new(1.0, 0.5))),
             end: End::Attached {
                 object: b,

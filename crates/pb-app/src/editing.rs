@@ -1077,6 +1077,7 @@ mod tests {
         let mut doc = Document::new();
         let line = ObjectData {
             kind: ObjectKind::Connector(pb_core::Connector {
+                bends: Default::default(),
                 start: pb_core::End::Free(Point::new(0.0, 0.0)),
                 end: pb_core::End::Free(Point::new(400.0, 0.0)),
                 route: pb_core::Route::Straight,
