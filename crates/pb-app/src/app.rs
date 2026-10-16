@@ -17,7 +17,7 @@ use pb_tools::{
     selection_frame, unit_frame,
 };
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, KeyEvent, MouseButton, TouchPhase, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, Touch, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{CursorIcon, Window, WindowId};
@@ -88,6 +88,8 @@ pub struct App {
     style_drag: bool,
     /// Pressure of a pen touching the screen or tablet; `None` for a mouse.
     pen_pressure: Option<f64>,
+    /// The pen or finger acting as the mouse on the canvas, while it touches the screen.
+    touch: Option<u64>,
     text: TextRenderer,
     images: ImageCache,
     /// Files dropped on the window since the last pass of the event loop; dropping several
@@ -126,6 +128,7 @@ impl App {
             canvas_drag: false,
             style_drag: false,
             pen_pressure: None,
+            touch: None,
             text: TextRenderer::new(),
             images: ImageCache::default(),
             dropped: Vec::new(),
@@ -1226,6 +1229,62 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        self.handle_window_event(event_loop, event, true);
+    }
+}
+
+impl App {
+    /// Windows delivers pens and touch screens as touch events only: winit takes their
+    /// pointer messages, so Windows makes no mouse messages from them. The first pen or
+    /// finger drives the canvas like the left mouse button, with the pen's pressure. egui
+    /// has had the touch event itself, so these mouse events are not passed to it again.
+    ///
+    /// TODO: more fingers for pinch zoom and two-finger panning on touch screens.
+    fn touch_as_mouse(&mut self, event_loop: &ActiveEventLoop, touch: Touch) {
+        if self.touch.is_some_and(|id| id != touch.id) {
+            return;
+        }
+        let device_id = touch.device_id;
+        let moved = WindowEvent::CursorMoved {
+            device_id,
+            position: touch.location,
+        };
+        let button = |state| WindowEvent::MouseInput {
+            device_id,
+            state,
+            button: MouseButton::Left,
+        };
+        let pressure = touch.force.map(|f| f.normalized());
+        match touch.phase {
+            TouchPhase::Started => {
+                self.touch = Some(touch.id);
+                self.pen_pressure = pressure;
+                self.handle_window_event(event_loop, moved, false);
+                self.handle_window_event(event_loop, button(ElementState::Pressed), false);
+            }
+            TouchPhase::Moved => {
+                // A pen also reports moves while it hovers above the screen.
+                if self.touch.is_some() {
+                    self.pen_pressure = pressure;
+                }
+                self.handle_window_event(event_loop, moved, false);
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                self.handle_window_event(event_loop, moved, false);
+                self.handle_window_event(event_loop, button(ElementState::Released), false);
+                self.touch = None;
+                self.pen_pressure = None;
+            }
+        }
+    }
+
+    /// A window event; `feed_ui` passes it to egui first.
+    fn handle_window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        event: WindowEvent,
+        feed_ui: bool,
+    ) {
         let scale = self.scale();
         let mut ui_consumed = false;
         // Typing on the canvas is not for egui, which would take Tab to move its focus.
@@ -1234,7 +1293,10 @@ impl ApplicationHandler<UserEvent> for App {
                 event,
                 WindowEvent::KeyboardInput { .. } | WindowEvent::Ime(_)
             );
-        if !canvas_typing && let (Some(ui), Some(window)) = (&mut self.ui, &self.window) {
+        if feed_ui
+            && !canvas_typing
+            && let (Some(ui), Some(window)) = (&mut self.ui, &self.window)
+        {
             let response = ui.on_window_event(window, &event);
             if response.repaint {
                 window.request_redraw();
@@ -1363,13 +1425,8 @@ impl ApplicationHandler<UserEvent> for App {
                     true
                 }
             }
-            // Pens report pressure as touch force; the strokes themselves come in as mouse
-            // events, which Windows also sends for pens.
             WindowEvent::Touch(touch) => {
-                self.pen_pressure = match touch.phase {
-                    TouchPhase::Ended | TouchPhase::Cancelled => None,
-                    _ => touch.force.map(|f| f.normalized()),
-                };
+                self.touch_as_mouse(event_loop, touch);
                 false
             }
             WindowEvent::DroppedFile(path) => {
