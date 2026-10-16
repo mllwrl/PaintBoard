@@ -14,3 +14,17 @@ web-time.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd.workspace = true
+
+# Handwriting recognition through Windows Ink (part of the OS, works offline).
+[target.'cfg(windows)'.dependencies.windows]
+workspace = true
+features = [
+    "Foundation",
+    "Foundation_Numerics",
+    "UI_Input_Inking",
+    "Win32_System_WinRT",
+]
+
+[target.'cfg(windows)'.dependencies]
+windows-collections = "0.3"
+windows-numerics = "0.3"

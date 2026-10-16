@@ -8,6 +8,7 @@ mod clipboard;
 mod handles;
 mod hit;
 mod ink;
+pub mod math;
 mod selection;
 
 pub use arrange::{Align, Axis, align, distribute};

@@ -45,6 +45,10 @@ pub enum Action {
     Duplicate,
     Delete,
     Reorder(ZOrder),
+    /// Replace the selected handwriting with typed text.
+    ToText,
+    /// Solve the selected handwritten expression.
+    Calculate,
 }
 
 /// What the UI shows.
@@ -69,8 +73,13 @@ pub struct SelectionInfo {
     /// Style of the first selected object.
     pub style: Style,
     pub has_group: bool,
-    /// Anything with a fill (not only ink) is selected.
+    /// A shape is selected, so there is a fill to change.
     pub has_fill: bool,
+    /// Something with an outline width (shape or ink) is selected.
+    pub has_width: bool,
+    /// Only ink is selected and handwriting can be recognized: `Some(busy)`, where `busy`
+    /// says a recognition is already running.
+    pub handwriting: Option<bool>,
     pub several: bool,
     pub locked: bool,
 }
@@ -262,9 +271,7 @@ fn fonts() -> FontDefinitions {
     let mut fonts = FontDefinitions::empty();
     fonts.font_data.insert(
         "inter".to_owned(),
-        Arc::new(FontData::from_static(include_bytes!(
-            "../assets/fonts/Inter-Regular.ttf"
-        ))),
+        Arc::new(FontData::from_static(pb_text::FONT)),
     );
     for family in [FontFamily::Proportional, FontFamily::Monospace] {
         fonts.families.insert(family, vec!["inter".to_owned()]);
@@ -548,6 +555,26 @@ fn selection_toolbar(
                     };
                     let stroke = swatch_button(ui, style.stroke, true, outline);
                     toggle(popup, Popup::Stroke, stroke.clicked());
+                    if let Some(busy) = selection.handwriting {
+                        ui.add_enabled_ui(!busy, |ui| {
+                            let label = if busy { "Recognizing…" } else { "To text" };
+                            if ui
+                                .button(label)
+                                .on_hover_text("Turn the handwriting into typed text")
+                                .clicked()
+                            {
+                                actions.push(Action::ToText);
+                            }
+                            if ui
+                                .button("Calculate")
+                                .on_hover_text("Solve a written expression such as 12 + 7 =")
+                                .clicked()
+                            {
+                                actions.push(Action::Calculate);
+                            }
+                        });
+                        ui.separator();
+                    }
                     let opacity = format!("{:.0}%", style.opacity * 100.0);
                     let opacity = ui.button(opacity).on_hover_text("Opacity");
                     toggle(popup, Popup::Opacity, opacity.clicked());
@@ -612,6 +639,9 @@ fn selection_toolbar(
                             stroke: Some(color),
                             ..StyleChange::default()
                         }));
+                    }
+                    if !selection.has_width {
+                        return;
                     }
                     ui.add_space(4.0);
                     let width = selection.style.stroke_width;

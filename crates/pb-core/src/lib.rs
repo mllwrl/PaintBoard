@@ -8,6 +8,6 @@ pub use command::{Applied, Command, ZOrder};
 pub use document::{Document, Error, Result};
 pub use object::{
     Content, Group, Ink, InkPoint, Object, ObjectData, ObjectId, ObjectKind, Rgba, Style,
-    StyleChange,
+    StyleChange, Text,
 };
 pub use pb_geom::ShapeKind;

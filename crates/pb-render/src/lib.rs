@@ -7,6 +7,7 @@ mod overlay;
 
 pub use gpu::{FrameTarget, Gpu};
 pub use grid::{GridColors, GridStyle, draw_grid};
+pub use objects::TextRenderer;
 pub use overlay::{Overlay, OverlayColors};
 pub use vello;
 
@@ -62,7 +63,7 @@ pub struct View<'a> {
 }
 
 /// Rebuilds `scene` for the given view.
-pub fn build_scene(scene: &mut Scene, view: &View<'_>) {
+pub fn build_scene(scene: &mut Scene, view: &View<'_>, text: &mut TextRenderer) {
     scene.reset();
     draw_grid(
         scene,
@@ -84,7 +85,7 @@ pub fn build_scene(scene: &mut Scene, view: &View<'_>) {
         .map(|o| overrides.get(&o.id).copied().unwrap_or(&o.data))
         .filter(|data| objects::painted_bounds(data).overlaps(visible));
     for data in on_screen.chain(view.previews) {
-        objects::draw_object(scene, transform, data);
+        objects::draw_object(scene, transform, data, text);
     }
 
     overlay::draw_overlay(

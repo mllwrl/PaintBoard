@@ -1,15 +1,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use pb_core::{Command, Document, Object, ShapeKind, ZOrder};
+use pb_core::{
+    Command, Document, Object, ObjectData, ObjectId, ObjectKind, Rgba, ShapeKind, Style, Text,
+    ZOrder,
+};
 use pb_geom::Camera;
 use pb_geom::kurbo::{Point, Size, Vec2};
 use pb_platform::Instant;
+use pb_platform::{dialog, handwriting};
 use pb_render::vello::Scene;
-use pb_render::{Gpu, GridStyle, Overlay, Theme, View, build_scene};
+use pb_render::{Gpu, GridStyle, Overlay, TextRenderer, Theme, View, build_scene};
 use pb_tools::{
-    Align, Axis, Clipboard, CursorHint, Pointer, ToolKind, Tools, rotation_knob, selection_frame,
-    unit_frame,
+    Align, Axis, Clipboard, CursorHint, Pointer, ToolKind, Tools, math, rotation_knob,
+    selection_frame, unit_frame,
 };
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, MouseButton, TouchPhase, WindowEvent};
@@ -24,11 +28,39 @@ use crate::ui::{Action, Model, SelectionInfo, Ui};
 pub enum UserEvent {
     /// GPU initialization finished (asynchronous on the web).
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-    GpuReady(Gpu),
+    GpuReady(Box<Gpu>),
+    /// Handwriting recognition finished on its background thread.
+    Recognized {
+        request: u64,
+        result: Result<String, String>,
+    },
 }
 
+/// What recognized handwriting is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Recognition {
+    /// Replace the strokes with typed text.
+    ToText,
+    /// Solve the written expression and write the answer next to it.
+    Calculate,
+}
+
+/// A recognition request waiting for its result.
+struct PendingRecognition {
+    request: u64,
+    purpose: Recognition,
+    /// The selected strokes (or groups of them).
+    ids: Vec<ObjectId>,
+    bounds: pb_geom::kurbo::Rect,
+    color: Rgba,
+}
+
+/// Recognized text is sized so its letters are about as tall as the handwriting.
+const HANDWRITING_TO_FONT_SIZE: f64 = 1.0 / 0.9;
+/// Space between an expression and its answer, relative to the font size.
+const ANSWER_GAP: f64 = 0.4;
+
 pub struct App {
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     proxy: EventLoopProxy<UserEvent>,
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
@@ -49,6 +81,9 @@ pub struct App {
     style_drag: bool,
     /// Pressure of a pen touching the screen or tablet; `None` for a mouse.
     pen_pressure: Option<f64>,
+    text: TextRenderer,
+    recognition: Option<PendingRecognition>,
+    next_request: u64,
     shown_title: String,
 }
 
@@ -72,6 +107,9 @@ impl App {
             canvas_drag: false,
             style_drag: false,
             pen_pressure: None,
+            text: TextRenderer::new(),
+            recognition: None,
+            next_request: 0,
             shown_title: String::new(),
         }
     }
@@ -119,6 +157,7 @@ impl App {
                 previews: &previews,
                 overlay: &overlay,
             },
+            &mut self.text,
         );
 
         let board = self.session.name();
@@ -171,7 +210,11 @@ impl App {
         let selection = self.tools.selection();
         let ids = selection.ids();
         let bounds = selection.frame(&self.document)?.aabb();
-        let first = ids.iter().flat_map(|&id| self.document.leaves(id)).next()?;
+        let leaves: Vec<_> = ids
+            .iter()
+            .flat_map(|&id| self.document.leaves(id))
+            .collect();
+        let first = leaves.first()?;
         let corner = |x, y| self.camera.world_to_screen(Point::new(x, y));
         Some(SelectionInfo {
             screen: pb_geom::kurbo::Rect::from_points(
@@ -180,10 +223,15 @@ impl App {
             ),
             style: first.data.style,
             has_group: ids.iter().any(|&id| self.document.group(id).is_some()),
-            has_fill: ids
+            has_fill: leaves
                 .iter()
-                .flat_map(|&id| self.document.leaves(id))
-                .any(|o| !o.data.kind.is_ink()),
+                .any(|o| matches!(o.data.kind, ObjectKind::Shape(_))),
+            has_width: leaves
+                .iter()
+                .any(|o| !matches!(o.data.kind, ObjectKind::Text(_))),
+            handwriting: (handwriting::is_available()
+                && leaves.iter().all(|o| o.data.kind.is_ink()))
+            .then_some(self.recognition.is_some()),
             several: ids.len() > 1,
             locked: selection.has_locked(&self.document),
         })
@@ -234,6 +282,159 @@ impl App {
             }
             Action::Delete => self.apply_with(Tools::delete_selected),
             Action::Reorder(to) => self.reorder(to),
+            Action::ToText => self.recognize(Recognition::ToText),
+            Action::Calculate => self.recognize(Recognition::Calculate),
+        }
+    }
+
+    /// Sends the selected ink to handwriting recognition; the result comes back as
+    /// [`UserEvent::Recognized`].
+    fn recognize(&mut self, purpose: Recognition) {
+        if self.recognition.is_some() {
+            return;
+        }
+        let ids: Vec<_> = self
+            .tools
+            .selection()
+            .ids()
+            .iter()
+            .copied()
+            .filter(|&id| !self.document.is_locked(id))
+            .collect();
+        let strokes: Vec<_> = ids
+            .iter()
+            .flat_map(|&id| self.document.leaves(id))
+            .collect();
+        let Some(first) = strokes.first() else {
+            return;
+        };
+        let color = first.data.style.stroke;
+        let mut bounds: Option<pb_geom::kurbo::Rect> = None;
+        let mut points = Vec::new();
+        for object in &strokes {
+            let ObjectKind::Ink(ink) = &object.data.kind else {
+                return;
+            };
+            let frame = object.data.frame();
+            let aabb = frame.aabb();
+            bounds = Some(bounds.map_or(aabb, |b| b.union(aabb)));
+            let stroke = ink
+                .points_in(object.data.bounds)
+                .into_iter()
+                .map(|(p, _)| {
+                    let p = frame.to_world(p);
+                    (p.x, p.y)
+                })
+                .collect();
+            points.push(stroke);
+        }
+        let Some(bounds) = bounds else {
+            return;
+        };
+        let request = self.next_request;
+        self.next_request += 1;
+        self.recognition = Some(PendingRecognition {
+            request,
+            purpose,
+            ids,
+            bounds,
+            color,
+        });
+        let proxy = self.proxy.clone();
+        handwriting::recognize(points, move |result| {
+            let _ = proxy.send_event(UserEvent::Recognized { request, result });
+        });
+    }
+
+    fn finish_recognition(&mut self, request: u64, result: Result<String, String>) {
+        let Some(pending) = self.recognition.take_if(|p| p.request == request) else {
+            return;
+        };
+        let text = match result {
+            Ok(text) if !text.trim().is_empty() => text.trim().to_owned(),
+            Ok(_) => {
+                dialog::show_error("Nothing recognized", "No text was found in the strokes.");
+                return;
+            }
+            Err(err) => {
+                dialog::show_error("Handwriting recognition failed", &err);
+                return;
+            }
+        };
+        let b = pending.bounds;
+        let size = (b.height() * HANDWRITING_TO_FONT_SIZE).max(4.0);
+        match pending.purpose {
+            Recognition::ToText => {
+                // The strokes may have been deleted while recognition ran.
+                let ids: Vec<_> = pending
+                    .ids
+                    .into_iter()
+                    .filter(|&id| self.document.contains(id))
+                    .collect();
+                if ids.is_empty() {
+                    return;
+                }
+                let data = self.text_object(&text, size, pending.color, |w, _| {
+                    Point::new(b.center().x - w / 2.0, b.center().y)
+                });
+                // Both edits are one undo step.
+                self.document.begin_undo_group();
+                self.apply(Command::Delete(ids));
+                self.apply(Command::Create(vec![data.into()]));
+                self.document.end_undo_group();
+            }
+            Recognition::Calculate => match math::evaluate(&text) {
+                Ok(value) => {
+                    let answer = math::format_number(value);
+                    let label = if math::ends_with_equals(&text) {
+                        answer
+                    } else {
+                        format!("= {answer}")
+                    };
+                    let left = b.x1 + size * ANSWER_GAP;
+                    let data = self.text_object(&label, size, pending.color, |_, _| {
+                        Point::new(left, b.center().y)
+                    });
+                    self.apply(Command::Create(vec![data.into()]));
+                }
+                Err(err) => {
+                    let message = format!("Recognized \"{text}\": {err}.");
+                    dialog::show_error("Could not calculate", &message);
+                }
+            },
+        }
+        self.request_redraw();
+    }
+
+    /// A text object sized to fit `text`. `place` gets the text's width and height and
+    /// returns its left edge and vertical center.
+    fn text_object(
+        &mut self,
+        text: &str,
+        size: f64,
+        color: Rgba,
+        place: impl FnOnce(f64, f64) -> Point,
+    ) -> ObjectData {
+        let layout = self.text.engine().layout(text, size, None);
+        let at = place(layout.width, layout.height);
+        ObjectData {
+            kind: ObjectKind::Text(Text {
+                text: text.into(),
+                size,
+            }),
+            bounds: pb_geom::kurbo::Rect::new(
+                at.x,
+                at.y - layout.height / 2.0,
+                at.x + layout.width,
+                at.y + layout.height / 2.0,
+            ),
+            rotation: 0.0,
+            style: Style {
+                fill: Rgba(0),
+                stroke: color,
+                stroke_width: 0.0,
+                opacity: 1.0,
+            },
         }
     }
 
@@ -568,7 +769,7 @@ impl ApplicationHandler<UserEvent> for App {
             wasm_bindgen_futures::spawn_local(async move {
                 match gpu.await {
                     Ok(gpu) => {
-                        let _ = proxy.send_event(UserEvent::GpuReady(gpu));
+                        let _ = proxy.send_event(UserEvent::GpuReady(Box::new(gpu)));
                     }
                     Err(err) => log::error!("failed to initialize GPU (WebGPU required): {err}"),
                 }
@@ -600,7 +801,8 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::GpuReady(gpu) => self.on_gpu_ready(gpu),
+            UserEvent::GpuReady(gpu) => self.on_gpu_ready(*gpu),
+            UserEvent::Recognized { request, result } => self.finish_recognition(request, result),
         }
     }
 

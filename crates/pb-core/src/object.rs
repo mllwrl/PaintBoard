@@ -52,6 +52,8 @@ pub enum ObjectKind {
     Shape(ShapeKind),
     /// Freehand drawing; drawn with the outline color and width.
     Ink(Ink),
+    /// Text in the outline color, wrapped at the object's width and centered in it.
+    Text(Text),
 }
 
 impl ObjectKind {
@@ -59,6 +61,7 @@ impl ObjectKind {
     pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Ink(_) => "ink",
+            Self::Text(_) => "text",
             Self::Shape(shape) => match shape {
                 ShapeKind::Rectangle => "rect",
                 ShapeKind::RoundedRectangle => "roundRect",
@@ -146,6 +149,16 @@ impl StyleChange {
             opacity: self.opacity.unwrap_or(style.opacity).clamp(0.0, 1.0),
         }
     }
+}
+
+/// Plain text.
+///
+/// TODO: store it as a Loro text container once it can be edited, so concurrent edits merge.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Text {
+    pub text: Arc<str>,
+    /// Font size in world units.
+    pub size: f64,
 }
 
 /// A point of a freehand stroke, relative to the object's bounds: `(0, 0)` is the top-left

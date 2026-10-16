@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::Arc;
 
 use kurbo::{Rect, Vec2};
 use loro::{
@@ -13,8 +14,11 @@ use pb_geom::normalize_angle;
 use crate::command::reorder;
 use crate::{
     Applied, Command, Content, Group, Ink, Object, ObjectData, ObjectId, ObjectKind, Rgba, Style,
-    StyleChange, ZOrder,
+    StyleChange, Text, ZOrder,
 };
+
+/// Font size of text objects stored without one.
+const DEFAULT_FONT_SIZE: f64 = 24.0;
 
 /// Bump when the stored layout changes incompatibly, and add a migration.
 const SCHEMA_VERSION: i64 = 1;
@@ -39,6 +43,8 @@ mod key {
     pub const LOCKED: &str = "locked";
     /// Points of an ink stroke, see `Ink::to_bytes`.
     pub const POINTS: &str = "points";
+    pub const TEXT: &str = "text";
+    pub const FONT_SIZE: &str = "fontSize";
 
     /// `kind` of group nodes.
     pub const GROUP: &str = "group";
@@ -576,8 +582,13 @@ fn is_group(meta: &LoroMap) -> bool {
 
 fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
     meta.insert(key::KIND, data.kind.as_str())?;
-    if let ObjectKind::Ink(ink) = &data.kind {
-        meta.insert(key::POINTS, ink.to_bytes())?;
+    match &data.kind {
+        ObjectKind::Ink(ink) => meta.insert(key::POINTS, ink.to_bytes())?,
+        ObjectKind::Text(text) => {
+            meta.insert(key::TEXT, &*text.text)?;
+            meta.insert(key::FONT_SIZE, text.size)?;
+        }
+        ObjectKind::Shape(_) => {}
     }
     write_bounds(meta, data.bounds.abs())?;
     meta.insert(key::ROTATION, normalize_angle(data.rotation))?;
@@ -627,6 +638,17 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
                 }
                 _ => return None,
             }
+        }
+        ValueOrContainer::Value(LoroValue::String(s)) if &**s == "text" => {
+            let text = match meta.get(key::TEXT)? {
+                ValueOrContainer::Value(LoroValue::String(t)) => Arc::from(&**t),
+                _ => return None,
+            };
+            let size = match meta.get(key::FONT_SIZE) {
+                Some(ValueOrContainer::Value(LoroValue::Double(v))) => v,
+                _ => DEFAULT_FONT_SIZE,
+            };
+            ObjectKind::Text(Text { text, size })
         }
         ValueOrContainer::Value(LoroValue::String(s)) => {
             ObjectKind::Shape(ObjectKind::parse_shape(&s)?)
@@ -1158,6 +1180,19 @@ mod tests {
         let wide = Rect::new(10.0, 10.0, 90.0, 20.0);
         assert_eq!(ink.points_in(wide)[1], (Point::new(50.0, 20.0), 0.5));
         assert!(ink.has_pressure());
+    }
+
+    #[test]
+    fn text_roundtrips() {
+        let mut doc = Document::new();
+        let mut data = rect(0.0, 0.0, 100.0, 30.0);
+        data.kind = ObjectKind::Text(Text {
+            text: "2 + 7 = 9, привет".into(),
+            size: 18.0,
+        });
+        let id = create(&mut doc, data.clone());
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(loaded.get(id).unwrap().data, data);
     }
 
     #[test]
