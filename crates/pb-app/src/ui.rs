@@ -419,9 +419,9 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
     }
 }
 
-/// Widths offered for the pen and the marker, in logical pixels.
-const PEN_WIDTHS: [f64; 4] = [2.0, 3.0, 6.0, 10.0];
-const MARKER_WIDTHS: [f64; 4] = [10.0, 18.0, 28.0, 40.0];
+/// Width ranges of the pen and the marker, in logical pixels.
+const PEN_WIDTHS: std::ops::RangeInclusive<f64> = 1.0..=24.0;
+const MARKER_WIDTHS: std::ops::RangeInclusive<f64> = 6.0..=60.0;
 
 /// Color and width of the active pen or marker, next to its button.
 fn ink_panel(ctx: &Context, model: &Model, button: Rect, actions: &mut Vec<Action>) {
@@ -440,21 +440,19 @@ fn ink_panel(ctx: &Context, model: &Model, button: Rect, actions: &mut Vec<Actio
                 }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    let widths = if marker { MARKER_WIDTHS } else { PEN_WIDTHS };
-                    let largest = widths[widths.len() - 1];
-                    for width in widths {
-                        let tooltip = format!("{width:.0} px");
-                        let button = icon_button(ui, style.width == width, &tooltip, |p, r, c| {
-                            // Dots grow with the width, scaled to fit the button.
-                            let radius = (width / largest) as f32 * r.width() / 2.0;
-                            p.circle_filled(r.center(), radius.max(1.5), c);
+                    let range = if marker { MARKER_WIDTHS } else { PEN_WIDTHS };
+                    // A dot as thick as the line, up to the size of the preview box.
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(BUTTON), Sense::hover());
+                    let radius = (style.width as f32 / 2.0).clamp(1.0, BUTTON / 2.0 - 2.0);
+                    let preview = to_color32(style.color);
+                    ui.painter().circle_filled(rect.center(), radius, preview);
+                    let mut width = style.width;
+                    let slider = Slider::new(&mut width, range).suffix(" px").step_by(0.5);
+                    if ui.add(slider).changed() {
+                        actions.push(Action::InkStyle {
+                            marker,
+                            style: InkStyle { width, ..style },
                         });
-                        if button.clicked() {
-                            actions.push(Action::InkStyle {
-                                marker,
-                                style: InkStyle { width, ..style },
-                            });
-                        }
                     }
                 });
             });
