@@ -28,7 +28,7 @@ use crate::editing::{self, KeyOutcome, NEW_TEXT_SIZE, TextEdit};
 use crate::navigation::Navigation;
 use crate::pictures::{self, Picture};
 use crate::session::Session;
-use crate::ui::{Action, Model, STICKY_COLORS, SelectionInfo, ShapeText, TextFormat, Ui};
+use crate::ui::{Action, Minimap, Model, STICKY_COLORS, SelectionInfo, ShapeText, TextFormat, Ui};
 
 pub enum UserEvent {
     /// GPU initialization finished (asynchronous on the web).
@@ -105,6 +105,8 @@ pub struct App {
     cropping: Option<Crop>,
     /// Color of new sticky notes.
     sticky_color: Rgba,
+    /// Whether the minimap is shown.
+    show_minimap: bool,
     /// Time and screen position of the last left press, to detect double clicks.
     last_press: Option<(Instant, Point)>,
     recognition: Option<PendingRecognition>,
@@ -139,6 +141,7 @@ impl App {
             editing: None,
             cropping: None,
             sticky_color: STICKY_COLORS[0],
+            show_minimap: true,
             last_press: None,
             recognition: None,
             next_request: 0,
@@ -261,6 +264,7 @@ impl App {
             snap: self.tools.snap_to_grid(),
             selection: self.selection_info(),
             text_format: self.text_format(),
+            minimap: self.minimap(),
         };
         let actions = match &mut self.ui {
             Some(ui) => ui.run(&window, &model),
@@ -287,6 +291,48 @@ impl App {
             }
             self.request_redraw();
         }
+    }
+
+    /// The minimap's contents, when it is shown and the board has something on it.
+    fn minimap(&self) -> Option<Minimap> {
+        if !self.show_minimap {
+            return None;
+        }
+        let objects = self.document.objects();
+        // Frames under everything, like on the board.
+        let shown = objects
+            .iter()
+            .filter(|o| o.data.kind.is_frame())
+            .chain(objects.iter().filter(|o| !o.data.kind.is_frame()));
+        let mut content = None;
+        let mut marks = Vec::new();
+        for o in shown {
+            let data = &o.data;
+            let bounds = data.frame().aabb();
+            content = Some(content.map_or(bounds, |c: pb_geom::kurbo::Rect| c.union(bounds)));
+            let color = match data.kind {
+                ObjectKind::Shape(_) | ObjectKind::Sticky(_)
+                    if data.style.fill.to_bytes()[3] > 0 =>
+                {
+                    data.style.fill
+                }
+                ObjectKind::Frame(_) => Rgba::rgb(0xFF, 0xFF, 0xFF),
+                ObjectKind::Image(_) => Rgba::rgb(0xB8, 0xB8, 0xB2),
+                // Lines and strokes would show as boxes.
+                ObjectKind::Connector(_) | ObjectKind::Ink(_) => continue,
+                _ => Rgba::rgb(0xC8, 0xC8, 0xC2),
+            };
+            marks.push((bounds, color));
+        }
+        let content = content?;
+        let view = self.camera.visible_world_rect(self.viewport());
+        let area = content.union(view);
+        let pad = area.width().max(area.height()) * 0.04;
+        Some(Minimap {
+            area: area.inflate(pad, pad),
+            objects: marks,
+            view,
+        })
     }
 
     /// What the formatting bar needs while text that takes styles is edited.
@@ -444,6 +490,11 @@ impl App {
             }
             Action::NextGrid => self.grid = self.grid.next(),
             Action::ToggleSnap => self.tools.set_snap_to_grid(!self.tools.snap_to_grid()),
+            Action::ToggleMinimap => self.show_minimap = !self.show_minimap,
+            Action::LookAt(at) => {
+                let zoom = self.camera.zoom();
+                self.camera.look_at(at, zoom, viewport);
+            }
             Action::SetStyle(change) => {
                 let ids = self.tools.selection().ids();
                 let ids: Vec<_> = ids

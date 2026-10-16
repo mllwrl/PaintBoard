@@ -65,6 +65,10 @@ pub enum Action {
     ToggleMark(Mark),
     /// Colors the selected part of the text being edited; `None` for the object's color.
     MarkColor(Option<Rgba>),
+    /// Shows or hides the minimap.
+    ToggleMinimap,
+    /// Centers the view on a world point (from the minimap).
+    LookAt(kurbo::Point),
     /// Replace the selected handwriting with typed text.
     ToText,
     /// Solve the selected handwritten expression.
@@ -91,7 +95,23 @@ pub struct Model<'a> {
     pub selection: Option<SelectionInfo>,
     /// Styles of the text being edited, if it takes them.
     pub text_format: Option<TextFormat>,
+    /// The board in small; `None` when hidden.
+    pub minimap: Option<Minimap>,
 }
+
+/// What the minimap shows, in world coordinates.
+pub struct Minimap {
+    /// The part of the board it covers: everything on it and the view.
+    pub area: kurbo::Rect,
+    /// Object bounds with their colors, back to front.
+    pub objects: Vec<(kurbo::Rect, Rgba)>,
+    /// The part of the board in the window.
+    pub view: kurbo::Rect,
+}
+
+/// Width of the minimap, and the limits of its height, in logical pixels.
+const MINIMAP_WIDTH: f32 = 200.0;
+const MINIMAP_HEIGHT: std::ops::RangeInclusive<f32> = 80.0..=160.0;
 
 /// The text being edited, for the formatting bar.
 pub struct TextFormat {
@@ -279,7 +299,10 @@ impl Ui {
         let output = self.ctx.run_pass(input, |ctx| {
             board_menu(ctx, model, &mut actions);
             toolbar(ctx, model, &mut actions);
-            view_controls(ctx, model, &mut actions);
+            let view = view_controls(ctx, model, &mut actions);
+            if let Some(map) = &model.minimap {
+                minimap(ctx, map, view, &mut actions);
+            }
             if let Some(selection) = &model.selection {
                 selection_toolbar(ctx, selection, popup, &mut actions);
             } else {
@@ -658,7 +681,8 @@ fn connector_controls(ui: &mut egui::Ui, c: &Connector, actions: &mut Vec<Action
     ui.separator();
 }
 
-fn view_controls(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
+/// Grid, snapping, minimap and zoom, in the bottom-right corner. Returns where they are.
+fn view_controls(ctx: &Context, model: &Model, actions: &mut Vec<Action>) -> Rect {
     let screen = ctx.content_rect();
     Area::new(Id::unique("view"))
         .fixed_pos(screen.max - Vec2::splat(MARGIN))
@@ -681,6 +705,13 @@ fn view_controls(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                     {
                         actions.push(Action::ToggleSnap);
                     }
+                    if ui
+                        .selectable_label(model.minimap.is_some(), "Map")
+                        .on_hover_text("Minimap")
+                        .clicked()
+                    {
+                        actions.push(Action::ToggleMinimap);
+                    }
                     ui.separator();
                     if ui.button("−").on_hover_text("Zoom out (Ctrl+−)").clicked() {
                         actions.push(Action::ZoomOut);
@@ -697,6 +728,81 @@ fn view_controls(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         actions.push(Action::ZoomIn);
                     }
                 });
+            });
+        })
+        .response
+        .rect
+}
+
+/// The board in small above the view controls (at `below`); a press or drag on it moves
+/// the view there.
+fn minimap(ctx: &Context, map: &Minimap, below: Rect, actions: &mut Vec<Action>) {
+    let area = map.area;
+    if area.width() <= 0.0 || area.height() <= 0.0 {
+        return;
+    }
+    let height = (MINIMAP_WIDTH * (area.height() / area.width()) as f32)
+        .clamp(*MINIMAP_HEIGHT.start(), *MINIMAP_HEIGHT.end());
+    Area::new(Id::unique("minimap"))
+        .fixed_pos(Pos2::new(below.right(), below.top() - 8.0))
+        .pivot(Align2::RIGHT_BOTTOM)
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            panel().show(ui, |ui| {
+                let size = Vec2::new(MINIMAP_WIDTH, height);
+                let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+                // World to minimap: uniform scale, centered.
+                let scale =
+                    (f64::from(size.x) / area.width()).min(f64::from(size.y) / area.height());
+                let offset = Vec2::new(
+                    (size.x - (area.width() * scale) as f32) / 2.0,
+                    (size.y - (area.height() * scale) as f32) / 2.0,
+                );
+                let to_map = |p: kurbo::Point| {
+                    rect.min
+                        + offset
+                        + Vec2::new(
+                            ((p.x - area.x0) * scale) as f32,
+                            ((p.y - area.y0) * scale) as f32,
+                        )
+                };
+                let map_rect = |r: kurbo::Rect| {
+                    let r = Rect::from_two_pos(
+                        to_map(r.origin()),
+                        to_map(kurbo::Point::new(r.x1, r.y1)),
+                    );
+                    // Tiny objects stay visible.
+                    Rect::from_center_size(r.center(), r.size().max(Vec2::splat(1.5)))
+                };
+                let painter = ui.painter_at(rect);
+                painter.rect_filled(rect, 4, Color32::from_gray(246));
+                for (r, color) in &map.objects {
+                    let r = map_rect(*r);
+                    painter.rect_filled(r, 0, to_color32(*color));
+                    // An edge, so light objects show on the light background.
+                    painter.rect_stroke(
+                        r,
+                        0,
+                        Stroke::new(0.75, Color32::from_gray(160)),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                painter.rect_stroke(
+                    map_rect(map.view),
+                    2,
+                    Stroke::new(1.5, ACCENT),
+                    egui::StrokeKind::Middle,
+                );
+                if (response.is_pointer_button_down_on() || response.clicked())
+                    && let Some(p) = response.interact_pointer_pos()
+                {
+                    let local = p - rect.min - offset;
+                    let world = kurbo::Point::new(
+                        area.x0 + f64::from(local.x) / scale,
+                        area.y0 + f64::from(local.y) / scale,
+                    );
+                    actions.push(Action::LookAt(world));
+                }
             });
         });
 }
