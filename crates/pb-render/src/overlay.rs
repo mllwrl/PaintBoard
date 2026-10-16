@@ -20,11 +20,14 @@ pub struct Overlay {
     pub hover: Option<Frame>,
     /// Rubber-band selection rectangle (world).
     pub marquee: Option<Rect>,
+    /// Smart guides showing what a dragged object lines up with (world).
+    pub guides: Vec<Line>,
 }
 
 pub struct OverlayColors {
     pub accent: Color,
     pub handle_fill: Color,
+    pub guide: Color,
 }
 
 /// Handle radius in logical pixels.
@@ -94,6 +97,17 @@ pub fn draw_overlay(
             let center = top_right + Vec2::new(LOCK_GAP + LOCK_SIZE / 2.0, -LOCK_GAP) * scale;
             draw_padlock(scene, center, scale, colors);
         }
+    }
+    for guide in &overlay.guides {
+        let line = Line::new(to_px(guide.p0), to_px(guide.p1));
+        // Snap to pixel centers like outlines, so the 1px line stays crisp.
+        let snap = |v: f64| v.round() + 0.5;
+        let line = if line.p0.x == line.p1.x {
+            Line::new((snap(line.p0.x), line.p0.y), (snap(line.p1.x), line.p1.y))
+        } else {
+            Line::new((line.p0.x, snap(line.p0.y)), (line.p1.x, snap(line.p1.y)))
+        };
+        scene.stroke(&thin, id, colors.guide, None, &line);
     }
     if let Some(marquee) = overlay.marquee {
         let r = frame_path(Frame::axis_aligned(marquee).corners().map(to_px), true);

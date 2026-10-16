@@ -1,4 +1,4 @@
-use pb_geom::Camera;
+use pb_geom::{Camera, GridLevel};
 use vello::Scene;
 use vello::kurbo::{Affine, BezPath, Circle, Shape, Size, Stroke};
 use vello::peniko::{Color, Fill};
@@ -18,41 +18,6 @@ impl GridStyle {
             Self::Dots => Self::Lines,
             Self::Lines => Self::None,
             Self::None => Self::Dots,
-        }
-    }
-}
-
-/// Smallest world spacing between grid cells.
-const BASE_SPACING: f64 = 10.0;
-/// Grid cells never get closer than this on screen (logical pixels).
-const MIN_SCREEN_SPACING: f64 = 16.0;
-
-/// Which grid is shown at a given zoom.
-///
-/// Two levels are drawn: a coarse one at `2 * spacing` and a fine one at `spacing`
-/// whose opacity fades in as it gets sparser. When zooming out past the threshold the
-/// fine level has faded to zero and the coarse one becomes the new fine one, so the
-/// transition is continuous.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct GridLevel {
-    /// World distance between fine grid cells.
-    pub spacing: f64,
-    /// Opacity of the fine level in `[0, 1)`.
-    pub fine_alpha: f64,
-}
-
-impl GridLevel {
-    pub fn for_zoom(zoom: f64) -> Self {
-        let steps = (MIN_SCREEN_SPACING / (BASE_SPACING * zoom))
-            .log2()
-            .ceil()
-            .max(0.0);
-        let spacing = BASE_SPACING * steps.exp2();
-        let screen = spacing * zoom;
-        let fine_alpha = ((screen - MIN_SCREEN_SPACING) / MIN_SCREEN_SPACING).clamp(0.0, 1.0);
-        Self {
-            spacing,
-            fine_alpha,
         }
     }
 }
@@ -158,39 +123,4 @@ fn draw_level(
         draw(scene, fine, color.multiply_alpha(fine_alpha as f32));
     }
     draw(scene, coarse, color);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn screen_spacing_stays_in_band() {
-        let mut zoom = Camera::MIN_ZOOM;
-        while zoom <= Camera::MAX_ZOOM {
-            let level = GridLevel::for_zoom(zoom);
-            let screen = level.spacing * zoom;
-            assert!(screen >= MIN_SCREEN_SPACING - 1e-9, "zoom {zoom}: {screen}");
-            // At high zoom the base spacing is the floor, so cells may grow beyond the band.
-            if BASE_SPACING * zoom < MIN_SCREEN_SPACING {
-                assert!(
-                    screen < 2.0 * MIN_SCREEN_SPACING + 1e-9,
-                    "zoom {zoom}: {screen}"
-                );
-            }
-            zoom *= 1.03;
-        }
-    }
-
-    #[test]
-    fn transition_is_continuous() {
-        // Just above a threshold the fine level is almost transparent; just below, the
-        // former coarse level is the new fine level and almost opaque.
-        let threshold = MIN_SCREEN_SPACING / (BASE_SPACING * 4.0);
-        let above = GridLevel::for_zoom(threshold * 1.0001);
-        let below = GridLevel::for_zoom(threshold * 0.9999);
-        assert!(above.fine_alpha < 0.01);
-        assert!(below.fine_alpha > 0.99);
-        assert!((below.spacing - 2.0 * above.spacing).abs() < 1e-9);
-    }
 }

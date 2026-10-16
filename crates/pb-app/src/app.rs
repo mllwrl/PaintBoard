@@ -100,11 +100,16 @@ impl App {
         );
         gpu.render(&self.scene, self.theme.background);
 
-        // Until there is a toolbar, the title shows the active tool and zoom.
+        // Until there is a toolbar, the title shows the active tool, zoom and grid snapping.
         let title = format!(
-            "PaintBoard — {} — {:.0}%",
+            "PaintBoard — {} — {:.0}%{}",
             self.tools.active().name(),
-            self.camera.zoom() * 100.0
+            self.camera.zoom() * 100.0,
+            if self.tools.snap_to_grid() {
+                " — snap to grid"
+            } else {
+                ""
+            }
         );
         if self.shown_title != title {
             window.set_title(&title);
@@ -118,6 +123,7 @@ impl App {
         Some(Pointer {
             world: self.camera.screen_to_world(cursor),
             zoom: self.camera.zoom(),
+            visible: self.camera.visible_world_rect(self.viewport()),
             shift: self.navigation.modifiers().shift_key(),
             ctrl: self.navigation.modifiers().control_key(),
             alt: self.navigation.modifiers().alt_key(),
@@ -340,6 +346,9 @@ impl App {
                 self.navigation.zoom_reset(&mut self.camera, viewport);
             }
             KeyCode::Home => self.camera.look_at(Point::ZERO, 1.0, viewport),
+            KeyCode::KeyG if modifiers.shift_key() && !ctrl && !event.repeat => {
+                self.tools.set_snap_to_grid(!self.tools.snap_to_grid());
+            }
             KeyCode::KeyG if !ctrl && !event.repeat => self.grid = self.grid.next(),
             _ => return false,
         }
@@ -489,5 +498,6 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
             .map(|f| rotation_knob(f, zoom)),
         hover: tools.hover().and_then(|id| unit_frame(document, id, frame)),
         marquee: tools.marquee(),
+        guides: tools.guides(document),
     }
 }

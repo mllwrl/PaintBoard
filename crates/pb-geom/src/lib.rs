@@ -2,7 +2,11 @@
 
 mod camera;
 mod frame;
+mod grid;
+mod snap;
 
 pub use camera::Camera;
 pub use frame::{Frame, normalize_angle, rotate};
+pub use grid::GridLevel;
 pub use kurbo;
+pub use snap::{Snapper, xs_of, ys_of};

@@ -62,6 +62,18 @@ impl Handle {
         x != Edge::Fixed && y != Edge::Fixed
     }
 
+    /// Coordinates of the edges this handle drags in `bounds`: x of the vertical edge and y
+    /// of the horizontal one, where the handle moves them.
+    pub fn dragged_edges(self, bounds: Rect) -> (Option<f64>, Option<f64>) {
+        let pick = |edge, min, max| match edge {
+            Edge::Min => Some(min),
+            Edge::Max => Some(max),
+            Edge::Fixed => None,
+        };
+        let (x, y) = self.edges();
+        (pick(x, bounds.x0, bounds.x1), pick(y, bounds.y0, bounds.y1))
+    }
+
     pub fn position(self, bounds: Rect) -> Point {
         let pick = |edge, min, max| match edge {
             Edge::Min => min,

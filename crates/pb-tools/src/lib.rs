@@ -15,8 +15,8 @@ pub use handles::{Handle, rotation_knob};
 pub use selection::{Selection, selection_frame, unit_frame};
 
 use pb_core::{Command, Content, Document, Object, ObjectData, ObjectId, ObjectKind, Style};
-use pb_geom::Frame;
-use pb_geom::kurbo::{Point, Rect, Vec2};
+use pb_geom::kurbo::{Line, Point, Rect, Vec2};
+use pb_geom::{Frame, GridLevel, Snapper, xs_of, ys_of};
 
 /// Drags shorter than this on screen (logical pixels) count as clicks.
 const CLICK_SLOP: f64 = 4.0;
@@ -26,6 +26,8 @@ const HIT_SLOP: f64 = 3.0;
 const HANDLE_HIT_RADIUS: f64 = 7.0;
 /// Size of a shape created by a click instead of a drag, in world units.
 const DEFAULT_SHAPE_SIZE: f64 = 100.0;
+/// Dragged edges snap to other objects within this distance, in logical pixels.
+const SNAP_DISTANCE: f64 = 6.0;
 /// Rotation snaps to multiples of this with Shift held.
 const ROTATION_SNAP: f64 = std::f64::consts::PI / 12.0;
 
@@ -64,7 +66,10 @@ pub struct Pointer {
     pub world: Point,
     /// Current camera zoom, to measure distances in screen pixels.
     pub zoom: f64,
+    /// The part of the world on screen; only visible objects are snapped to.
+    pub visible: Rect,
     pub shift: bool,
+    /// Held during a drag, turns snapping off.
     pub ctrl: bool,
     pub alt: bool,
 }
@@ -91,6 +96,8 @@ enum Gesture {
     Shape {
         kind: ObjectKind,
         start: Point,
+        /// `start` after snapping: the corner the shape grows from.
+        anchor: Point,
         current: Pointer,
     },
     Move {
@@ -131,6 +138,7 @@ pub struct Tools {
     hover_grip: Option<Grip>,
     /// Rotation of the frame owning `hover_grip`, to orient its resize cursor.
     hover_rotation: f64,
+    snap_to_grid: bool,
 }
 
 impl Tools {
@@ -143,6 +151,14 @@ impl Tools {
         self.gesture = None;
         self.hover = None;
         self.hover_grip = None;
+    }
+
+    pub fn snap_to_grid(&self) -> bool {
+        self.snap_to_grid
+    }
+
+    pub fn set_snap_to_grid(&mut self, on: bool) {
+        self.snap_to_grid = on;
     }
 
     pub fn selection(&self) -> &Selection {
@@ -231,6 +247,7 @@ impl Tools {
             self.gesture = Some(Gesture::Shape {
                 kind: ObjectKind::Rectangle,
                 start: p,
+                anchor: self.snap_point(doc, pointer).0,
                 current: pointer,
             });
             return true;
@@ -333,32 +350,23 @@ impl Tools {
     pub fn pointer_up(&mut self, doc: &Document, pointer: Pointer) -> Option<Command> {
         self.pointer_move(doc, pointer);
         let command = match self.gesture.as_ref()? {
-            Gesture::Shape {
-                kind,
-                start,
-                current,
-            } => {
+            Gesture::Shape { kind, .. } => {
+                let kind = *kind;
                 // Like Miro, a shape tool is one-shot: go back to selecting afterwards.
                 self.active = ToolKind::Select;
-                Some(Command::Create(vec![
-                    shape(*kind, shape_rect(*start, *current, true)).into(),
-                ]))
+                let (bounds, _) = self.shape_bounds(doc, true);
+                Some(Command::Create(vec![shape(kind, bounds).into()]))
             }
             Gesture::Move {
                 dragging: true,
                 duplicate: true,
                 ..
             } => Some(Command::Create(self.moved_copies(doc))),
-            Gesture::Move {
-                start,
-                current,
-                dragging: true,
-                ..
-            } => {
+            Gesture::Move { dragging: true, .. } => {
                 let ids = self.unlocked(doc);
                 (!ids.is_empty()).then(|| Command::Move {
                     ids,
-                    delta: current.world - *start,
+                    delta: self.move_delta(doc).0,
                 })
             }
             Gesture::Move {
@@ -387,13 +395,11 @@ impl Tools {
     pub fn overrides(&self, doc: &Document) -> Vec<Object> {
         match &self.gesture {
             Some(Gesture::Move {
-                start,
-                current,
                 dragging: true,
                 duplicate: false,
                 ..
             }) => {
-                let delta = current.world - *start;
+                let delta = self.move_delta(doc).0;
                 self.unlocked(doc)
                     .into_iter()
                     .flat_map(|id| doc.leaves(id))
@@ -420,11 +426,9 @@ impl Tools {
     /// New objects the gesture would create (shape being drawn, Alt-drag copies).
     pub fn previews(&self, doc: &Document) -> Vec<ObjectData> {
         match &self.gesture {
-            Some(Gesture::Shape {
-                kind,
-                start,
-                current,
-            }) => vec![shape(*kind, shape_rect(*start, *current, false))],
+            Some(Gesture::Shape { kind, .. }) => {
+                vec![shape(*kind, self.shape_bounds(doc, false).0)]
+            }
             Some(Gesture::Move {
                 dragging: true,
                 duplicate: true,
@@ -434,6 +438,16 @@ impl Tools {
                 .iter()
                 .flat_map(Content::shapes)
                 .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Smart guides of the gesture in progress, in world space.
+    pub fn guides(&self, doc: &Document) -> Vec<Line> {
+        match &self.gesture {
+            Some(Gesture::Move { dragging: true, .. }) => self.move_delta(doc).1,
+            Some(Gesture::Resize { .. }) => self.resize_target(doc).map_or(Vec::new(), |t| t.1),
+            Some(Gesture::Shape { .. }) => self.shape_bounds(doc, false).1,
             _ => Vec::new(),
         }
     }
@@ -537,25 +551,139 @@ impl Tools {
     }
 
     fn moved_copies(&self, doc: &Document) -> Vec<Content> {
-        let Some(Gesture::Move { start, current, .. }) = &self.gesture else {
+        if !matches!(self.gesture, Some(Gesture::Move { .. })) {
             return Vec::new();
-        };
+        }
         let items = clipboard::in_z_order(doc, &self.selection);
-        clipboard::offset(&items, current.world - *start)
+        clipboard::offset(&items, self.move_delta(doc).0)
+    }
+
+    /// What to snap to: visible top-level objects except `exclude`, and the grid if on.
+    /// None while Ctrl is held.
+    fn snapper(&self, doc: &Document, pointer: &Pointer, exclude: &[ObjectId]) -> Option<Snapper> {
+        if pointer.ctrl {
+            return None;
+        }
+        // TODO: query an R-tree for the visible objects.
+        let targets = doc
+            .roots()
+            .iter()
+            .filter(|id| !exclude.contains(id))
+            .filter_map(|&id| unit_frame(doc, id, |o| o.data.frame()))
+            .map(|f| f.aabb())
+            .filter(|r| r.overlaps(pointer.visible))
+            .collect();
+        Some(Snapper {
+            targets,
+            tolerance: SNAP_DISTANCE / pointer.zoom,
+            grid: self
+                .snap_to_grid
+                .then(|| GridLevel::for_zoom(pointer.zoom).snap_spacing()),
+        })
+    }
+
+    /// Offset of the move gesture in progress after snapping, with its guides.
+    fn move_delta(&self, doc: &Document) -> (Vec2, Vec<Line>) {
+        let Some(Gesture::Move {
+            start,
+            current,
+            duplicate,
+            ..
+        }) = &self.gesture
+        else {
+            return (Vec2::ZERO, Vec::new());
+        };
+        let raw = current.world - *start;
+        let ids = if *duplicate {
+            self.selection.ids().to_vec()
+        } else {
+            self.unlocked(doc)
+        };
+        // Copies leave the originals in place, so those are targets too.
+        let exclude: &[ObjectId] = if *duplicate { &[] } else { &ids };
+        let snapper = self.snapper(doc, current, exclude);
+        let frame = selection_frame(doc, &ids, |o| o.data.frame());
+        let (Some(snapper), Some(frame)) = (snapper, frame) else {
+            return (raw, Vec::new());
+        };
+        let bounds = frame.aabb();
+        let dragged = bounds + raw;
+        let delta = raw + snapper.offset(&xs_of(dragged), &ys_of(dragged));
+        let moved = bounds + delta;
+        (delta, snapper.guides(moved, &xs_of(moved), &ys_of(moved)))
+    }
+
+    /// Frame-local bounds the resize gesture in progress leads to, with snapping guides.
+    ///
+    /// Only axis-aligned frames snap, and not while Shift keeps a corner's aspect ratio.
+    fn resize_target(&self, doc: &Document) -> Option<(Rect, Vec<Line>)> {
+        let Some(Gesture::Resize {
+            handle,
+            from,
+            start,
+            current,
+        }) = &self.gesture
+        else {
+            return None;
+        };
+        // Resize happens in the frame's own (unrotated) space.
+        let mut delta = from.vec_to_local(current.world - *start);
+        let keep_aspect = current.shift;
+        let snapper = (from.rotation == 0.0 && !(keep_aspect && handle.is_corner()))
+            .then(|| self.snapper(doc, current, self.selection.ids()))
+            .flatten();
+        let Some(snapper) = snapper else {
+            return Some((
+                handles::resize(from.rect, *handle, delta, keep_aspect),
+                Vec::new(),
+            ));
+        };
+        let (x, y) = handle.dragged_edges(handles::resize(from.rect, *handle, delta, keep_aspect));
+        delta += snapper.offset(&Vec::from_iter(x), &Vec::from_iter(y));
+        let to = handles::resize(from.rect, *handle, delta, keep_aspect);
+        let (x, y) = handle.dragged_edges(to);
+        let guides = snapper.guides(to.abs(), &Vec::from_iter(x), &Vec::from_iter(y));
+        Some((to, guides))
+    }
+
+    /// `pointer.world` snapped to objects and the grid, with guides through it.
+    fn snap_point(&self, doc: &Document, pointer: Pointer) -> (Point, Vec<Line>) {
+        let p = pointer.world;
+        let Some(snapper) = self.snapper(doc, &pointer, &[]) else {
+            return (p, Vec::new());
+        };
+        let p = p + snapper.offset(&[p.x], &[p.y]);
+        (p, snapper.guides(Rect::from_points(p, p), &[p.x], &[p.y]))
+    }
+
+    /// Bounds of the shape being drawn, with guides through its snapped corner. On release
+    /// (`finished`), a click instead of a drag makes a default-sized shape centered on the
+    /// click point.
+    fn shape_bounds(&self, doc: &Document, finished: bool) -> (Rect, Vec<Line>) {
+        let Some(Gesture::Shape {
+            start,
+            anchor,
+            current,
+            ..
+        }) = &self.gesture
+        else {
+            return (Rect::ZERO, Vec::new());
+        };
+        if finished && current.screen_distance(*start) < CLICK_SLOP {
+            let size = (DEFAULT_SHAPE_SIZE, DEFAULT_SHAPE_SIZE);
+            return (Rect::from_center_size(*anchor, size), Vec::new());
+        }
+        let (end, guides) = self.snap_point(doc, *current);
+        (shape_rect(*anchor, end, current.shift), guides)
     }
 
     /// New frames of the selected objects for the resize or rotate gesture in progress.
     fn geometry_changes(&self, doc: &Document) -> Vec<(ObjectId, Frame)> {
         match &self.gesture {
-            Some(Gesture::Resize {
-                handle,
-                from,
-                start,
-                current,
-            }) => {
-                // Resize happens in the frame's own (unrotated) space.
-                let delta = from.vec_to_local(current.world - *start);
-                let to = handles::resize(from.rect, *handle, delta, current.shift);
+            Some(Gesture::Resize { from, .. }) => {
+                let Some((to, _)) = self.resize_target(doc) else {
+                    return Vec::new();
+                };
                 if self.single_object(doc) {
                     let center = from.to_world(to.center());
                     let rect = Rect::from_center_size(center, to.size()).abs();
@@ -608,18 +736,14 @@ fn shape(kind: ObjectKind, bounds: Rect) -> ObjectData {
     }
 }
 
-/// Rectangle drawn by a shape gesture; Shift makes it a square. On release (`finished`),
-/// a click instead of a drag creates a default-sized shape centered on the click point.
-fn shape_rect(start: Point, current: Pointer, finished: bool) -> Rect {
-    if finished && current.screen_distance(start) < CLICK_SLOP {
-        return Rect::from_center_size(start, (DEFAULT_SHAPE_SIZE, DEFAULT_SHAPE_SIZE));
-    }
-    let mut delta = current.world - start;
-    if current.shift {
+/// Rectangle from `anchor` to `end`; `square` (Shift) makes it a square.
+fn shape_rect(anchor: Point, end: Point, square: bool) -> Rect {
+    let mut delta = end - anchor;
+    if square {
         let side = delta.x.abs().max(delta.y.abs());
         delta = Vec2::new(side.copysign(delta.x), side.copysign(delta.y));
     }
-    Rect::from_points(start, start + delta)
+    Rect::from_points(anchor, anchor + delta)
 }
 
 #[cfg(test)]

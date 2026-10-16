@@ -6,7 +6,7 @@ mod objects;
 mod overlay;
 
 pub use gpu::Gpu;
-pub use grid::{GridColors, GridLevel, GridStyle, draw_grid};
+pub use grid::{GridColors, GridStyle, draw_grid};
 pub use overlay::{Overlay, OverlayColors};
 pub use vello;
 
@@ -35,6 +35,7 @@ impl Theme {
             overlay: OverlayColors {
                 accent: Color::from_rgb8(0x3B, 0x6E, 0xF5),
                 handle_fill: Color::WHITE,
+                guide: Color::from_rgb8(0xF2, 0x3D, 0x7A),
             },
         }
     }

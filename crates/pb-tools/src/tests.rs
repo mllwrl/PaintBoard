@@ -1,9 +1,12 @@
+use pb_geom::kurbo::Line;
+
 use super::*;
 
 fn at(x: f64, y: f64) -> Pointer {
     Pointer {
         world: Point::new(x, y),
         zoom: 1.0,
+        visible: Rect::new(-1e6, -1e6, 1e6, 1e6),
         shift: false,
         ctrl: false,
         alt: false,
@@ -531,4 +534,122 @@ fn mixed_selection_moves_only_unlocked() {
             locked: true
         })
     );
+}
+
+// Snapping
+
+fn ctrl(p: Pointer) -> Pointer {
+    Pointer { ctrl: true, ..p }
+}
+
+fn moved_by(cmd: Option<Command>) -> Vec2 {
+    match cmd {
+        Some(Command::Move { delta, .. }) => delta,
+        other => panic!("expected Move, got {other:?}"),
+    }
+}
+
+#[test]
+fn move_snaps_to_nearby_edges_with_guides() {
+    let (doc, _) = doc_with(&[
+        Rect::new(0.0, 0.0, 100.0, 100.0),
+        Rect::new(200.0, 300.0, 260.0, 400.0),
+    ]);
+    let mut tools = Tools::default();
+    tools.pointer_down(&doc, at(230.0, 350.0));
+    // Left edge lands at 4, 4 px from the other object's left edge: snaps to 0.
+    tools.pointer_move(&doc, at(34.0, 350.0));
+    let guides = tools.guides(&doc);
+    assert_eq!(
+        guides,
+        [Line::new(Point::new(0.0, 0.0), Point::new(0.0, 400.0))]
+    );
+    assert_eq!(
+        moved_by(tools.pointer_up(&doc, at(34.0, 350.0))),
+        Vec2::new(-200.0, 0.0)
+    );
+    assert!(tools.guides(&doc).is_empty());
+}
+
+#[test]
+fn ctrl_turns_snapping_off() {
+    let (doc, _) = doc_with(&[
+        Rect::new(0.0, 0.0, 100.0, 100.0),
+        Rect::new(200.0, 300.0, 260.0, 400.0),
+    ]);
+    let mut tools = Tools::default();
+    let cmd = drag(&mut tools, &doc, at(230.0, 350.0), ctrl(at(34.0, 350.0)));
+    assert_eq!(moved_by(cmd), Vec2::new(-196.0, 0.0));
+}
+
+#[test]
+fn far_or_offscreen_objects_do_not_snap() {
+    let (doc, _) = doc_with(&[
+        Rect::new(0.0, 0.0, 100.0, 100.0),
+        Rect::new(200.0, 300.0, 260.0, 400.0),
+    ]);
+    let mut tools = Tools::default();
+    // 10 px away is out of reach.
+    let cmd = drag(&mut tools, &doc, at(230.0, 350.0), at(40.0, 350.0));
+    assert_eq!(moved_by(cmd), Vec2::new(-190.0, 0.0));
+    // In reach, but the target is off screen.
+    let offscreen = |x, y| Pointer {
+        visible: Rect::new(150.0, 150.0, 1000.0, 1000.0),
+        ..at(x, y)
+    };
+    let cmd = drag(
+        &mut tools,
+        &doc,
+        offscreen(230.0, 350.0),
+        offscreen(34.0, 350.0),
+    );
+    assert_eq!(moved_by(cmd), Vec2::new(-196.0, 0.0));
+}
+
+#[test]
+fn grid_snapping_rounds_the_top_left_corner() {
+    let (doc, _) = doc_with(&[Rect::new(3.0, 7.0, 53.0, 57.0)]);
+    let mut tools = Tools::default();
+    tools.set_snap_to_grid(true);
+    // At zoom 1 the visible grid is 20 world units.
+    let cmd = drag(&mut tools, &doc, at(20.0, 20.0), at(45.0, 31.0));
+    // Corner (3, 7) + (25, 11) = (28, 18) goes to (20, 20).
+    assert_eq!(moved_by(cmd), Vec2::new(17.0, 13.0));
+}
+
+#[test]
+fn resize_snaps_dragged_edge() {
+    let (doc, ids) = doc_with(&[
+        Rect::new(0.0, 0.0, 100.0, 100.0),
+        Rect::new(0.0, 200.0, 153.0, 300.0),
+    ]);
+    let mut tools = Tools::default();
+    tools.select_only([ids[0]]);
+    tools.pointer_down(&doc, at(100.0, 50.0));
+    tools.pointer_move(&doc, at(149.0, 50.0));
+    assert_eq!(
+        tools.guides(&doc),
+        [Line::new(Point::new(153.0, 0.0), Point::new(153.0, 300.0))]
+    );
+    let frames = frame_of_cmd(tools.pointer_up(&doc, at(149.0, 50.0)));
+    assert_eq!(frames[0].rect, Rect::new(0.0, 0.0, 153.0, 100.0));
+}
+
+#[test]
+fn shape_corners_snap() {
+    let (doc, _) = doc_with(&[Rect::new(0.0, 0.0, 100.0, 100.0)]);
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Rectangle);
+    let bounds = created_bounds(drag(&mut tools, &doc, at(103.0, -2.0), at(197.0, 52.0)));
+    assert_eq!(bounds, Rect::new(100.0, 0.0, 197.0, 50.0));
+}
+
+#[test]
+fn alt_drag_copies_snap_to_the_original() {
+    let (doc, _) = doc_with(&[Rect::new(0.0, 0.0, 100.0, 100.0)]);
+    let mut tools = Tools::default();
+    tools.pointer_down(&doc, alt(at(50.0, 50.0)));
+    let bounds = created_bounds(tools.pointer_up(&doc, alt(at(153.0, 52.0))));
+    // Left edge 103 snaps to the original's right edge, top 2 to its top.
+    assert_eq!(bounds, Rect::new(100.0, 0.0, 200.0, 100.0));
 }
