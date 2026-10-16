@@ -22,8 +22,8 @@ pub use ink::{ERASER_RADIUS, InkStyle};
 pub use selection::{Selection, selection_frame, unit_frame};
 
 use pb_core::{
-    Cap, Command, Connector, ConnectorChange, Content, Document, End, Label, Object, ObjectData,
-    ObjectId, ObjectKind, Route, ShapeKind, Style,
+    Cap, Command, Connector, ConnectorChange, Content, Document, End, FrameData, Label, Object,
+    ObjectData, ObjectId, ObjectKind, Route, ShapeKind, Style,
 };
 use pb_geom::kurbo::{Line, Point, Rect, Vec2};
 use pb_geom::{Frame, GridLevel, Snapper, xs_of, ys_of};
@@ -57,6 +57,8 @@ pub enum ToolKind {
     Sticky,
     /// Drag from an object (or anywhere) to another to connect them.
     Connector,
+    /// Drag out a frame, or click to place one.
+    Frame,
 }
 
 impl ToolKind {
@@ -70,6 +72,7 @@ impl ToolKind {
             Self::Text => "Text",
             Self::Sticky => "Sticky note",
             Self::Connector => "Connector",
+            Self::Frame => "Frame",
         }
     }
 
@@ -131,9 +134,16 @@ enum Grip {
     Label,
 }
 
+/// What a drawing gesture makes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Drawn {
+    Shape(ShapeKind),
+    Frame,
+}
+
 enum Gesture {
     Shape {
-        kind: ShapeKind,
+        kind: Drawn,
         start: Point,
         /// `start` after snapping: the corner the shape grows from.
         anchor: Point,
@@ -367,7 +377,7 @@ impl Tools {
     }
 
     pub fn nudge_selected(&self, doc: &Document, delta: Vec2) -> Option<Command> {
-        let ids = self.unlocked(doc);
+        let ids = self.moving(doc);
         (!ids.is_empty() && self.gesture.is_none()).then_some(Command::Move { ids, delta })
     }
 
@@ -434,9 +444,14 @@ impl Tools {
             }
             _ => {}
         }
-        if let ToolKind::Shape(shape) = self.active {
+        let drawn = match self.active {
+            ToolKind::Shape(shape) => Some(Drawn::Shape(shape)),
+            ToolKind::Frame => Some(Drawn::Frame),
+            _ => None,
+        };
+        if let Some(kind) = drawn {
             self.gesture = Some(Gesture::Shape {
-                kind: shape,
+                kind,
                 start: p,
                 anchor: self.snap_point(doc, pointer).0,
                 current: pointer,
@@ -493,7 +508,7 @@ impl Tools {
         }
 
         let toggle = pointer.toggles_selection();
-        match hit::object_at(doc, p, HIT_SLOP / pointer.zoom) {
+        match self.object_at(doc, pointer) {
             Some(id) => {
                 let mut select_only_on_click = None;
                 if toggle && self.selection.contains(id) {
@@ -647,7 +662,7 @@ impl Tools {
                 // Like Miro, a shape tool is one-shot: go back to selecting afterwards.
                 self.active = ToolKind::Select;
                 let (bounds, _) = self.shape_bounds(doc, true);
-                Some(Command::Create(vec![shape(kind.into(), bounds).into()]))
+                Some(Command::Create(vec![drawn(doc, kind, bounds).into()]))
             }
             Gesture::Ink {
                 marker,
@@ -664,7 +679,7 @@ impl Tools {
                 ..
             } => Some(Command::Create(self.moved_copies(doc))),
             Gesture::Move { dragging: true, .. } => {
-                let ids = self.unlocked(doc);
+                let ids = self.moving(doc);
                 (!ids.is_empty()).then(|| Command::Move {
                     ids,
                     delta: self.move_delta(doc).0,
@@ -783,7 +798,7 @@ impl Tools {
                 ..
             }) => {
                 let delta = self.move_delta(doc).0;
-                self.unlocked(doc)
+                self.moving(doc)
                     .into_iter()
                     .flat_map(|id| doc.leaves(id))
                     .map(|o| {
@@ -842,7 +857,7 @@ impl Tools {
     pub fn previews(&self, doc: &Document) -> Vec<ObjectData> {
         match &self.gesture {
             Some(Gesture::Shape { kind, .. }) => {
-                vec![shape((*kind).into(), self.shape_bounds(doc, false).0)]
+                vec![drawn(doc, *kind, self.shape_bounds(doc, false).0)]
             }
             Some(Gesture::Connect { start, end, .. }) => {
                 vec![connector(*start, *end, self.connector_route)]
@@ -953,15 +968,27 @@ impl Tools {
         self.selection.ids().iter().flat_map(|&id| doc.leaves(id))
     }
 
-    /// The top-level object or group under the pointer.
+    /// The top-level object or group under the pointer, or the frame whose title it is on.
     pub fn object_at(&self, doc: &Document, pointer: Pointer) -> Option<ObjectId> {
         hit::object_at(doc, pointer.world, HIT_SLOP / pointer.zoom)
+            .or_else(|| hit::frame_title_at(doc, pointer.world, pointer.zoom))
     }
 
     /// The selected objects and groups that are not locked.
     fn unlocked(&self, doc: &Document) -> Vec<ObjectId> {
         let ids = self.selection.ids().iter().copied();
         ids.filter(|&id| !doc.is_locked(id)).collect()
+    }
+
+    /// What moving the selection moves: the unlocked selection and what its frames hold.
+    fn moving(&self, doc: &Document) -> Vec<ObjectId> {
+        let ids = doc.with_frame_members(&self.unlocked(doc));
+        ids.into_iter().filter(|&id| !doc.is_locked(id)).collect()
+    }
+
+    /// Frames do not rotate, so neither does a selection with one.
+    pub fn can_rotate(&self, doc: &Document) -> bool {
+        !self.selected(doc).any(|o| o.data.kind.is_frame())
     }
 
     /// A single object (not a group) is selected: handles follow its own rotation.
@@ -990,7 +1017,9 @@ impl Tools {
                 .is_some_and(|r| r.contains(pointer.world));
             return end.or(on_label.then_some((frame, Grip::Label)));
         }
-        if (rotation_knob(frame, pointer.zoom) - pointer.world).hypot() <= radius {
+        if self.can_rotate(doc)
+            && (rotation_knob(frame, pointer.zoom) - pointer.world).hypot() <= radius
+        {
             return Some((frame, Grip::Rotate));
         }
         handles::handle_at(frame, pointer.world, radius).map(|h| (frame, Grip::Resize(h)))
@@ -1003,7 +1032,7 @@ impl Tools {
         let grip = self.grip_at(doc, pointer);
         let hover = match grip {
             Some(_) => None,
-            None => hit::object_at(doc, pointer.world, HIT_SLOP / pointer.zoom),
+            None => self.object_at(doc, pointer),
         };
         let grip_kind = grip.map(|(_, g)| g);
         let changed = hover != self.hover || grip_kind != self.hover_grip;
@@ -1060,7 +1089,7 @@ impl Tools {
         let ids = if *duplicate {
             self.selection.ids().to_vec()
         } else {
-            self.unlocked(doc)
+            self.moving(doc)
         };
         // Copies leave the originals in place, so those are targets too.
         let exclude: &[ObjectId] = if *duplicate { &[] } else { &ids };
@@ -1130,16 +1159,22 @@ impl Tools {
     /// click point.
     fn shape_bounds(&self, doc: &Document, finished: bool) -> (Rect, Vec<Line>) {
         let Some(Gesture::Shape {
+            kind,
             start,
             anchor,
             current,
-            ..
         }) = &self.gesture
         else {
             return (Rect::ZERO, Vec::new());
         };
         if finished && current.screen_distance(*start) < CLICK_SLOP {
-            let size = (DEFAULT_SHAPE_SIZE, DEFAULT_SHAPE_SIZE);
+            let size = match kind {
+                Drawn::Shape(_) => (DEFAULT_SHAPE_SIZE, DEFAULT_SHAPE_SIZE),
+                Drawn::Frame => {
+                    let (w, h) = FrameData::CLICK_SIZE;
+                    (w / current.zoom, h / current.zoom)
+                }
+            };
             return (Rect::from_center_size(*anchor, size), Vec::new());
         }
         let (end, guides) = self.snap_point(doc, *current);
@@ -1213,12 +1248,33 @@ fn connector(start: End, end: End, route: Route) -> ObjectData {
     }
 }
 
-fn shape(kind: ObjectKind, bounds: Rect) -> ObjectData {
-    ObjectData {
-        kind,
-        bounds,
-        rotation: 0.0,
-        style: Style::default(),
+/// A new shape or frame over `bounds`. Frames are named in the order they are made.
+fn drawn(doc: &Document, kind: Drawn, bounds: Rect) -> ObjectData {
+    match kind {
+        Drawn::Shape(shape) => ObjectData {
+            kind: shape.into(),
+            bounds,
+            rotation: 0.0,
+            style: Style::default(),
+        },
+        Drawn::Frame => {
+            let count = doc
+                .objects()
+                .iter()
+                .filter(|o| o.data.kind.is_frame())
+                .count();
+            ObjectData {
+                kind: ObjectKind::Frame(FrameData {
+                    title: format!("Frame {}", count + 1).into(),
+                }),
+                bounds,
+                rotation: 0.0,
+                style: Style {
+                    stroke_width: 0.0,
+                    ..Style::default()
+                },
+            }
+        }
     }
 }
 

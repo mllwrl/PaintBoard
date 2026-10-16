@@ -132,7 +132,7 @@ impl ConnectorChange {
 
 /// Whether connectors can attach to objects of this kind (everything but connectors).
 pub fn can_attach(kind: &ObjectKind) -> bool {
-    !matches!(kind, ObjectKind::Connector(_))
+    !matches!(kind, ObjectKind::Connector(_) | ObjectKind::Frame(_))
 }
 
 /// An object's outline in its unrotated coordinates.

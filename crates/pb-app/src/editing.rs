@@ -5,8 +5,8 @@
 //! the whole edit and autosave and sync see finished text only.
 
 use pb_core::{
-    Command, Document, Label, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Sticky, Style, Text,
-    TextBox,
+    Command, Document, FrameData, Label, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Sticky,
+    Style, Text, TextBox,
 };
 use pb_geom::kurbo::{Point, Rect, Size, Vec2};
 use pb_geom::{Frame, ShapeKind};
@@ -67,6 +67,8 @@ enum Placement {
     },
     /// A connector's label: centered on `center`, `at` along the line.
     Label { center: Point, at: f64 },
+    /// A frame's title, above the frame's `bounds`, sized for `zoom`.
+    Title { bounds: Rect, zoom: f64 },
 }
 
 impl Placement {
@@ -81,7 +83,7 @@ impl Placement {
                 bounds,
                 shape: None,
             } => Some(Sticky::text_box(bounds)),
-            Self::Free { .. } | Self::Label { .. } => None,
+            Self::Free { .. } | Self::Label { .. } | Self::Title { .. } => None,
         }
     }
 }
@@ -184,14 +186,15 @@ impl TextEdit {
         editor
     }
 
-    /// Edits an existing text object, sticky note, shape or connector label; `None` for other
-    /// objects. A connector without a label gets one where its line is nearest to `near`
-    /// (a double click), or in its middle.
+    /// Edits an existing text object, sticky note, shape, connector label or frame title;
+    /// `None` for other objects. A connector without a label gets one where its line is
+    /// nearest to `near` (a double click), or in its middle. A title is sized for `zoom`.
     pub fn existing(
         engine: &mut TextEngine,
         doc: &Document,
         id: ObjectId,
         near: Option<Point>,
+        zoom: f64,
     ) -> Option<Self> {
         let data = &doc.get(id)?.data;
         let target = Target::Existing(id);
@@ -257,6 +260,21 @@ impl TextEdit {
                     connector: Some(data.clone()),
                 })
             }
+            ObjectKind::Frame(frame) => Some(Self {
+                target,
+                editor: TextEditor::new(engine, &frame.title, FrameData::TITLE_SIZE / zoom),
+                placement: Placement::Title {
+                    bounds: data.bounds,
+                    zoom,
+                },
+                rotation: 0.0,
+                style: data.style,
+                original: frame.title.to_string(),
+                selecting: false,
+                active_at: Instant::now(),
+                caret_drawn: false,
+                connector: None,
+            }),
             ObjectKind::Ink(_) | ObjectKind::Image(_) => None,
         }
     }
@@ -301,14 +319,30 @@ impl TextEdit {
                 let width = layout.width.max(self.editor.size() * MIN_WIDTH);
                 Rect::from_center_size(center, (width, layout.height))
             }
+            // Drawn the same way, see `pb_render`.
+            Placement::Title { bounds, zoom } => {
+                let layout = self.editor.layout(engine);
+                let width = layout.width.max(self.editor.size() * MIN_WIDTH);
+                let bottom = bounds.y0 - FrameData::TITLE_GAP / zoom;
+                Rect::new(bounds.x0, bottom - layout.height, bounds.x0 + width, bottom)
+            }
         };
         Frame::new(rect, self.rotation)
+    }
+
+    /// The object's bounds as they are now: the text box, except for a frame.
+    fn object_bounds(&mut self, engine: &mut TextEngine) -> Rect {
+        match self.placement {
+            Placement::Title { bounds, .. } => bounds,
+            _ => self.frame(engine).rect,
+        }
     }
 
     /// Top-left corner of the text layout, in the box's unrotated coordinates.
     fn text_origin(&mut self, engine: &mut TextEngine) -> Point {
         match self.placement {
             Placement::Free { origin, .. } => origin,
+            Placement::Title { .. } => self.frame(engine).rect.origin(),
             Placement::Fitted { .. } => {
                 let text_box = self.placement.text_box(&self.style);
                 let text_box = text_box.expect("fitted placement");
@@ -455,6 +489,12 @@ impl TextEdit {
             }
             Key::Named(NamedKey::Backspace) => ed.backspace(engine, word),
             Key::Named(NamedKey::Delete) => ed.delete(engine, word),
+            // A title is one line: Enter keeps it.
+            Key::Named(NamedKey::Enter)
+                if matches!(self.placement, Placement::Title { .. }) && !ed.is_composing() =>
+            {
+                return KeyOutcome::Finish;
+            }
             Key::Named(NamedKey::Enter) => ed.insert(engine, "\n"),
             Key::Named(NamedKey::ArrowLeft) => {
                 let motion = if word { Motion::WordLeft } else { Motion::Left };
@@ -540,6 +580,7 @@ impl TextEdit {
             return data;
         }
         let frame = self.frame(engine);
+        let bounds = self.object_bounds(engine);
         let text = display.into();
         ObjectData {
             kind: match self.placement {
@@ -550,11 +591,12 @@ impl TextEdit {
                 Placement::Fitted {
                     shape: Some(kind), ..
                 } => ObjectKind::Shape(Shape { kind, text }),
+                Placement::Title { .. } => ObjectKind::Frame(FrameData { title: text }),
                 Placement::Fitted { shape: None, .. } | Placement::Label { .. } => {
                     ObjectKind::Sticky(Sticky { text })
                 }
             },
-            bounds: frame.rect,
+            bounds,
             rotation: frame.rotation,
             style: self.style,
         }
@@ -620,7 +662,7 @@ impl TextEdit {
             Target::Existing(id) => Some(Command::SetText {
                 id,
                 text: text.into(),
-                bounds: self.frame(engine).rect,
+                bounds: self.object_bounds(engine),
             }),
             Target::New if empty => None,
             Target::New => Some(Command::Create(vec![self.data(engine).into()])),
@@ -676,10 +718,10 @@ mod tests {
     fn editing_existing_text() {
         let mut e = engine();
         let (doc, object) = text_object("abc");
-        let unchanged = TextEdit::existing(&mut e, &doc, object, None).unwrap();
+        let unchanged = TextEdit::existing(&mut e, &doc, object, None, 1.0).unwrap();
         assert_eq!(unchanged.finish(&mut e), None);
 
-        let mut edit = TextEdit::existing(&mut e, &doc, object, None).unwrap();
+        let mut edit = TextEdit::existing(&mut e, &doc, object, None, 1.0).unwrap();
         edit.editor.insert(&mut e, "d");
         match edit.finish(&mut e) {
             Some(Command::SetText { id, text, bounds }) => {
@@ -690,7 +732,7 @@ mod tests {
             other => panic!("expected SetText, got {other:?}"),
         }
 
-        let mut cleared = TextEdit::existing(&mut e, &doc, object, None).unwrap();
+        let mut cleared = TextEdit::existing(&mut e, &doc, object, None, 1.0).unwrap();
         cleared.select_all(&mut e);
         cleared.editor.backspace(&mut e, false);
         assert_eq!(cleared.finish(&mut e), Some(Command::Delete(vec![object])));
@@ -747,7 +789,7 @@ mod tests {
             .apply(Command::Create(vec![data.into()]))
             .unwrap()
             .created[0];
-        let mut edit = TextEdit::existing(&mut e, &doc, id, None).unwrap();
+        let mut edit = TextEdit::existing(&mut e, &doc, id, None, 1.0).unwrap();
         edit.select_all(&mut e);
         edit.editor.backspace(&mut e, false);
         let mut right = edit.next_sticky(&mut e, false).unwrap();
@@ -790,7 +832,7 @@ mod tests {
             .apply(Command::Create(vec![data.into()]))
             .unwrap()
             .created[0];
-        let mut edit = TextEdit::existing(&mut e, &doc, id, None).unwrap();
+        let mut edit = TextEdit::existing(&mut e, &doc, id, None, 1.0).unwrap();
         // Tab is for sticky notes only.
         assert!(edit.next_sticky(&mut e, false).is_none());
         edit.editor
@@ -833,7 +875,7 @@ mod tests {
             .apply(Command::Create(vec![data.into()]))
             .unwrap()
             .created[0];
-        let mut edit = TextEdit::existing(&mut e, &doc, id, None).unwrap();
+        let mut edit = TextEdit::existing(&mut e, &doc, id, None, 1.0).unwrap();
         edit.editor.motion(&mut e, Motion::TextEnd, false);
         let area = Shape::text_box(pb_geom::ShapeKind::Rectangle, bounds, &style).area;
         let (top, _) = edit.overlay(&mut e, Instant::now()).caret.unwrap();
@@ -845,7 +887,7 @@ mod tests {
     fn caret_blinks_after_input_then_stays() {
         let mut e = engine();
         let (doc, object) = text_object("abc");
-        let mut edit = TextEdit::existing(&mut e, &doc, object, None).unwrap();
+        let mut edit = TextEdit::existing(&mut e, &doc, object, None, 1.0).unwrap();
         let start = edit.active_at;
         let at = |ms| start + Duration::from_millis(ms);
         assert!(edit.overlay(&mut e, at(0)).caret.is_some());
@@ -871,7 +913,7 @@ mod tests {
             Frame::new(natural, 0.0),
         )]))
         .unwrap();
-        let mut edit = TextEdit::existing(&mut e, &doc, object, None).unwrap();
+        let mut edit = TextEdit::existing(&mut e, &doc, object, None, 1.0).unwrap();
         edit.editor.insert(&mut e, " five");
         let wide = edit.frame(&mut e).rect;
         assert!(
@@ -885,7 +927,7 @@ mod tests {
             Frame::new(narrow, 0.0),
         )]))
         .unwrap();
-        let mut edit = TextEdit::existing(&mut e, &doc, object, None).unwrap();
+        let mut edit = TextEdit::existing(&mut e, &doc, object, None, 1.0).unwrap();
         edit.editor.insert(&mut e, " five");
         let rect = edit.frame(&mut e).rect;
         assert_eq!(rect.width(), narrow.width());
@@ -897,10 +939,45 @@ mod tests {
     }
 
     #[test]
+    fn frame_titles_sit_above_and_end_with_enter() {
+        let mut e = engine();
+        let mut doc = Document::new();
+        let bounds = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let data = ObjectData {
+            kind: ObjectKind::Frame(FrameData {
+                title: "Frame 1".into(),
+            }),
+            bounds,
+            rotation: 0.0,
+            style: Style::default(),
+        };
+        let id = doc
+            .apply(Command::Create(vec![data.into()]))
+            .unwrap()
+            .created[0];
+        let mut edit = TextEdit::existing(&mut e, &doc, id, None, 2.0).unwrap();
+        let rect = edit.frame(&mut e).rect;
+        assert!(rect.y1 < 0.0 && rect.x0 == 0.0, "{rect:?}");
+        // Sized for the zoom: half as big in the world at 2x.
+        assert_eq!(edit.editor.size(), FrameData::TITLE_SIZE / 2.0);
+        edit.select_all(&mut e);
+        edit.editor.insert(&mut e, "Roadmap");
+        assert_eq!(edit.data(&mut e).bounds, bounds);
+        let Some(Command::SetText {
+            text, bounds: kept, ..
+        }) = edit.finish(&mut e)
+        else {
+            panic!("expected SetText");
+        };
+        assert_eq!(&*text, "Roadmap");
+        assert_eq!(kept, bounds);
+    }
+
+    #[test]
     fn clicks_map_through_the_box() {
         let mut e = engine();
         let (doc, object) = text_object("hello world");
-        let mut edit = TextEdit::existing(&mut e, &doc, object, None).unwrap();
+        let mut edit = TextEdit::existing(&mut e, &doc, object, None, 1.0).unwrap();
         let frame = edit.frame(&mut e);
         assert!(edit.contains(&mut e, frame.center(), 0.0));
         assert!(!edit.contains(&mut e, Point::new(0.0, 0.0), 0.0));
@@ -933,10 +1010,10 @@ mod tests {
             .unwrap()
             .created[0];
         let near = Some(Point::new(100.0, 10.0));
-        let untouched = TextEdit::existing(&mut e, &doc, id, near).unwrap();
+        let untouched = TextEdit::existing(&mut e, &doc, id, near, 1.0).unwrap();
         assert_eq!(untouched.finish(&mut e), None);
 
-        let mut edit = TextEdit::existing(&mut e, &doc, id, near).unwrap();
+        let mut edit = TextEdit::existing(&mut e, &doc, id, near, 1.0).unwrap();
         edit.editor.insert(&mut e, "yes");
         // The box is centered on the line where it was clicked.
         let center = edit.frame(&mut e).rect.center();
@@ -954,7 +1031,7 @@ mod tests {
         doc.apply(Command::SetLabel { id, label }).unwrap();
 
         // Editing again keeps its place; clearing it removes the text.
-        let mut edit = TextEdit::existing(&mut e, &doc, id, Some(Point::ZERO)).unwrap();
+        let mut edit = TextEdit::existing(&mut e, &doc, id, Some(Point::ZERO), 1.0).unwrap();
         edit.select_all(&mut e);
         edit.editor.insert(&mut e, "  ");
         let Some(Command::SetLabel { label, .. }) = edit.finish(&mut e) else {

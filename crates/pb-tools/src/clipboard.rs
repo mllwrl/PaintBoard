@@ -75,12 +75,13 @@ pub fn duplicate(doc: &Document, selection: &Selection) -> Option<Command> {
     (!items.is_empty()).then(|| Command::Create(offset(&items, Vec2::splat(PASTE_OFFSET))))
 }
 
-/// Selected objects and groups back to front, so copies stack the same way as the
-/// originals.
+/// Selected objects and groups, with what selected frames hold, back to front, so copies
+/// stack the same way as the originals.
 pub(crate) fn in_z_order(doc: &Document, selection: &Selection) -> Vec<Content> {
+    let ids = doc.with_frame_members(selection.ids());
     doc.roots()
         .iter()
-        .filter(|&&id| selection.contains(id))
+        .filter(|&id| ids.contains(id))
         .filter_map(|&id| doc.content(id))
         .collect()
 }

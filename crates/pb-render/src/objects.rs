@@ -1,5 +1,7 @@
 use pb_core::connector::ConnectorPath;
-use pb_core::{Assets, HAlign, Image, Label, ObjectData, ObjectKind, Rgba, Style, TextBox};
+use pb_core::{
+    Assets, FrameData, HAlign, Image, Label, ObjectData, ObjectKind, Rgba, Style, TextBox,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -20,6 +22,9 @@ const SHADOW_COLOR: Color = Color::from_rgba8(0, 0, 0, 0x30);
 /// Drawn in place of an image whose file is missing or cannot be read.
 const PLACEHOLDER_FILL: Color = Color::from_rgb8(0xE4, 0xE4, 0xE0);
 const PLACEHOLDER_LINE: Color = Color::from_rgb8(0xA0, 0xA0, 0x9A);
+/// A frame's hairline edge and its title.
+const FRAME_EDGE: Color = Color::from_rgb8(0xD0, 0xD0, 0xCB);
+const FRAME_TITLE: Color = Color::from_rgb8(0x5F, 0x63, 0x68);
 
 /// Fitted sizes kept by [`TextRenderer`]; the cache is dropped when it grows past this.
 const FIT_CACHE_LIMIT: usize = 4096;
@@ -144,6 +149,8 @@ pub(crate) struct Resources<'a> {
     pub text: &'a mut TextRenderer,
     pub images: &'a mut crate::ImageCache,
     pub assets: &'a Assets,
+    /// Logical pixels per world unit, for what keeps its size on screen.
+    pub zoom: f64,
 }
 
 /// Draws one object. `transform` maps world to physical pixels.
@@ -157,6 +164,7 @@ pub(crate) fn draw_object(
         text,
         images,
         assets,
+        zoom,
     } = resources;
     let transform = transform * data.frame().transform();
     let style = &data.style;
@@ -167,7 +175,10 @@ pub(crate) fn draw_object(
     let layered = style.opacity < 1.0;
     if layered {
         let pad = paint_padding(data);
-        let clip = data.bounds.inflate(pad, pad);
+        let mut clip = data.bounds.inflate(pad, pad);
+        if data.kind.is_frame() {
+            clip = clip.union(FrameData::title_band(data.bounds, zoom));
+        }
         scene.push_layer(
             Fill::NonZero,
             Mix::Normal,
@@ -235,6 +246,28 @@ pub(crate) fn draw_object(
         }
         // Drawn by `draw_connector`, which needs the objects they attach to.
         ObjectKind::Connector(_) => {}
+        ObjectKind::Frame(frame) => {
+            let b = data.bounds;
+            scene.fill(Fill::NonZero, transform, color(style.fill), None, &b);
+            scene.stroke(&Stroke::new(1.0 / zoom), transform, FRAME_EDGE, None, &b);
+            if !frame.title.is_empty() {
+                let size = FrameData::TITLE_SIZE / zoom;
+                let layout = text.engine.layout(&frame.title, size, None);
+                let band = FrameData::title_band(b, zoom);
+                let top = b.y0 - FrameData::TITLE_GAP / zoom - layout.height;
+                // A long title is cut at the frame's width.
+                scene.push_clip_layer(Fill::NonZero, transform, &band);
+                text.draw(
+                    scene,
+                    transform,
+                    (b.x0, top),
+                    size,
+                    &layout.glyphs,
+                    FRAME_TITLE,
+                );
+                scene.pop_layer();
+            }
+        }
         ObjectKind::Image(image) => match images.get(assets, image.asset) {
             Some(brush) => draw_image(scene, transform, data.bounds, image, brush),
             None => draw_placeholder(scene, transform, data.bounds),

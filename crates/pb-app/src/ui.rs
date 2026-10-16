@@ -413,6 +413,7 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         (ToolKind::Text, "Text (T)", paint_text),
                         (ToolKind::Sticky, "Sticky note (N)", paint_sticky),
                         (ToolKind::Connector, "Connector (L)", paint_connector),
+                        (ToolKind::Frame, "Frame (F)", paint_frame),
                     ];
                     let mut ink_button = shapes.rect;
                     for (tool, tooltip, paint) in ink_tools {
@@ -1034,6 +1035,19 @@ fn paint_cursor(painter: &Painter, rect: Rect, color: Color32) {
         at(0.15, 0.0),
     ];
     painter.add(Shape::line(points, Stroke::new(1.6, color)));
+}
+
+/// A frame: its area under a title line.
+fn paint_frame(painter: &Painter, rect: Rect, color: Color32) {
+    let at = |x: f32, y: f32| rect.min + Vec2::new(x, y) * rect.width();
+    let stroke = Stroke::new(1.6, color);
+    painter.line_segment([at(0.0, 0.05), at(0.45, 0.05)], stroke);
+    painter.rect_stroke(
+        Rect::from_min_max(at(0.0, 0.28), at(1.0, 0.95)),
+        1,
+        stroke,
+        egui::StrokeKind::Middle,
+    );
 }
 
 fn paint_pen(painter: &Painter, rect: Rect, color: Color32) {

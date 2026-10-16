@@ -14,6 +14,15 @@ fn at(x: f64, y: f64) -> Pointer {
     }
 }
 
+fn shape(kind: ObjectKind, bounds: Rect) -> ObjectData {
+    ObjectData {
+        kind,
+        bounds,
+        rotation: 0.0,
+        style: Style::default(),
+    }
+}
+
 fn alt(p: Pointer) -> Pointer {
     Pointer { alt: true, ..p }
 }
@@ -980,4 +989,83 @@ fn labels_are_hit_and_slide_along_the_line() {
     };
     assert!(label.at > 0.45 && label.at < 0.55, "{}", label.at);
     assert_eq!(&*label.text, "label");
+}
+
+// Frames
+
+/// A board with a frame at (0, 0)-(400, 300) and a rectangle inside it, applied as made.
+fn framed() -> (Document, ObjectId, ObjectId) {
+    let mut tools = Tools::default();
+    let mut doc = Document::new();
+    tools.set_active(ToolKind::Frame);
+    let cmd = drag(&mut tools, &doc, at(0.0, 0.0), at(400.0, 300.0)).unwrap();
+    let frame = doc.apply(cmd).unwrap().created[0];
+    let inside = doc
+        .apply(Command::Create(vec![
+            shape(
+                ShapeKind::Rectangle.into(),
+                Rect::new(50.0, 50.0, 100.0, 100.0),
+            )
+            .into(),
+        ]))
+        .unwrap()
+        .created[0];
+    (doc, frame, inside)
+}
+
+#[test]
+fn frame_tool_draws_or_places_named_frames() {
+    let (doc, frame, _) = framed();
+    let data = &doc.get(frame).unwrap().data;
+    assert_eq!(data.bounds, Rect::new(0.0, 0.0, 400.0, 300.0));
+    assert_eq!(data.kind.text(), Some("Frame 1"));
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Frame);
+    let p = Pointer {
+        zoom: 2.0,
+        ..at(1000.0, 1000.0)
+    };
+    let Some(Command::Create(items)) = click(&mut tools, &doc, p) else {
+        panic!("expected Create");
+    };
+    let [Content::Object(data)] = &items[..] else {
+        panic!("expected one frame");
+    };
+    // 16:9 at the zoom it was placed at, and the next name.
+    assert_eq!(data.bounds.size(), pb_geom::kurbo::Size::new(320.0, 180.0));
+    assert_eq!(data.kind.text(), Some("Frame 2"));
+    assert_eq!(tools.active(), ToolKind::Select);
+}
+
+#[test]
+fn frames_are_picked_by_their_title_and_carry_their_contents() {
+    let (doc, frame, inside) = framed();
+    let mut tools = Tools::default();
+    // The body is see-through: a press there selects nothing and starts a marquee.
+    assert_eq!(tools.object_at(&doc, at(300.0, 200.0)), None);
+    assert_eq!(tools.object_at(&doc, at(75.0, 75.0)), Some(inside));
+    let title = at(20.0, -8.0);
+    assert_eq!(tools.object_at(&doc, title), Some(frame));
+    let Some(Command::Move { ids, delta }) = drag(&mut tools, &doc, title, at(70.0, 42.0)) else {
+        panic!("expected Move");
+    };
+    assert_eq!(delta, Vec2::new(50.0, 50.0));
+    assert!(ids.contains(&frame) && ids.contains(&inside));
+    // Frames do not rotate.
+    assert!(!tools.can_rotate(&doc));
+    // Copies take the contents along.
+    let Some(Command::Create(items)) = clipboard::duplicate(&doc, tools.selection()) else {
+        panic!("expected Create");
+    };
+    assert_eq!(items.len(), 2);
+}
+
+#[test]
+fn marquee_in_a_frame_selects_its_contents_only() {
+    let (doc, frame, inside) = framed();
+    let mut tools = Tools::default();
+    drag(&mut tools, &doc, at(300.0, 250.0), at(40.0, 40.0));
+    assert_eq!(tools.selection().ids(), &[inside]);
+    drag(&mut tools, &doc, at(-10.0, -10.0), at(410.0, 310.0));
+    assert!(tools.selection().contains(frame) && tools.selection().contains(inside));
 }

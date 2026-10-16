@@ -15,9 +15,9 @@ use crate::connector::{self, Anchor, Cap, ConnectorPath, EndPoint, Label, Route}
 
 use crate::command::reorder;
 use crate::{
-    Applied, AssetId, Assets, Command, Connector, Content, End, Group, HAlign, Image, Ink, Object,
-    ObjectData, ObjectId, ObjectKind, Rgba, Shape, Sticky, Style, StyleChange, Text, VAlign,
-    ZOrder,
+    Applied, AssetId, Assets, Command, Connector, Content, End, FrameData, Group, HAlign, Image,
+    Ink, Object, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Sticky, Style, StyleChange, Text,
+    VAlign, ZOrder,
 };
 
 /// Font size of text objects stored without one.
@@ -798,6 +798,55 @@ impl Document {
         }
     }
 
+    /// What moves and copies with frame `id`: the top-level objects and groups whose middle
+    /// is inside it, including smaller frames (and so, through them, what those hold).
+    /// Empty for anything but a frame.
+    pub fn frame_members(&self, id: ObjectId) -> Vec<ObjectId> {
+        let Some(frame) = self.get(id).filter(|o| o.data.kind.is_frame()) else {
+            return Vec::new();
+        };
+        let area = frame.data.bounds;
+        let size = area.area();
+        let own = self.top_level(id);
+        self.roots
+            .iter()
+            .copied()
+            .filter(|&root| root != own)
+            .filter(|&root| {
+                let leaves = self.leaves(root);
+                let Some(bounds) = leaves
+                    .iter()
+                    .map(|o| o.data.frame().aabb())
+                    .reduce(|a, b| a.union(b))
+                else {
+                    return false;
+                };
+                // Frames hold only smaller frames, so two never hold each other.
+                let fits = leaves
+                    .iter()
+                    .all(|o| !o.data.kind.is_frame() || o.data.bounds.area() < size);
+                fits && area.contains(bounds.center())
+            })
+            .collect()
+    }
+
+    /// `ids` with the members of the frames among them, each once, in the given order
+    /// followed by the members.
+    pub fn with_frame_members(&self, ids: &[ObjectId]) -> Vec<ObjectId> {
+        let mut out = ids.to_vec();
+        let mut i = 0;
+        while i < out.len() {
+            let id = out[i];
+            for member in self.frame_members(id) {
+                if !out.contains(&member) {
+                    out.push(member);
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
     /// Caches the subtree under `parent` and returns the ids of its direct children.
     fn read_children(&mut self, parent: TreeParentId, group: Option<ObjectId>) -> Vec<ObjectId> {
         let mut ids = Vec::new();
@@ -876,6 +925,7 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
             meta.insert(key::FONT_SIZE, text.size)?;
         }
         ObjectKind::Sticky(sticky) => meta.insert(key::TEXT, &*sticky.text)?,
+        ObjectKind::Frame(frame) => meta.insert(key::TEXT, &*frame.title)?,
         ObjectKind::Image(image) => {
             meta.insert(key::ASSET, image.asset.to_string())?;
             write_crop(meta, image.crop)?;
@@ -1160,6 +1210,12 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
                 _ => Arc::from(""),
             };
             ObjectKind::Sticky(Sticky { text })
+        }
+        ValueOrContainer::Value(LoroValue::String(s)) if &**s == "frame" => {
+            let title = get_str(meta, key::TEXT).unwrap_or_default();
+            ObjectKind::Frame(FrameData {
+                title: title.into(),
+            })
         }
         ValueOrContainer::Value(LoroValue::String(s)) if &**s == "connector" => {
             ObjectKind::Connector(read_connector(meta)?)
@@ -1873,6 +1929,50 @@ mod tests {
         let copy = doc.content(shape).unwrap();
         let id = doc.apply(Command::Create(vec![copy])).unwrap().created[0];
         assert_eq!(style(&doc, id), style(&doc, shape));
+    }
+
+    fn frame(doc: &mut Document, bounds: Rect) -> ObjectId {
+        let mut data = rect(bounds.x0, bounds.y0, bounds.width(), bounds.height());
+        data.kind = ObjectKind::Frame(FrameData {
+            title: "Plan".into(),
+        });
+        create(doc, data)
+    }
+
+    #[test]
+    fn frames_roundtrip_and_hold_what_is_inside() {
+        let mut doc = Document::new();
+        let outer = frame(&mut doc, Rect::new(0.0, 0.0, 400.0, 300.0));
+        let inner = frame(&mut doc, Rect::new(10.0, 10.0, 200.0, 200.0));
+        let inside = create(&mut doc, rect(20.0, 20.0, 10.0, 10.0));
+        // Its middle is outside, though it overlaps.
+        let across = create(&mut doc, rect(350.0, 10.0, 200.0, 50.0));
+        let pair = [
+            create(&mut doc, rect(300.0, 200.0, 10.0, 10.0)),
+            create(&mut doc, rect(320.0, 220.0, 10.0, 10.0)),
+        ];
+        let group = doc.apply(Command::Group(pair.to_vec())).unwrap().created[0];
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(loaded.get(outer).unwrap().data.kind.text(), Some("Plan"));
+
+        assert_eq!(doc.frame_members(outer), vec![inner, inside, group]);
+        assert_eq!(doc.frame_members(inner), vec![inside]);
+        assert!(doc.frame_members(inside).is_empty());
+        assert!(!doc.frame_members(outer).contains(&across));
+        assert_eq!(
+            doc.with_frame_members(&[inner, inside]),
+            vec![inner, inside]
+        );
+        // Moving a frame by itself leaves the contents; the tools add them.
+        doc.apply(Command::Move {
+            ids: doc.with_frame_members(&[outer]),
+            delta: Vec2::new(10.0, 0.0),
+        })
+        .unwrap();
+        assert_eq!(doc.get(inside).unwrap().data.bounds.x0, 30.0);
+        assert_eq!(doc.get(across).unwrap().data.bounds.x0, 350.0);
+        // Connectors do not attach to frames.
+        assert!(!connector::can_attach(&doc.get(outer).unwrap().data.kind));
     }
 
     #[test]

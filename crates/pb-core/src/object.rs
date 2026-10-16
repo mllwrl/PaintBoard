@@ -66,6 +66,10 @@ pub enum ObjectKind {
     /// A line between two points or objects, in the outline color and width. Its bounds are
     /// worked out from its ends; see [`crate::connector`].
     Connector(Connector),
+    /// A titled area of the fill color that holds the objects inside it; see
+    /// [`crate::Document::frame_members`]. It is drawn below everything else and does not
+    /// rotate.
+    Frame(FrameData),
 }
 
 impl ObjectKind {
@@ -77,6 +81,7 @@ impl ObjectKind {
             Self::Sticky(_) => "sticky",
             Self::Image(_) => "image",
             Self::Connector(_) => "connector",
+            Self::Frame(_) => "frame",
             Self::Shape(shape) => shape_name(shape.kind),
         }
     }
@@ -92,12 +97,17 @@ impl ObjectKind {
         matches!(self, Self::Ink(_))
     }
 
-    /// The text of a text object, sticky note or shape.
+    pub fn is_frame(&self) -> bool {
+        matches!(self, Self::Frame(_))
+    }
+
+    /// The text of a text object, sticky note or shape, or a frame's title.
     pub fn text(&self) -> Option<&str> {
         match self {
             Self::Text(text) => Some(&text.text),
             Self::Sticky(sticky) => Some(&sticky.text),
             Self::Shape(shape) => Some(&shape.text),
+            Self::Frame(frame) => Some(&frame.title),
             Self::Ink(_) | Self::Image(_) | Self::Connector(_) => None,
         }
     }
@@ -120,6 +130,31 @@ fn shape_name(kind: ShapeKind) -> &'static str {
 impl From<ShapeKind> for ObjectKind {
     fn from(kind: ShapeKind) -> Self {
         Self::Shape(kind.into())
+    }
+}
+
+/// A frame's own data; its area is the object's bounds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FrameData {
+    pub title: Arc<str>,
+}
+
+impl FrameData {
+    /// Font size of titles, in logical pixels whatever the zoom, so they stay readable.
+    pub const TITLE_SIZE: f64 = 13.0;
+    /// Space between a title and its frame, in logical pixels.
+    pub const TITLE_GAP: f64 = 6.0;
+    /// Line height of titles, relative to their size.
+    const TITLE_LINE: f64 = 1.2;
+    /// Side of a frame placed with a click, in logical pixels at the zoom it is placed at:
+    /// 16:9, like a slide.
+    pub const CLICK_SIZE: (f64, f64) = (640.0, 360.0);
+
+    /// The band above a frame with `bounds` (world) where its title sits and can be
+    /// clicked, at `zoom`.
+    pub fn title_band(bounds: Rect, zoom: f64) -> Rect {
+        let height = (Self::TITLE_SIZE * Self::TITLE_LINE + Self::TITLE_GAP) / zoom;
+        Rect::new(bounds.x0, bounds.y0 - height, bounds.x1, bounds.y0)
     }
 }
 
@@ -527,7 +562,7 @@ impl ObjectData {
             ObjectKind::Sticky(_) => Some(Sticky::text_box(self.bounds)),
             ObjectKind::Shape(shape) => Some(Shape::text_box(shape.kind, self.bounds, &self.style)),
             ObjectKind::Text(_) | ObjectKind::Ink(_) | ObjectKind::Image(_) => None,
-            ObjectKind::Connector(_) => None,
+            ObjectKind::Connector(_) | ObjectKind::Frame(_) => None,
         }
     }
 

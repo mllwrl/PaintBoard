@@ -1,4 +1,4 @@
-use pb_core::{Document, Object, ObjectData, ObjectId, ObjectKind};
+use pb_core::{Document, FrameData, Object, ObjectData, ObjectId, ObjectKind};
 use pb_geom::ink::polyline_distance;
 use pb_geom::kurbo::{Point, Rect};
 
@@ -11,6 +11,17 @@ pub fn object_at(doc: &Document, point: Point, tolerance: f64) -> Option<ObjectI
         .iter()
         .rev()
         .find(|o| object_hits(doc, o, point, tolerance))
+        .map(|o| doc.top_level(o.id))
+}
+
+/// The frame whose title is under `point` at `zoom`, topmost first. Frames are hit only
+/// there, so pressing inside one selects what is in it or starts a marquee.
+pub fn frame_title_at(doc: &Document, point: Point, zoom: f64) -> Option<ObjectId> {
+    doc.objects()
+        .iter()
+        .rev()
+        .filter(|o| o.data.kind.is_frame())
+        .find(|o| FrameData::title_band(o.data.bounds, zoom).contains(point))
         .map(|o| doc.top_level(o.id))
 }
 
@@ -49,6 +60,9 @@ fn touches(data: &ObjectData, area: Rect) -> bool {
         | ObjectKind::Text(_)
         | ObjectKind::Sticky(_)
         | ObjectKind::Image(_) => true,
+        // Only when the area takes all of it, so a marquee inside a frame selects its
+        // contents.
+        ObjectKind::Frame(_) => area.contains_rect(data.bounds),
         // Needs the document's path; see `connector_touches`.
         ObjectKind::Connector(_) => false,
         ObjectKind::Ink(ink) => {
@@ -101,6 +115,8 @@ pub(crate) fn hits(data: &ObjectData, point: Point, tolerance: f64) -> bool {
         ObjectKind::Text(_) | ObjectKind::Sticky(_) => {
             data.bounds.inflate(pad, pad).contains(local)
         }
+        // By its title only, see `frame_title_at`.
+        ObjectKind::Frame(_) => false,
         // Hit along the path, which needs the document; see `connector_hit`.
         ObjectKind::Connector(_) => false,
         // Images ignore their outline width.

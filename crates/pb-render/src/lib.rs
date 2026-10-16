@@ -15,7 +15,7 @@ pub use vello;
 
 use std::collections::HashMap;
 
-use pb_core::{Assets, Object, ObjectData, ObjectId, ObjectKind};
+use pb_core::{Assets, FrameData, Object, ObjectData, ObjectId, ObjectKind};
 use pb_geom::Camera;
 use vello::Scene;
 use vello::kurbo::{Affine, Size};
@@ -94,12 +94,17 @@ pub fn build_scene(
         .iter()
         .map(|o| (o.id, overrides.get(&o.id).copied().unwrap_or(&o.data)))
         .collect();
-    let shown = view
+    let shown: Vec<_> = view
         .objects
         .iter()
         .filter(|o| !view.hidden.contains(&o.id))
-        .map(|o| current[&o.id]);
-    for data in shown.chain(view.previews) {
+        .map(|o| current[&o.id])
+        .collect();
+    // Frames lie under everything else.
+    let frames = shown.iter().filter(|d| d.kind.is_frame());
+    let others = shown.iter().filter(|d| !d.kind.is_frame());
+    let zoom = view.camera.zoom();
+    for data in frames.chain(others).copied().chain(view.previews) {
         if let ObjectKind::Connector(c) = &data.kind {
             let width = data.style.stroke_width;
             let path = pb_core::connector::layout(c, width, |id| current.get(&id).copied());
@@ -111,13 +116,18 @@ pub fn build_scene(
             }
             continue;
         }
-        if !objects::painted_bounds(data).overlaps(visible) {
+        let mut painted = objects::painted_bounds(data);
+        if data.kind.is_frame() {
+            painted = painted.union(FrameData::title_band(data.bounds, zoom));
+        }
+        if !painted.overlaps(visible) {
             continue;
         }
         let resources = objects::Resources {
             text: &mut *text,
             images: &mut *images,
             assets: view.assets,
+            zoom,
         };
         objects::draw_object(scene, transform, data, resources);
     }

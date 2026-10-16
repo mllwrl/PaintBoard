@@ -314,9 +314,12 @@ impl App {
             ),
             style: first.data.style,
             has_group: ids.iter().any(|&id| self.document.group(id).is_some()),
-            has_fill: leaves
-                .iter()
-                .any(|o| matches!(o.data.kind, ObjectKind::Shape(_) | ObjectKind::Sticky(_))),
+            has_fill: leaves.iter().any(|o| {
+                matches!(
+                    o.data.kind,
+                    ObjectKind::Shape(_) | ObjectKind::Sticky(_) | ObjectKind::Frame(_)
+                )
+            }),
             has_width: leaves.iter().any(|o| {
                 matches!(
                     o.data.kind,
@@ -329,7 +332,7 @@ impl App {
             }),
             has_stroke: leaves
                 .iter()
-                .any(|o| !matches!(o.data.kind, ObjectKind::Image(_))),
+                .any(|o| !matches!(o.data.kind, ObjectKind::Image(_) | ObjectKind::Frame(_))),
             stroke_label: if leaves
                 .iter()
                 .any(|o| matches!(o.data.kind, ObjectKind::Shape(_)))
@@ -597,7 +600,8 @@ impl App {
         if self.document.get(id).is_none() || self.document.is_locked(id) {
             return false;
         }
-        let Some(mut edit) = TextEdit::existing(self.text.engine(), &self.document, id, None)
+        let zoom = self.camera.zoom();
+        let Some(mut edit) = TextEdit::existing(self.text.engine(), &self.document, id, None, zoom)
         else {
             return self.start_crop(id);
         };
@@ -661,9 +665,13 @@ impl App {
                 .filter(|&id| !self.document.is_locked(id) && self.document.get(id).is_some());
             if let Some(id) = target {
                 let engine = self.text.engine();
-                if let Some(mut edit) =
-                    TextEdit::existing(engine, &self.document, id, Some(pointer.world))
-                {
+                if let Some(mut edit) = TextEdit::existing(
+                    engine,
+                    &self.document,
+                    id,
+                    Some(pointer.world),
+                    pointer.zoom,
+                ) {
                     edit.press(engine, pointer.world, false, false);
                     self.start_editing(edit);
                     return true;
@@ -1086,6 +1094,7 @@ impl App {
             KeyCode::KeyT if !ctrl => self.tools.set_active(ToolKind::Text),
             KeyCode::KeyN if !ctrl => self.tools.set_active(ToolKind::Sticky),
             KeyCode::KeyL if !ctrl => self.tools.set_active(ToolKind::Connector),
+            KeyCode::KeyF if !ctrl => self.tools.set_active(ToolKind::Frame),
             KeyCode::Enter | KeyCode::NumpadEnter if !ctrl => return self.edit_selected_text(),
             KeyCode::KeyP if !ctrl => self.tools.set_active(ToolKind::Pen),
             KeyCode::KeyM if !ctrl => self.tools.set_active(ToolKind::Marker),
@@ -1540,7 +1549,7 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
         show_handles,
         locked: tools.selection().has_locked(document),
         rotate_knob: selection
-            .filter(|_| show_handles)
+            .filter(|_| show_handles && tools.can_rotate(document))
             .map(|f| rotation_knob(f, zoom)),
         hover,
         marquee: tools.marquee(),
