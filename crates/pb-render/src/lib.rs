@@ -5,7 +5,7 @@ mod grid;
 mod objects;
 mod overlay;
 
-pub use gpu::Gpu;
+pub use gpu::{FrameTarget, Gpu};
 pub use grid::{GridColors, GridStyle, draw_grid};
 pub use overlay::{Overlay, OverlayColors};
 pub use vello;

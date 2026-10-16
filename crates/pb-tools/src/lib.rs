@@ -174,6 +174,24 @@ impl Tools {
         self.hover_grip = None;
     }
 
+    /// The shape the shape tool starts with.
+    pub fn last_shape(&self) -> ShapeKind {
+        self.last_shape
+    }
+
+    /// Whether a drag (move, resize, marquee, drawing) is in progress.
+    pub fn is_busy(&self) -> bool {
+        self.gesture.is_some()
+    }
+
+    /// Forgets the hovered object, e.g. when the pointer moves onto the UI.
+    pub fn clear_hover(&mut self) -> bool {
+        let had = self.hover.is_some() || self.hover_grip.is_some();
+        self.hover = None;
+        self.hover_grip = None;
+        had
+    }
+
     /// Picks the shape tool: the next kind if it is already active, else the last one used.
     pub fn cycle_shape(&mut self) {
         let shape = match self.active {

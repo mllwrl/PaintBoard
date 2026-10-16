@@ -30,6 +30,9 @@ wasm-bindgen-futures = "0.4"
 console_log = "1"
 console_error_panic_hook = "0.1"
 rfd = "0.17"
+egui = { version = "0.37", default-features = false }
+egui-winit = { version = "0.37", default-features = false }
+egui-wgpu = { version = "0.37", default-features = false }
 web-time = "1.1"
 
 [workspace.lints.rust]

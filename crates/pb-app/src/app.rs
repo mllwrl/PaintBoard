@@ -19,6 +19,7 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::navigation::Navigation;
 use crate::session::Session;
+use crate::ui::{Action, Model, SelectionInfo, Ui};
 
 pub enum UserEvent {
     /// GPU initialization finished (asynchronous on the web).
@@ -40,6 +41,12 @@ pub struct App {
     tools: Tools,
     clipboard: Clipboard,
     session: Session,
+    ui: Option<Ui>,
+    /// A left-button drag started on the canvas: its events go to the tools even when the
+    /// pointer passes over the UI.
+    canvas_drag: bool,
+    /// A style slider is being dragged, and its changes form one undo step.
+    style_drag: bool,
     shown_title: String,
 }
 
@@ -59,6 +66,9 @@ impl App {
             tools: Tools::default(),
             clipboard: Clipboard::default(),
             session,
+            ui: None,
+            canvas_drag: false,
+            style_drag: false,
             shown_title: String::new(),
         }
     }
@@ -81,9 +91,12 @@ impl App {
     }
 
     fn redraw(&mut self) {
-        let (Some(window), Some(gpu)) = (&self.window, &mut self.gpu) else {
+        let Some(window) = self.window.clone() else {
             return;
         };
+        if self.gpu.is_none() {
+            return;
+        }
         let scale = window.scale_factor();
         let size = window.inner_size().to_logical::<f64>(scale);
         let overrides = self.tools.overrides(&self.document);
@@ -103,23 +116,133 @@ impl App {
                 overlay: &overlay,
             },
         );
-        gpu.render(&self.scene, self.theme.background);
 
-        // Until there is a toolbar, the title shows the active tool, zoom and grid snapping.
-        let title = format!(
-            "{} — PaintBoard — {} — {:.0}%{}",
-            self.session.name(),
-            self.tools.active().name(),
-            self.camera.zoom() * 100.0,
-            if self.tools.snap_to_grid() {
-                " — snap to grid"
-            } else {
-                ""
-            }
-        );
+        let board = self.session.name();
+        let model = Model {
+            board: &board,
+            tool: self.tools.active(),
+            last_shape: self.tools.last_shape(),
+            can_undo: self.document.can_undo(),
+            can_redo: self.document.can_redo(),
+            zoom: self.camera.zoom(),
+            grid: self.grid,
+            snap: self.tools.snap_to_grid(),
+            selection: self.selection_info(),
+        };
+        let actions = match &mut self.ui {
+            Some(ui) => ui.run(&window, &model),
+            None => Vec::new(),
+        };
+        if let Some(gpu) = &mut self.gpu {
+            let ui = &mut self.ui;
+            gpu.render(&self.scene, self.theme.background, |target| {
+                if let Some(ui) = ui {
+                    ui.paint(target);
+                }
+            });
+        }
+
+        let title = format!("{board} — PaintBoard");
         if self.shown_title != title {
             window.set_title(&title);
             self.shown_title = title;
+        }
+
+        if !actions.is_empty() {
+            for action in actions {
+                self.perform(action);
+            }
+            self.request_redraw();
+        }
+    }
+
+    /// What the selection toolbar needs; nothing while a gesture is in progress.
+    fn selection_info(&self) -> Option<SelectionInfo> {
+        if self.tools.is_busy() || self.tools.active() != ToolKind::Select {
+            return None;
+        }
+        let selection = self.tools.selection();
+        let ids = selection.ids();
+        let bounds = selection.frame(&self.document)?.aabb();
+        let first = ids.iter().flat_map(|&id| self.document.leaves(id)).next()?;
+        let corner = |x, y| self.camera.world_to_screen(Point::new(x, y));
+        Some(SelectionInfo {
+            screen: pb_geom::kurbo::Rect::from_points(
+                corner(bounds.x0, bounds.y0),
+                corner(bounds.x1, bounds.y1),
+            ),
+            style: first.data.style,
+            has_group: ids.iter().any(|&id| self.document.group(id).is_some()),
+            several: ids.len() > 1,
+            locked: selection.has_locked(&self.document),
+        })
+    }
+
+    /// Carries out a UI action.
+    fn perform(&mut self, action: Action) {
+        let viewport = self.viewport();
+        match action {
+            Action::Tool(tool) => self.tools.set_active(tool),
+            Action::Undo => self.undo(),
+            Action::Redo => self.redo(),
+            Action::NewBoard => self.new_board(),
+            Action::Open => self.open_board(),
+            Action::Save => self.session.save(&self.document),
+            Action::SaveAs => {
+                self.session.save_as(&self.document);
+            }
+            Action::ZoomIn => self.navigation.zoom_in(&mut self.camera, viewport),
+            Action::ZoomOut => self.navigation.zoom_out(&mut self.camera, viewport),
+            Action::ZoomReset => self.navigation.zoom_reset(&mut self.camera, viewport),
+            Action::NextGrid => self.grid = self.grid.next(),
+            Action::ToggleSnap => self.tools.set_snap_to_grid(!self.tools.snap_to_grid()),
+            Action::SetStyle(change) => {
+                let ids = self.tools.selection().ids();
+                let ids: Vec<_> = ids
+                    .iter()
+                    .copied()
+                    .filter(|&id| !self.document.is_locked(id))
+                    .collect();
+                if !ids.is_empty() {
+                    self.apply(Command::SetStyle { ids, change });
+                }
+            }
+            Action::BeginStyleDrag => {
+                if !self.style_drag {
+                    self.document.begin_undo_group();
+                    self.style_drag = true;
+                }
+            }
+            Action::EndStyleDrag => self.end_style_drag(),
+            Action::Group => self.apply_with(Tools::group_selected),
+            Action::Ungroup => self.apply_with(Tools::ungroup_selected),
+            Action::ToggleLock => self.apply_with(Tools::toggle_lock_selected),
+            Action::Duplicate => {
+                self.apply_with(|tools, doc| pb_tools::duplicate(doc, tools.selection()));
+            }
+            Action::Delete => self.apply_with(Tools::delete_selected),
+            Action::Reorder(to) => self.reorder(to),
+        }
+    }
+
+    fn end_style_drag(&mut self) {
+        if self.style_drag {
+            self.document.end_undo_group();
+            self.style_drag = false;
+        }
+    }
+
+    fn open_board(&mut self) {
+        self.end_style_drag();
+        if let Some(document) = self.session.open(&self.document) {
+            self.replace_document(document);
+        }
+    }
+
+    fn new_board(&mut self) {
+        self.end_style_drag();
+        if let Some(document) = self.session.new_board(&self.document) {
+            self.replace_document(document);
         }
     }
 
@@ -150,6 +273,7 @@ impl App {
     }
 
     fn undo(&mut self) {
+        self.end_style_drag();
         self.tools.cancel();
         if let Err(err) = self.document.undo() {
             log::error!("undo failed: {err}");
@@ -261,6 +385,9 @@ impl App {
     }
 
     fn on_gpu_ready(&mut self, gpu: Gpu) {
+        if let Some(ui) = &mut self.ui {
+            ui.attach_gpu(&gpu);
+        }
         self.gpu = Some(gpu);
         self.request_redraw();
     }
@@ -289,16 +416,8 @@ impl App {
                 self.session.save_as(&self.document);
             }
             KeyCode::KeyS if ctrl => self.session.save(&self.document),
-            KeyCode::KeyO if ctrl => {
-                if let Some(document) = self.session.open(&self.document) {
-                    self.replace_document(document);
-                }
-            }
-            KeyCode::KeyN if ctrl => {
-                if let Some(document) = self.session.new_board(&self.document) {
-                    self.replace_document(document);
-                }
-            }
+            KeyCode::KeyO if ctrl => self.open_board(),
+            KeyCode::KeyN if ctrl => self.new_board(),
             KeyCode::KeyZ if ctrl && modifiers.shift_key() => self.redo(),
             KeyCode::KeyZ if ctrl => self.undo(),
             KeyCode::KeyY if ctrl => self.redo(),
@@ -407,6 +526,7 @@ impl ApplicationHandler<UserEvent> for App {
                 .expect("failed to create window"),
         );
         self.window = Some(window.clone());
+        self.ui = Some(Ui::new(&window));
         self.camera.look_at(Point::ZERO, 1.0, self.viewport());
 
         let size = window.inner_size();
@@ -437,9 +557,18 @@ impl ApplicationHandler<UserEvent> for App {
 
     /// Runs after each batch of events: autosaves when due and wakes up for the next one.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        self.session.tick(&self.document, Instant::now());
-        event_loop.set_control_flow(match self.session.deadline() {
-            Some(deadline) => ControlFlow::WaitUntil(deadline),
+        let now = Instant::now();
+        self.session.tick(&self.document, now);
+        let ui_repaint = self.ui.as_ref().and_then(Ui::repaint_at);
+        if ui_repaint.is_some_and(|at| at <= now) {
+            self.request_redraw();
+        }
+        let wake = [self.session.deadline(), ui_repaint.filter(|&at| at > now)]
+            .into_iter()
+            .flatten()
+            .min();
+        event_loop.set_control_flow(match wake {
+            Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
         });
     }
@@ -456,6 +585,15 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let scale = self.scale();
+        let mut ui_consumed = false;
+        if let (Some(ui), Some(window)) = (&mut self.ui, &self.window) {
+            let response = ui.on_window_event(window, &event);
+            if response.repaint {
+                window.request_redraw();
+            }
+            ui_consumed = response.consumed;
+        }
+        let over_ui = self.ui.as_ref().is_some_and(Ui::wants_pointer) && !self.canvas_drag;
         let changed = match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
@@ -478,15 +616,21 @@ impl ApplicationHandler<UserEvent> for App {
                 self.pointer()
                     .is_some_and(|p| self.tools.pointer_move(&self.document, p))
             }
-            WindowEvent::KeyboardInput { event, .. } => self.handle_key(&event),
+            WindowEvent::KeyboardInput { event, .. } => {
+                let typing = self.ui.as_ref().is_some_and(Ui::wants_keyboard);
+                !typing && self.handle_key(&event)
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 let pos = position.to_logical::<f64>(scale);
                 let panned = self
                     .navigation
                     .cursor_moved(&mut self.camera, Point::new(pos.x, pos.y));
-                let tool_changed = self
-                    .pointer()
-                    .is_some_and(|p| self.tools.pointer_move(&self.document, p));
+                let tool_changed = if over_ui {
+                    self.tools.clear_hover()
+                } else {
+                    self.pointer()
+                        .is_some_and(|p| self.tools.pointer_move(&self.document, p))
+                };
                 panned || tool_changed
             }
             WindowEvent::CursorLeft { .. } => {
@@ -494,12 +638,26 @@ impl ApplicationHandler<UserEvent> for App {
                 false
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                let consumed = self.navigation.mouse_button(button, state);
-                !consumed && button == MouseButton::Left && self.handle_left_button(state)
+                // Presses on the UI stay there; releases always reach the canvas so that a
+                // drag started on it ends even over a toolbar.
+                if state == ElementState::Pressed && (ui_consumed || over_ui) {
+                    false
+                } else {
+                    let consumed = self.navigation.mouse_button(button, state);
+                    let left = button == MouseButton::Left;
+                    if left {
+                        self.canvas_drag = state == ElementState::Pressed && !consumed;
+                    }
+                    !consumed && left && self.handle_left_button(state)
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                self.navigation.wheel(&mut self.camera, delta, scale);
-                true
+                if ui_consumed || over_ui {
+                    false
+                } else {
+                    self.navigation.wheel(&mut self.camera, delta, scale);
+                    true
+                }
             }
             WindowEvent::PinchGesture { delta, .. } => {
                 self.navigation.pinch(&mut self.camera, delta);
@@ -507,7 +665,10 @@ impl ApplicationHandler<UserEvent> for App {
             }
             _ => false,
         };
-        if let Some(window) = &self.window {
+        // Over the UI, egui sets the cursor.
+        if let Some(window) = &self.window
+            && !over_ui
+        {
             window.set_cursor(self.cursor_icon());
         }
         if changed {

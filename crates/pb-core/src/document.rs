@@ -347,6 +347,19 @@ impl Document {
         self.undo.can_redo()
     }
 
+    /// Starts merging the following commands into one undo step, e.g. while a slider is
+    /// dragged. Ends with [`Document::end_undo_group`].
+    pub fn begin_undo_group(&mut self) {
+        if let Err(err) = self.undo.group_start() {
+            // Already in a group: the commands still merge into it.
+            log::debug!("undo group not started: {err}");
+        }
+    }
+
+    pub fn end_undo_group(&mut self) {
+        self.undo.group_end();
+    }
+
     /// Reverts the last local command. Returns false if there was nothing to undo.
     pub fn undo(&mut self) -> Result<bool> {
         let done = self.undo.undo()?;
@@ -1106,6 +1119,28 @@ mod tests {
         doc.refresh();
         let style = doc.get(a).unwrap().data.style;
         assert_eq!((style.fill, style.opacity), (red, 0.5));
+    }
+
+    #[test]
+    fn undo_group_merges_commands() {
+        let mut doc = Document::new();
+        let a = create(&mut doc, rect(0.0, 0.0, 10.0, 10.0));
+        doc.begin_undo_group();
+        for opacity in [0.8, 0.5, 0.2] {
+            doc.apply(Command::SetStyle {
+                ids: vec![a],
+                change: StyleChange {
+                    opacity: Some(opacity),
+                    ..StyleChange::default()
+                },
+            })
+            .unwrap();
+        }
+        doc.end_undo_group();
+        assert_eq!(doc.get(a).unwrap().data.style.opacity, 0.2);
+        doc.undo().unwrap();
+        assert_eq!(doc.get(a).unwrap().data.style.opacity, 1.0);
+        assert!(doc.get(a).is_some());
     }
 
     #[test]

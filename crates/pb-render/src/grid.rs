@@ -13,6 +13,14 @@ pub enum GridStyle {
 }
 
 impl GridStyle {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Dots => "Dots",
+            Self::Lines => "Lines",
+            Self::None => "No grid",
+        }
+    }
+
     pub fn next(self) -> Self {
         match self {
             Self::Dots => Self::Lines,
