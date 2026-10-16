@@ -7,7 +7,8 @@ use pb_geom::kurbo::{Point, Size, Vec2};
 use pb_render::vello::Scene;
 use pb_render::{Gpu, GridStyle, Overlay, Theme, View, build_scene};
 use pb_tools::{
-    Clipboard, CursorHint, Pointer, ToolKind, Tools, rotation_knob, selection_frame, unit_frame,
+    Align, Axis, Clipboard, CursorHint, Pointer, ToolKind, Tools, rotation_knob, selection_frame,
+    unit_frame,
 };
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
@@ -194,6 +195,27 @@ impl App {
         }
     }
 
+    /// Alt shortcuts for aligning and distributing (Miro's layout).
+    fn handle_arrange_key(&mut self, code: KeyCode, shift: bool) -> bool {
+        let align =
+            |to| move |tools: &Tools, doc: &Document| pb_tools::align(doc, tools.selection(), to);
+        let distribute = |axis| {
+            move |tools: &Tools, doc: &Document| pb_tools::distribute(doc, tools.selection(), axis)
+        };
+        match code {
+            KeyCode::KeyH if shift => self.apply_with(distribute(Axis::Horizontal)),
+            KeyCode::KeyV if shift => self.apply_with(distribute(Axis::Vertical)),
+            KeyCode::KeyA => self.apply_with(align(Align::Left)),
+            KeyCode::KeyD => self.apply_with(align(Align::Right)),
+            KeyCode::KeyW => self.apply_with(align(Align::Top)),
+            KeyCode::KeyS => self.apply_with(align(Align::Bottom)),
+            KeyCode::KeyH => self.apply_with(align(Align::CenterX)),
+            KeyCode::KeyV => self.apply_with(align(Align::CenterY)),
+            _ => return false,
+        }
+        true
+    }
+
     fn reorder(&mut self, to: ZOrder) {
         let ids = self.tools.selection().ids().to_vec();
         if !ids.is_empty() {
@@ -235,6 +257,9 @@ impl App {
         }
         let modifiers = self.navigation.modifiers();
         let ctrl = modifiers.control_key();
+        if modifiers.alt_key() && !ctrl {
+            return self.handle_arrange_key(code, modifiers.shift_key());
+        }
         let viewport = self.viewport();
         // Physical keys, so shortcuts work the same on any keyboard layout.
         match code {

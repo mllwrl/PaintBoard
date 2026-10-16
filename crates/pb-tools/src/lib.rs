@@ -3,11 +3,13 @@
 //! Tools turn pointer input (in world coordinates) into [`Command`]s and previews. They only
 //! read the document, so the same input logic will drive local and remote edits.
 
+mod arrange;
 mod clipboard;
 mod handles;
 mod hit;
 mod selection;
 
+pub use arrange::{Align, Axis, align, distribute};
 pub use clipboard::{Clipboard, duplicate};
 pub use handles::{Handle, rotation_knob};
 pub use selection::{Selection, selection_frame, unit_frame};
