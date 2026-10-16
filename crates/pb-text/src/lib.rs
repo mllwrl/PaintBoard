@@ -34,10 +34,36 @@ pub struct Glyph {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TextLayout {
+    /// Including trailing spaces, so a caret after them stays inside.
     pub width: f64,
+    /// Without trailing spaces, including those hanging at wrapped line ends.
+    pub content_width: f64,
     pub height: f64,
     pub glyphs: Vec<Glyph>,
 }
+
+/// How lines sit horizontally.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextAlign {
+    #[default]
+    Start,
+    /// Centered within the wrapping width.
+    Center,
+}
+
+impl TextAlign {
+    pub(crate) fn to_parley(self) -> Alignment {
+        match self {
+            Self::Start => Alignment::Start,
+            Self::Center => Alignment::Center,
+        }
+    }
+}
+
+/// Bisection steps when fitting text; the size ends up within `max / 2^STEPS`.
+const FIT_STEPS: u32 = 10;
+/// Text is never fitted smaller than this fraction of the largest size.
+const MIN_FIT: f64 = 1.0 / 32.0;
 
 /// Shapes and lays out text. Keeps font data and caches between calls.
 pub struct TextEngine {
@@ -60,6 +86,17 @@ impl TextEngine {
     /// Lays out `text` at font `size`, wrapping lines at `max_width` if given. Lines start
     /// at the left edge, as in [`TextEditor`].
     pub fn layout(&mut self, text: &str, size: f64, max_width: Option<f64>) -> TextLayout {
+        self.layout_aligned(text, size, max_width, TextAlign::Start)
+    }
+
+    /// Like [`Self::layout`], with lines aligned within `max_width`.
+    pub fn layout_aligned(
+        &mut self,
+        text: &str,
+        size: f64,
+        max_width: Option<f64>,
+        align: TextAlign,
+    ) -> TextLayout {
         let mut builder = self
             .layouts
             .ranged_builder(&mut self.fonts, text, 1.0, false);
@@ -72,8 +109,30 @@ impl TextEngine {
         ));
         let mut layout: Layout<()> = builder.build(text);
         layout.break_all_lines(max_width.map(|w| w as f32));
-        layout.align(Alignment::Start, AlignmentOptions::default());
+        layout.align(align.to_parley(), AlignmentOptions::default());
         extract(&layout)
+    }
+
+    /// The largest font size, up to `max_size`, at which `text` wrapped at `width` fits in
+    /// `width` x `height`. Words are not broken, so a long word shrinks the text instead.
+    pub fn fit_size(&mut self, text: &str, width: f64, height: f64, max_size: f64) -> f64 {
+        let fits = |engine: &mut Self, size: f64| {
+            let layout = engine.layout(text, size, Some(width));
+            layout.content_width <= width && layout.height <= height
+        };
+        if max_size <= 0.0 || fits(self, max_size) {
+            return max_size.max(0.0);
+        }
+        let (mut lo, mut hi) = (max_size * MIN_FIT, max_size);
+        for _ in 0..FIT_STEPS {
+            let mid = (lo + hi) / 2.0;
+            if fits(self, mid) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
     }
 }
 
@@ -93,6 +152,7 @@ pub(crate) fn extract(layout: &Layout<()>) -> TextLayout {
     }
     TextLayout {
         width: f64::from(layout.full_width()),
+        content_width: f64::from(layout.width()),
         height: f64::from(layout.height()),
         glyphs,
     }
@@ -129,6 +189,36 @@ mod tests {
         let small = engine.layout("19", 10.0, None);
         let big = engine.layout("19", 40.0, None);
         assert!((big.width / small.width - 4.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn centers_lines_in_the_wrapping_width() {
+        let mut engine = TextEngine::new();
+        let start = engine.layout_aligned("hi", 20.0, Some(200.0), TextAlign::Start);
+        let center = engine.layout_aligned("hi", 20.0, Some(200.0), TextAlign::Center);
+        let shift = center.glyphs[0].x - start.glyphs[0].x;
+        let expected = (200.0 - start.width) / 2.0;
+        assert!(
+            (f64::from(shift) - expected).abs() < 0.5,
+            "{shift} vs {expected}"
+        );
+    }
+
+    #[test]
+    fn fit_size_shrinks_long_text_only() {
+        let mut engine = TextEngine::new();
+        assert_eq!(engine.fit_size("ok", 200.0, 200.0, 30.0), 30.0);
+        assert_eq!(engine.fit_size("", 200.0, 200.0, 30.0), 30.0);
+        let long = "a fairly long sentence that cannot fit on a note at full size ".repeat(4);
+        let size = engine.fit_size(&long, 200.0, 200.0, 30.0);
+        assert!(size < 30.0 && size > 5.0, "{size}");
+        let layout = engine.layout(&long, size, Some(200.0));
+        assert!(layout.height <= 200.0 && layout.content_width <= 200.0);
+        // Spaces hanging at wrapped line ends do not count, so the text fills the note.
+        assert!(layout.height > 150.0, "{}", layout.height);
+        // A single long word shrinks to the width instead of overflowing.
+        let word = engine.fit_size("Donaudampfschifffahrt", 100.0, 100.0, 30.0);
+        assert!(engine.layout("Donaudampfschifffahrt", word, None).width <= 100.0);
     }
 
     #[test]

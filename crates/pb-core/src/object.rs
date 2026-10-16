@@ -54,6 +54,9 @@ pub enum ObjectKind {
     Ink(Ink),
     /// Text in the outline color, wrapped at the object's width and centered in it.
     Text(Text),
+    /// A sticky note: a square of the fill color with text in the outline color, sized to
+    /// fit. It has no outline.
+    Sticky(Sticky),
 }
 
 impl ObjectKind {
@@ -62,6 +65,7 @@ impl ObjectKind {
         match self {
             Self::Ink(_) => "ink",
             Self::Text(_) => "text",
+            Self::Sticky(_) => "sticky",
             Self::Shape(shape) => match shape {
                 ShapeKind::Rectangle => "rect",
                 ShapeKind::RoundedRectangle => "roundRect",
@@ -85,6 +89,15 @@ impl ObjectKind {
 
     pub fn is_ink(&self) -> bool {
         matches!(self, Self::Ink(_))
+    }
+
+    /// The text of a text object or a sticky note.
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            Self::Text(text) => Some(&text.text),
+            Self::Sticky(sticky) => Some(&sticky.text),
+            Self::Shape(_) | Self::Ink(_) => None,
+        }
     }
 }
 
@@ -159,6 +172,37 @@ pub struct Text {
     pub text: Arc<str>,
     /// Font size in world units.
     pub size: f64,
+}
+
+/// A sticky note's text. Its font size is not stored: the text is drawn as large as fits.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sticky {
+    pub text: Arc<str>,
+}
+
+impl Sticky {
+    /// Side of a new sticky note, in logical pixels at the zoom it is created at.
+    pub const SIZE: f64 = 200.0;
+    /// Space between the note's edge and its text, relative to its smaller side.
+    const PADDING: f64 = 0.08;
+    /// Largest font size, relative to the note's smaller side.
+    const MAX_FONT: f64 = 0.16;
+
+    /// The area text is laid out in, for a note with `bounds`.
+    pub fn text_area(bounds: Rect) -> Rect {
+        let pad = bounds.width().min(bounds.height()) * Self::PADDING;
+        let area = bounds.inset(-pad);
+        if area.width() > 0.0 && area.height() > 0.0 {
+            area
+        } else {
+            Rect::from_center_size(bounds.center(), (0.0, 0.0))
+        }
+    }
+
+    /// The font size used when even a single short line fits.
+    pub fn max_font_size(bounds: Rect) -> f64 {
+        bounds.width().min(bounds.height()) * Self::MAX_FONT
+    }
 }
 
 /// A point of a freehand stroke, relative to the object's bounds: `(0, 0)` is the top-left

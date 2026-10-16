@@ -32,8 +32,8 @@ pub enum Command {
     Group(Vec<ObjectId>),
     /// Dissolves groups; their children take the group's place. Other ids are ignored.
     Ungroup(Vec<ObjectId>),
-    /// Replaces the text of a text object and fits its bounds to it. Takes a text object
-    /// only.
+    /// Replaces the text of a text object or sticky note and sets its bounds (text objects
+    /// are fitted to their text). Takes no other objects.
     SetText {
         id: ObjectId,
         text: Arc<str>,

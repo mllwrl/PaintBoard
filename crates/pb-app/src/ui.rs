@@ -24,6 +24,8 @@ pub enum Action {
         marker: bool,
         style: InkStyle,
     },
+    /// Color of new sticky notes.
+    StickyColor(Rgba),
     Undo,
     Redo,
     NewBoard,
@@ -58,6 +60,7 @@ pub struct Model<'a> {
     pub last_shape: ShapeKind,
     /// Style of the pen or marker, whichever is active.
     pub ink: InkStyle,
+    pub sticky_color: Rgba,
     pub can_undo: bool,
     pub can_redo: bool,
     pub zoom: f64,
@@ -77,6 +80,8 @@ pub struct SelectionInfo {
     pub has_fill: bool,
     /// Something with an outline width (shape or ink) is selected.
     pub has_width: bool,
+    /// What the outline color is called for this selection.
+    pub stroke_label: &'static str,
     /// Only ink is selected and handwriting can be recognized: `Some(busy)`, where `busy`
     /// says a recognition is already running.
     pub handwriting: Option<bool>,
@@ -109,6 +114,18 @@ const PALETTE: [Rgba; 16] = [
     Rgba::rgb(0xC5, 0xE1, 0xA5),
     Rgba::rgb(0x8D, 0x6E, 0x63),
     Rgba(0),
+];
+
+/// Sticky note colors, light enough for dark text. The first is the default.
+pub const STICKY_COLORS: [Rgba; 8] = [
+    Rgba::rgb(0xFF, 0xF1, 0x76),
+    Rgba::rgb(0xFF, 0xD0, 0x80),
+    Rgba::rgb(0xFF, 0xAB, 0xAB),
+    Rgba::rgb(0xF8, 0xBB, 0xD9),
+    Rgba::rgb(0xD1, 0xC4, 0xE9),
+    Rgba::rgb(0xB3, 0xE0, 0xFF),
+    Rgba::rgb(0xB9, 0xF0, 0xC8),
+    Rgba::rgb(0xF0, 0xF0, 0xF0),
 ];
 
 const ACCENT: Color32 = Color32::from_rgb(0x3B, 0x6E, 0xF5);
@@ -357,6 +374,7 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         (ToolKind::Marker, "Marker (M)", paint_marker),
                         (ToolKind::Eraser, "Eraser (E)", paint_eraser),
                         (ToolKind::Text, "Text (T)", paint_text),
+                        (ToolKind::Sticky, "Sticky note (N)", paint_sticky),
                     ];
                     let mut ink_button = shapes.rect;
                     for (tool, tooltip, paint) in ink_tools {
@@ -394,6 +412,9 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
 
     if model.tool.draws_ink() {
         ink_panel(ctx, model, ink_button, actions);
+    }
+    if model.tool == ToolKind::Sticky {
+        sticky_panel(ctx, model, ink_button, actions);
     }
 
     // Like Miro, the shape tool shows its shapes next to the toolbar.
@@ -463,6 +484,20 @@ fn ink_panel(ctx: &Context, model: &Model, button: Rect, actions: &mut Vec<Actio
                         });
                     }
                 });
+            });
+        });
+}
+
+/// Colors for new sticky notes, next to the tool's button.
+fn sticky_panel(ctx: &Context, model: &Model, button: Rect, actions: &mut Vec<Action>) {
+    Area::new(Id::unique("sticky"))
+        .fixed_pos(Pos2::new(button.right() + 18.0, button.top() - 8.0))
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            panel().show(ui, |ui| {
+                if let Some(color) = color_grid(ui, &STICKY_COLORS, model.sticky_color, 4) {
+                    actions.push(Action::StickyColor(color));
+                }
             });
         });
 }
@@ -549,12 +584,7 @@ fn selection_toolbar(
                         let fill = swatch_button(ui, style.fill, false, "Fill color");
                         toggle(popup, Popup::Fill, fill.clicked());
                     }
-                    let outline = if selection.has_fill {
-                        "Outline"
-                    } else {
-                        "Color"
-                    };
-                    let stroke = swatch_button(ui, style.stroke, true, outline);
+                    let stroke = swatch_button(ui, style.stroke, true, selection.stroke_label);
                     toggle(popup, Popup::Stroke, stroke.clicked());
                     if let Some(busy) = selection.handwriting {
                         ui.add_enabled_ui(!busy, |ui| {
@@ -703,12 +733,17 @@ fn style_slider(
 
 /// Grid of color swatches; returns the picked color. `with_none` offers "no color" too.
 fn palette(ui: &mut egui::Ui, current: Rgba, with_none: bool) -> Option<Rgba> {
-    let mut picked = None;
     let colors = if with_none {
         &PALETTE[..]
     } else {
         &PALETTE[..PALETTE.len() - 1]
     };
+    color_grid(ui, colors, current, 4)
+}
+
+/// Swatches of `colors`, `columns` per row, with `current` marked; returns the picked one.
+fn color_grid(ui: &mut egui::Ui, colors: &[Rgba], current: Rgba, columns: usize) -> Option<Rgba> {
+    let mut picked = None;
     egui::Grid::new("palette")
         .spacing(Vec2::splat(4.0))
         .show(ui, |ui| {
@@ -732,7 +767,7 @@ fn palette(ui: &mut egui::Ui, current: Rgba, with_none: bool) -> Option<Rgba> {
                 if response.clicked() {
                     picked = Some(color);
                 }
-                if i % 4 == 3 {
+                if i % columns == columns - 1 {
                     ui.end_row();
                 }
             }
@@ -847,6 +882,19 @@ fn paint_eraser(painter: &Painter, rect: Rect, color: Color32) {
 fn paint_text(painter: &Painter, rect: Rect, color: Color32) {
     let font = egui::FontId::proportional(rect.height() * 1.15);
     painter.text(rect.center(), Align2::CENTER_CENTER, "T", font, color);
+}
+
+fn paint_sticky(painter: &Painter, rect: Rect, color: Color32) {
+    let note = rect.shrink(1.0);
+    painter.rect_stroke(note, 2, Stroke::new(1.6, color), egui::StrokeKind::Middle);
+    for (y, right) in [(0.38, 0.75), (0.6, 0.6)] {
+        let y = note.top() + note.height() * y;
+        let x = |t: f32| note.left() + note.width() * t;
+        painter.line_segment(
+            [Pos2::new(x(0.25), y), Pos2::new(x(right), y)],
+            Stroke::new(1.4, color),
+        );
+    }
 }
 
 fn paint_shape(painter: &Painter, rect: Rect, color: Color32, kind: ShapeKind) {

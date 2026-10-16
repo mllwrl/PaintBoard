@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use parley::{FontFamily, FontFamilyName, PlainEditor, PlainEditorDriver, StyleProperty};
 
-use crate::{FAMILY, LINE_HEIGHT, TextEngine, TextLayout, extract};
+use crate::{FAMILY, LINE_HEIGHT, TextAlign, TextEngine, TextLayout, extract};
 
 /// A rectangle in layout coordinates (origin at the text's top-left corner).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -66,6 +66,22 @@ impl TextEditor {
 
     pub fn size(&self) -> f64 {
         self.size
+    }
+
+    pub fn set_size(&mut self, size: f64) {
+        if size != self.size {
+            self.size = size;
+            self.editor
+                .edit_styles()
+                .insert(StyleProperty::FontSize(size as f32));
+        }
+    }
+
+    /// Wraps lines at `width` and aligns them within it, matching
+    /// [`TextEngine::layout_aligned`] with the same arguments.
+    pub fn set_wrap(&mut self, width: Option<f64>, align: TextAlign) {
+        self.editor.set_width(width.map(|w| w as f32));
+        self.editor.set_alignment(align.to_parley());
     }
 
     /// The text without any IME composition in progress.
@@ -264,6 +280,18 @@ mod tests {
         let shown = engine.layout("a\nbb", 20.0, None);
         assert_eq!(edited, shown);
         assert!(edited.height > 40.0);
+    }
+
+    #[test]
+    fn wrapped_centered_layout_matches_display() {
+        let mut engine = TextEngine::new();
+        let mut ed = TextEditor::new(&mut engine, "one two three four", 20.0);
+        ed.set_wrap(Some(90.0), TextAlign::Center);
+        ed.set_size(16.0);
+        let shown =
+            engine.layout_aligned("one two three four", 16.0, Some(90.0), TextAlign::Center);
+        assert_eq!(ed.layout(&mut engine), shown);
+        assert_eq!(ed.size(), 16.0);
     }
 
     #[test]

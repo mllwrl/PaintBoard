@@ -48,6 +48,8 @@ pub enum ToolKind {
     Eraser,
     /// Click to type. The app runs the text editor; the tool only marks the mode.
     Text,
+    /// Click to place a sticky note and type on it; run by the app like [`Self::Text`].
+    Sticky,
 }
 
 impl ToolKind {
@@ -59,6 +61,7 @@ impl ToolKind {
             Self::Marker => "Marker",
             Self::Eraser => "Eraser",
             Self::Text => "Text",
+            Self::Sticky => "Sticky note",
         }
     }
 
@@ -359,7 +362,7 @@ impl Tools {
                 return true;
             }
             // Text editing is handled by the app.
-            ToolKind::Text => return false,
+            ToolKind::Text | ToolKind::Sticky => return false,
             ToolKind::Eraser => {
                 let radius = ERASER_RADIUS / pointer.zoom;
                 self.gesture = Some(Gesture::Erase {

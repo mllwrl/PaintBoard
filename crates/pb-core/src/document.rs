@@ -13,8 +13,8 @@ use pb_geom::normalize_angle;
 
 use crate::command::reorder;
 use crate::{
-    Applied, Command, Content, Group, Ink, Object, ObjectData, ObjectId, ObjectKind, Rgba, Style,
-    StyleChange, Text, ZOrder,
+    Applied, Command, Content, Group, Ink, Object, ObjectData, ObjectId, ObjectKind, Rgba, Sticky,
+    Style, StyleChange, Text, ZOrder,
 };
 
 /// Font size of text objects stored without one.
@@ -334,10 +334,7 @@ impl Document {
                 }
             }
             Command::SetText { id, text, bounds } => {
-                if !matches!(
-                    self.get(id).map(|o| &o.data.kind),
-                    Some(ObjectKind::Text(_))
-                ) {
+                if self.get(id).and_then(|o| o.data.kind.text()).is_none() {
                     return Err(Error::UnknownObject(id));
                 }
                 let meta = self.tree.get_meta(self.nodes[&id])?;
@@ -599,6 +596,7 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
             meta.insert(key::TEXT, &*text.text)?;
             meta.insert(key::FONT_SIZE, text.size)?;
         }
+        ObjectKind::Sticky(sticky) => meta.insert(key::TEXT, &*sticky.text)?,
         ObjectKind::Shape(_) => {}
     }
     write_bounds(meta, data.bounds.abs())?;
@@ -660,6 +658,13 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
                 _ => DEFAULT_FONT_SIZE,
             };
             ObjectKind::Text(Text { text, size })
+        }
+        ValueOrContainer::Value(LoroValue::String(s)) if &**s == "sticky" => {
+            let text = match meta.get(key::TEXT) {
+                Some(ValueOrContainer::Value(LoroValue::String(t))) => Arc::from(&**t),
+                _ => Arc::from(""),
+            };
+            ObjectKind::Sticky(Sticky { text })
         }
         ValueOrContainer::Value(LoroValue::String(s)) => {
             ObjectKind::Shape(ObjectKind::parse_shape(&s)?)
@@ -1240,6 +1245,35 @@ mod tests {
         assert!(
             matches!(&doc.get(id).unwrap().data.kind, ObjectKind::Text(t) if &*t.text == "old")
         );
+    }
+
+    #[test]
+    fn sticky_roundtrips_and_takes_text() {
+        let mut doc = Document::new();
+        let mut data = rect(0.0, 0.0, 200.0, 200.0);
+        data.kind = ObjectKind::Sticky(Sticky { text: "".into() });
+        let id = create(&mut doc, data.clone());
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(loaded.get(id).unwrap().data, data);
+        doc.apply(Command::SetText {
+            id,
+            text: "идея".into(),
+            bounds: data.bounds,
+        })
+        .unwrap();
+        let stored = &doc.get(id).unwrap().data;
+        assert_eq!(stored.kind.text(), Some("идея"));
+        assert_eq!(stored.bounds, data.bounds);
+    }
+
+    #[test]
+    fn sticky_text_area_is_inset() {
+        let bounds = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let area = Sticky::text_area(bounds);
+        assert_eq!(area, Rect::new(8.0, 8.0, 192.0, 92.0));
+        assert_eq!(Sticky::max_font_size(bounds), 16.0);
+        let flat = Sticky::text_area(Rect::new(0.0, 0.0, 10.0, 0.0));
+        assert_eq!(flat.area(), 0.0);
     }
 
     #[test]

@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use pb_core::{
-    Command, Document, Object, ObjectData, ObjectId, ObjectKind, Rgba, ShapeKind, Style, Text,
-    ZOrder,
+    Command, Document, Object, ObjectData, ObjectId, ObjectKind, Rgba, ShapeKind, Sticky, Style,
+    Text, ZOrder,
 };
 use pb_geom::Camera;
 use pb_geom::kurbo::{Point, Size, Vec2};
@@ -24,7 +24,7 @@ use winit::window::{CursorIcon, Window, WindowId};
 use crate::editing::{self, KeyOutcome, NEW_TEXT_SIZE, TextEdit};
 use crate::navigation::Navigation;
 use crate::session::Session;
-use crate::ui::{Action, Model, SelectionInfo, Ui};
+use crate::ui::{Action, Model, STICKY_COLORS, SelectionInfo, Ui};
 
 pub enum UserEvent {
     /// GPU initialization finished (asynchronous on the web).
@@ -89,6 +89,8 @@ pub struct App {
     text: TextRenderer,
     /// The text being typed into, if any.
     editing: Option<TextEdit>,
+    /// Color of new sticky notes.
+    sticky_color: Rgba,
     /// Time and screen position of the last left press, to detect double clicks.
     last_press: Option<(Instant, Point)>,
     recognition: Option<PendingRecognition>,
@@ -118,6 +120,7 @@ impl App {
             pen_pressure: None,
             text: TextRenderer::new(),
             editing: None,
+            sticky_color: STICKY_COLORS[0],
             last_press: None,
             recognition: None,
             next_request: 0,
@@ -205,6 +208,7 @@ impl App {
             ink: self
                 .tools
                 .ink_style(self.tools.active() == ToolKind::Marker),
+            sticky_color: self.sticky_color,
             can_undo: self.document.can_undo(),
             can_redo: self.document.can_redo(),
             zoom: self.camera.zoom(),
@@ -263,10 +267,20 @@ impl App {
             has_group: ids.iter().any(|&id| self.document.group(id).is_some()),
             has_fill: leaves
                 .iter()
-                .any(|o| matches!(o.data.kind, ObjectKind::Shape(_))),
+                .any(|o| matches!(o.data.kind, ObjectKind::Shape(_) | ObjectKind::Sticky(_))),
             has_width: leaves
                 .iter()
-                .any(|o| !matches!(o.data.kind, ObjectKind::Text(_))),
+                .any(|o| matches!(o.data.kind, ObjectKind::Shape(_) | ObjectKind::Ink(_))),
+            stroke_label: if leaves
+                .iter()
+                .any(|o| matches!(o.data.kind, ObjectKind::Shape(_)))
+            {
+                "Outline"
+            } else if leaves.iter().any(|o| o.data.kind.is_ink()) {
+                "Color"
+            } else {
+                "Text color"
+            },
             handwriting: (handwriting::is_available()
                 && leaves.iter().all(|o| o.data.kind.is_ink()))
             .then_some(self.recognition.is_some()),
@@ -284,6 +298,7 @@ impl App {
                 self.tools.set_active(tool);
             }
             Action::InkStyle { marker, style } => self.tools.set_ink_style(marker, style),
+            Action::StickyColor(color) => self.sticky_color = color,
             Action::Undo => self.undo(),
             Action::Redo => self.redo(),
             Action::NewBoard => self.new_board(),
@@ -353,6 +368,33 @@ impl App {
         }
     }
 
+    /// Tab on a sticky note: keeps it and starts the next one beside it, in view.
+    fn next_sticky(&mut self, below: bool) {
+        let Some(edit) = &mut self.editing else {
+            return;
+        };
+        let Some(mut next) = edit.next_sticky(self.text.engine(), below) else {
+            return;
+        };
+        self.finish_editing();
+        let rect = next.frame(self.text.engine()).aabb();
+        let visible = self.camera.visible_world_rect(self.viewport());
+        let margin = rect.width().min(rect.height()) * 0.25;
+        let shift = |lo: f64, hi: f64, min: f64, max: f64| {
+            if hi + margin > max {
+                hi + margin - max
+            } else if lo - margin < min {
+                lo - margin - min
+            } else {
+                0.0
+            }
+        };
+        let dx = shift(rect.x0, rect.x1, visible.x0, visible.x1);
+        let dy = shift(rect.y0, rect.y1, visible.y0, visible.y1);
+        self.camera.pan(-Vec2::new(dx, dy) * self.camera.zoom());
+        self.start_editing(next);
+    }
+
     /// Enter on a single selected text starts editing it with everything selected.
     fn edit_selected_text(&mut self) -> bool {
         let [id] = self.tools.selection().ids() else {
@@ -398,6 +440,19 @@ impl App {
             let size = NEW_TEXT_SIZE / pointer.zoom;
             let color = Style::default().stroke;
             let edit = TextEdit::new_text(self.text.engine(), pointer.world, size, color);
+            self.start_editing(edit);
+            return true;
+        }
+        if self.tools.active() == ToolKind::Sticky {
+            self.tools.set_active(ToolKind::Select);
+            let side = Sticky::SIZE / pointer.zoom;
+            let bounds = pb_geom::kurbo::Rect::from_center_size(pointer.world, (side, side));
+            let style = Style {
+                fill: self.sticky_color,
+                stroke_width: 0.0,
+                ..Style::default()
+            };
+            let edit = TextEdit::new_sticky(self.text.engine(), bounds, style);
             self.start_editing(edit);
             return true;
         }
@@ -671,6 +726,9 @@ impl App {
         if over_text || self.tools.active() == ToolKind::Text {
             return CursorIcon::Text;
         }
+        if self.tools.active() == ToolKind::Sticky {
+            return CursorIcon::Crosshair;
+        }
         match self.navigation.cursor_icon() {
             CursorIcon::Default => match self.tools.cursor() {
                 CursorHint::Default => CursorIcon::Default,
@@ -789,6 +847,7 @@ impl App {
             KeyCode::KeyO if !ctrl => self.tools.set_active(ToolKind::Shape(ShapeKind::Ellipse)),
             KeyCode::KeyS if !ctrl => self.tools.cycle_shape(),
             KeyCode::KeyT if !ctrl => self.tools.set_active(ToolKind::Text),
+            KeyCode::KeyN if !ctrl => self.tools.set_active(ToolKind::Sticky),
             KeyCode::Enter | KeyCode::NumpadEnter if !ctrl => return self.edit_selected_text(),
             KeyCode::KeyP if !ctrl => self.tools.set_active(ToolKind::Pen),
             KeyCode::KeyM if !ctrl => self.tools.set_active(ToolKind::Marker),
@@ -955,7 +1014,13 @@ impl ApplicationHandler<UserEvent> for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let scale = self.scale();
         let mut ui_consumed = false;
-        if let (Some(ui), Some(window)) = (&mut self.ui, &self.window) {
+        // Typing on the canvas is not for egui, which would take Tab to move its focus.
+        let canvas_typing = self.editing.is_some()
+            && matches!(
+                event,
+                WindowEvent::KeyboardInput { .. } | WindowEvent::Ime(_)
+            );
+        if !canvas_typing && let (Some(ui), Some(window)) = (&mut self.ui, &self.window) {
             let response = ui.on_window_event(window, &event);
             if response.repaint {
                 window.request_redraw();
@@ -998,6 +1063,7 @@ impl ApplicationHandler<UserEvent> for App {
                             self.finish_editing();
                             self.handle_key(&event);
                         }
+                        KeyOutcome::NextSticky { below } => self.next_sticky(below),
                     }
                     true
                 } else {

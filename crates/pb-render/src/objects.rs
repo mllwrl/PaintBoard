@@ -1,8 +1,9 @@
-use pb_core::{ObjectData, ObjectKind, Rgba};
+use pb_core::{ObjectData, ObjectKind, Rgba, Sticky};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use pb_geom::ink::{smooth_path, variable_outline};
-use pb_text::TextEngine;
+use pb_text::{TextAlign, TextEngine};
 use vello::Scene;
 use vello::kurbo::{Affine, Cap, Join, Rect, Stroke};
 use vello::peniko::{Blob, FontData};
@@ -11,12 +12,32 @@ use vello::peniko::{Color, Fill, Mix};
 /// Ink never gets thinner than this fraction of its width, however light the pressure.
 const MIN_PRESSURE: f64 = 0.15;
 
+/// Sticky note shadow: offset down and blur, relative to the note's smaller side.
+const SHADOW_OFFSET: f64 = 0.015;
+const SHADOW_BLUR: f64 = 0.025;
+const SHADOW_COLOR: Color = Color::from_rgba8(0, 0, 0, 0x30);
+/// Fitted sizes kept by [`TextRenderer`]; the cache is dropped when it grows past this.
+const FIT_CACHE_LIMIT: usize = 4096;
+
+/// Font size of a sticky note's text: as large as fits in its text area.
+pub fn sticky_font_size(engine: &mut TextEngine, text: &str, bounds: Rect) -> f64 {
+    let area = Sticky::text_area(bounds);
+    engine.fit_size(
+        text,
+        area.width(),
+        area.height(),
+        Sticky::max_font_size(bounds),
+    )
+}
+
 /// Lays out and draws board text with the app font.
 ///
 /// TODO: cache layouts per object; laying out every text each frame will not scale.
 pub struct TextRenderer {
     engine: TextEngine,
     font: FontData,
+    /// Sticky note font sizes by text and note size, as fitting takes several layouts.
+    fitted: HashMap<(Arc<str>, u64, u64), f64>,
 }
 
 impl TextRenderer {
@@ -24,7 +45,48 @@ impl TextRenderer {
         Self {
             engine: TextEngine::new(),
             font: FontData::new(Blob::new(Arc::new(pb_text::FONT)), 0),
+            fitted: HashMap::new(),
         }
+    }
+
+    fn sticky_font_size(&mut self, text: &Arc<str>, bounds: Rect) -> f64 {
+        let key = (
+            text.clone(),
+            bounds.width().to_bits(),
+            bounds.height().to_bits(),
+        );
+        if let Some(&size) = self.fitted.get(&key) {
+            return size;
+        }
+        if self.fitted.len() >= FIT_CACHE_LIMIT {
+            self.fitted.clear();
+        }
+        let size = sticky_font_size(&mut self.engine, text, bounds);
+        self.fitted.insert(key, size);
+        size
+    }
+
+    /// Draws `text` laid out at `size`, its top-left corner at `origin` in `transform`.
+    fn draw(
+        &mut self,
+        scene: &mut Scene,
+        transform: Affine,
+        origin: (f64, f64),
+        size: f64,
+        glyphs: &[pb_text::Glyph],
+        brush: Color,
+    ) {
+        let glyphs = glyphs.iter().map(|g| vello::Glyph {
+            id: g.id,
+            x: g.x,
+            y: g.y,
+        });
+        scene
+            .draw_glyphs(&self.font)
+            .font_size(size as f32)
+            .transform(transform * Affine::translate(origin))
+            .brush(brush)
+            .draw(Fill::NonZero, glyphs);
     }
 
     /// For measuring text before creating objects.
@@ -54,7 +116,7 @@ pub fn draw_object(
     // Opacity applies to the object as a whole, so its own overlaps do not show.
     let layered = style.opacity < 1.0;
     if layered {
-        let pad = style.stroke_width;
+        let pad = paint_padding(data);
         let clip = data.bounds.inflate(pad, pad);
         scene.push_layer(
             Fill::NonZero,
@@ -85,17 +147,48 @@ pub fn draw_object(
                 .engine
                 .layout(&content.text, content.size, Some(b.width() + 0.5));
             let top = b.y0 + (b.height() - layout.height) / 2.0;
-            let glyphs = layout.glyphs.iter().map(|g| vello::Glyph {
-                id: g.id,
-                x: g.x,
-                y: g.y,
-            });
-            scene
-                .draw_glyphs(&text.font)
-                .font_size(content.size as f32)
-                .transform(transform * Affine::translate((b.x0, top)))
-                .brush(color(style.stroke))
-                .draw(Fill::NonZero, glyphs);
+            let brush = color(style.stroke);
+            text.draw(
+                scene,
+                transform,
+                (b.x0, top),
+                content.size,
+                &layout.glyphs,
+                brush,
+            );
+        }
+        ObjectKind::Sticky(sticky) => {
+            let b = data.bounds;
+            let side = b.width().min(b.height());
+            let shadow = b + vello::kurbo::Vec2::new(0.0, side * SHADOW_OFFSET);
+            scene.draw_blurred_rounded_rect(
+                transform,
+                shadow,
+                SHADOW_COLOR,
+                0.0,
+                side * SHADOW_BLUR,
+            );
+            scene.fill(Fill::NonZero, transform, color(style.fill), None, &b);
+            if !sticky.text.is_empty() {
+                let size = text.sticky_font_size(&sticky.text, b);
+                let area = Sticky::text_area(b);
+                let layout = text.engine.layout_aligned(
+                    &sticky.text,
+                    size,
+                    Some(area.width()),
+                    TextAlign::Center,
+                );
+                let top = area.y0 + (area.height() - layout.height) / 2.0;
+                let brush = color(style.stroke);
+                text.draw(
+                    scene,
+                    transform,
+                    (area.x0, top),
+                    size,
+                    &layout.glyphs,
+                    brush,
+                );
+            }
         }
         ObjectKind::Ink(ink) => {
             let points = ink.points_in(data.bounds);
@@ -125,8 +218,19 @@ pub fn draw_object(
 
 /// World-space axis-aligned area an object paints, including its stroke.
 pub fn painted_bounds(data: &ObjectData) -> Rect {
-    let pad = data.style.stroke_width / 2.0;
+    let pad = paint_padding(data);
     data.frame().aabb().inflate(pad, pad)
+}
+
+/// How far an object paints outside its bounds: half its outline, or a sticky's shadow.
+fn paint_padding(data: &ObjectData) -> f64 {
+    match data.kind {
+        ObjectKind::Sticky(_) => {
+            let side = data.bounds.width().min(data.bounds.height());
+            side * (SHADOW_OFFSET + SHADOW_BLUR * 2.5)
+        }
+        _ => data.style.stroke_width / 2.0,
+    }
 }
 
 fn color(rgba: Rgba) -> Color {
