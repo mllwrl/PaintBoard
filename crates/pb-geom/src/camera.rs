@@ -72,6 +72,17 @@ impl Camera {
         self.zoom = zoom.clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
         self.origin = world_center - viewport.to_vec2() / (2.0 * self.zoom);
     }
+
+    /// Shows all of `area` (world), as large as fits with `margin` logical pixels around it.
+    pub fn fit(&mut self, area: Rect, viewport: Size, margin: f64) {
+        let room = Size::new(
+            (viewport.width - 2.0 * margin).max(1.0),
+            (viewport.height - 2.0 * margin).max(1.0),
+        );
+        let zoom = (room.width / area.width().max(f64::EPSILON))
+            .min(room.height / area.height().max(f64::EPSILON));
+        self.look_at(area.center(), zoom, viewport);
+    }
 }
 
 impl Default for Camera {
@@ -83,6 +94,17 @@ impl Default for Camera {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fit_shows_the_whole_area_centered() {
+        let mut camera = Camera::default();
+        let viewport = Size::new(1000.0, 600.0);
+        camera.fit(Rect::new(100.0, 100.0, 500.0, 300.0), viewport, 100.0);
+        // 800 x 400 of room for 400 x 200: limited by both, twice the size.
+        assert_eq!(camera.zoom(), 2.0);
+        let center = camera.world_to_screen(Point::new(300.0, 200.0));
+        assert_eq!(center, Point::new(500.0, 300.0));
+    }
 
     fn assert_close(a: Point, b: Point) {
         assert!((a - b).hypot() < 1e-9, "{a:?} != {b:?}");

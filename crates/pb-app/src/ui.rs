@@ -10,8 +10,8 @@ use egui::{
     Order, Painter, Pos2, Rect, Response, RichText, Sense, Shadow, Shape, Slider, Stroke, Vec2,
 };
 use pb_core::{
-    Cap, Connector, ConnectorChange, HAlign, Rgba, Route, ShapeKind, Style, StyleChange, VAlign,
-    ZOrder,
+    Cap, Connector, ConnectorChange, HAlign, ObjectId, Rgba, Route, ShapeKind, Style, StyleChange,
+    VAlign, ZOrder,
 };
 use pb_geom::kurbo::{self, PathEl};
 use pb_platform::Instant;
@@ -58,6 +58,8 @@ pub enum Action {
     InsertImage,
     /// Start cropping the selected image.
     Crop,
+    /// Show and select a frame.
+    GoToFrame(ObjectId),
     /// Replace the selected handwriting with typed text.
     ToText,
     /// Solve the selected handwritten expression.
@@ -67,6 +69,8 @@ pub enum Action {
 /// What the UI shows.
 pub struct Model<'a> {
     pub board: &'a str,
+    /// The board's frames with their titles, back to front.
+    pub frames: Vec<(ObjectId, String)>,
     pub tool: ToolKind,
     pub last_shape: ShapeKind,
     /// Style of the pen or marker, whichever is active.
@@ -368,6 +372,22 @@ fn board_menu(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         for (label, shortcut, action) in items {
                             if ui.add(Button::new(label).shortcut_text(shortcut)).clicked() {
                                 actions.push(action);
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.menu_button("Frames", |ui| {
+                        if model.frames.is_empty() {
+                            ui.weak("No frames yet: draw one with F");
+                        }
+                        for (id, title) in &model.frames {
+                            let title = if title.trim().is_empty() {
+                                "Untitled frame"
+                            } else {
+                                title
+                            };
+                            if ui.button(title).clicked() {
+                                actions.push(Action::GoToFrame(*id));
                                 ui.close();
                             }
                         }

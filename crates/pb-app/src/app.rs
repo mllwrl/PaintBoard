@@ -63,6 +63,8 @@ struct PendingRecognition {
 /// Two presses closer than this in time and distance (logical pixels) are a double click.
 const DOUBLE_CLICK_TIME: pb_platform::Duration = pb_platform::Duration::from_millis(450);
 const DOUBLE_CLICK_DISTANCE: f64 = 5.0;
+/// Space kept around a frame shown from the frames menu, in logical pixels.
+const FRAME_MARGIN: f64 = 80.0;
 
 /// Recognized text is sized so its letters are about as tall as the handwriting.
 const HANDWRITING_TO_FONT_SIZE: f64 = 1.0 / 0.9;
@@ -231,8 +233,18 @@ impl App {
         );
 
         let board = self.session.name();
+        let frames = self
+            .document
+            .objects()
+            .iter()
+            .filter_map(|o| match &o.data.kind {
+                ObjectKind::Frame(frame) => Some((o.id, frame.title.to_string())),
+                _ => None,
+            })
+            .collect();
         let model = Model {
             board: &board,
+            frames,
             tool: self.tools.active(),
             last_shape: self.tools.last_shape(),
             ink: self
@@ -393,6 +405,16 @@ impl App {
             Action::ZoomIn => self.navigation.zoom_in(&mut self.camera, viewport),
             Action::ZoomOut => self.navigation.zoom_out(&mut self.camera, viewport),
             Action::ZoomReset => self.navigation.zoom_reset(&mut self.camera, viewport),
+            Action::GoToFrame(id) => {
+                if let Some(object) = self.document.get(id) {
+                    let area = object.data.bounds;
+                    // Room for the title and the floating panels around the canvas.
+                    self.camera.fit(area, viewport, FRAME_MARGIN);
+                    self.finish_editing();
+                    self.tools.set_active(ToolKind::Select);
+                    self.tools.select_only([id]);
+                }
+            }
             Action::NextGrid => self.grid = self.grid.next(),
             Action::ToggleSnap => self.tools.set_snap_to_grid(!self.tools.snap_to_grid()),
             Action::SetStyle(change) => {
