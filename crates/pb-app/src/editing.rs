@@ -1,11 +1,14 @@
-//! Typing on the canvas: one text object or sticky note being edited at a time.
+//! Typing on the canvas: one text object, sticky note or connector label being edited at a
+//! time.
 //!
 //! Edits stay local until editing ends, then become a single command, so one undo reverts
 //! the whole edit and autosave and sync see finished text only.
 
-use pb_core::{Command, Object, ObjectData, ObjectId, ObjectKind, Rgba, Sticky, Style, Text};
+use pb_core::{
+    Command, Document, Label, ObjectData, ObjectId, ObjectKind, Rgba, Sticky, Style, Text,
+};
 use pb_geom::Frame;
-use pb_geom::kurbo::{Point, Rect, Vec2};
+use pb_geom::kurbo::{Point, Rect, Size, Vec2};
 use pb_platform::clipboard;
 use pb_render::{TextEditOverlay, sticky_font_size};
 use pb_text::{Motion, TextAlign, TextEditor, TextEngine, TextRect};
@@ -49,6 +52,8 @@ enum Placement {
     Free { origin: Point },
     /// A sticky note: the text is fitted and centered in the note's fixed bounds.
     Sticky { bounds: Rect },
+    /// A connector's label: centered on `center`, `at` along the line.
+    Label { center: Point, at: f64 },
 }
 
 pub struct TextEdit {
@@ -60,6 +65,8 @@ pub struct TextEdit {
     /// Text when editing started, to skip edits that change nothing.
     original: String,
     selecting: bool,
+    /// The connector whose label this is.
+    connector: Option<ObjectData>,
 }
 
 impl TextEdit {
@@ -82,6 +89,7 @@ impl TextEdit {
             },
             original: String::new(),
             selecting: false,
+            connector: None,
         }
     }
 
@@ -108,15 +116,23 @@ impl TextEdit {
             style,
             original: text.to_owned(),
             selecting: false,
+            connector: None,
         };
         this.refit(engine);
         this
     }
 
-    /// Edits an existing text object or sticky note; `None` for other objects.
-    pub fn existing(engine: &mut TextEngine, object: &Object) -> Option<Self> {
-        let data = &object.data;
-        let target = Target::Existing(object.id);
+    /// Edits an existing text object, sticky note or connector label; `None` for other
+    /// objects. A connector without a label gets one where its line is nearest to `near`
+    /// (a double click), or in its middle.
+    pub fn existing(
+        engine: &mut TextEngine,
+        doc: &Document,
+        id: ObjectId,
+        near: Option<Point>,
+    ) -> Option<Self> {
+        let data = &doc.get(id)?.data;
+        let target = Target::Existing(id);
         match &data.kind {
             ObjectKind::Text(text) => Some(Self {
                 target,
@@ -128,6 +144,7 @@ impl TextEdit {
                 style: data.style,
                 original: text.text.to_string(),
                 selecting: false,
+                connector: None,
             }),
             ObjectKind::Sticky(sticky) => Some(Self::sticky(
                 engine,
@@ -137,10 +154,29 @@ impl TextEdit {
                 data.rotation,
                 data.style,
             )),
-            ObjectKind::Shape(_)
-            | ObjectKind::Ink(_)
-            | ObjectKind::Image(_)
-            | ObjectKind::Connector(_) => None,
+            ObjectKind::Connector(c) => {
+                let path = doc.connector_path(id)?;
+                let at = match near {
+                    Some(p) if c.label.is_empty() => path.nearest_fraction(p),
+                    _ => c.label.at,
+                };
+                let mut editor = TextEditor::new(engine, &c.label.text, Label::FONT_SIZE);
+                editor.set_wrap(None, TextAlign::Center);
+                Some(Self {
+                    target,
+                    editor,
+                    placement: Placement::Label {
+                        center: path.point_at(at),
+                        at,
+                    },
+                    rotation: 0.0,
+                    style: data.style,
+                    original: c.label.text.to_string(),
+                    selecting: false,
+                    connector: Some(data.clone()),
+                })
+            }
+            ObjectKind::Shape(_) | ObjectKind::Ink(_) | ObjectKind::Image(_) => None,
         }
     }
 
@@ -175,6 +211,11 @@ impl TextEdit {
                 Rect::from_origin_size(origin, (width, layout.height))
             }
             Placement::Sticky { bounds } => bounds,
+            Placement::Label { center, .. } => {
+                let layout = self.editor.layout(engine);
+                let width = layout.width.max(self.editor.size() * MIN_WIDTH);
+                Rect::from_center_size(center, (width, layout.height))
+            }
         };
         Frame::new(rect, self.rotation)
     }
@@ -187,6 +228,11 @@ impl TextEdit {
                 let area = Sticky::text_area(bounds);
                 let height = self.editor.layout(engine).height;
                 Point::new(area.x0, area.y0 + (area.height() - height) / 2.0)
+            }
+            // Drawn the same way, see `pb_render`.
+            Placement::Label { center, .. } => {
+                let layout = self.editor.layout(engine);
+                center - Vec2::new(layout.width, layout.height) / 2.0
             }
         }
     }
@@ -341,17 +387,41 @@ impl TextEdit {
         self.refit(engine);
     }
 
+    /// A connector's label with the text being edited.
+    fn label(&mut self, engine: &mut TextEngine, text: String) -> Option<Label> {
+        let Placement::Label { at, .. } = self.placement else {
+            return None;
+        };
+        let layout = self.editor.layout(engine);
+        Some(Label {
+            text: text.into(),
+            at,
+            size: Size::new(layout.width, layout.height),
+        })
+    }
+
     /// The object as it looks now, including IME composition.
     pub fn data(&mut self, engine: &mut TextEngine) -> ObjectData {
+        let display = self.editor.display_text();
+        if let Some(label) = self.label(engine, display.clone())
+            && let Some(mut data) = self.connector.clone()
+        {
+            if let ObjectKind::Connector(c) = &mut data.kind {
+                c.label = label;
+            }
+            return data;
+        }
         let frame = self.frame(engine);
-        let text = self.editor.display_text().into();
+        let text = display.into();
         ObjectData {
             kind: match self.placement {
                 Placement::Free { .. } => ObjectKind::Text(Text {
                     text,
                     size: self.editor.size(),
                 }),
-                Placement::Sticky { .. } => ObjectKind::Sticky(Sticky { text }),
+                Placement::Sticky { .. } | Placement::Label { .. } => {
+                    ObjectKind::Sticky(Sticky { text })
+                }
             },
             bounds: frame.rect,
             rotation: frame.rotation,
@@ -393,11 +463,23 @@ impl TextEdit {
     }
 
     /// The command that keeps the edit, if anything changed. A text object left empty is
-    /// removed; a sticky note stays, even a new one.
+    /// removed; a sticky note stays, even a new one; a label left blank goes.
     pub fn finish(mut self, engine: &mut TextEngine) -> Option<Command> {
         self.editor.clear_preedit(engine);
         self.refit(engine);
         let text = self.editor.text();
+        if let (Target::Existing(id), Placement::Label { .. }) = (self.target, self.placement) {
+            let text = if text.trim().is_empty() {
+                String::new()
+            } else {
+                text
+            };
+            if text == self.original {
+                return None;
+            }
+            let label = self.label(engine, text)?;
+            return Some(Command::SetLabel { id, label });
+        }
         let empty = text.trim().is_empty() && matches!(self.placement, Placement::Free { .. });
         match self.target {
             Target::Existing(_) if text == self.original => None,
@@ -439,8 +521,8 @@ mod tests {
         }
     }
 
-    fn text_object(text: &str) -> Object {
-        let mut doc = pb_core::Document::new();
+    fn text_object(text: &str) -> (Document, ObjectId) {
+        let mut doc = Document::new();
         let data = ObjectData {
             kind: ObjectKind::Text(Text {
                 text: text.into(),
@@ -454,34 +536,31 @@ mod tests {
             .apply(Command::Create(vec![data.into()]))
             .unwrap()
             .created[0];
-        doc.get(id).unwrap().clone()
+        (doc, id)
     }
 
     #[test]
     fn editing_existing_text() {
         let mut e = engine();
-        let object = text_object("abc");
-        let unchanged = TextEdit::existing(&mut e, &object).unwrap();
+        let (doc, object) = text_object("abc");
+        let unchanged = TextEdit::existing(&mut e, &doc, object, None).unwrap();
         assert_eq!(unchanged.finish(&mut e), None);
 
-        let mut edit = TextEdit::existing(&mut e, &object).unwrap();
+        let mut edit = TextEdit::existing(&mut e, &doc, object, None).unwrap();
         edit.editor.insert(&mut e, "d");
         match edit.finish(&mut e) {
             Some(Command::SetText { id, text, bounds }) => {
-                assert_eq!(id, object.id);
+                assert_eq!(id, object);
                 assert_eq!(&*text, "abcd");
                 assert_eq!(bounds.origin(), Point::new(10.0, 10.0));
             }
             other => panic!("expected SetText, got {other:?}"),
         }
 
-        let mut cleared = TextEdit::existing(&mut e, &object).unwrap();
+        let mut cleared = TextEdit::existing(&mut e, &doc, object, None).unwrap();
         cleared.select_all(&mut e);
         cleared.editor.backspace(&mut e, false);
-        assert_eq!(
-            cleared.finish(&mut e),
-            Some(Command::Delete(vec![object.id]))
-        );
+        assert_eq!(cleared.finish(&mut e), Some(Command::Delete(vec![object])));
     }
 
     fn sticky_style() -> Style {
@@ -522,7 +601,7 @@ mod tests {
     #[test]
     fn emptied_sticky_is_kept_and_next_goes_beside() {
         let mut e = engine();
-        let mut doc = pb_core::Document::new();
+        let mut doc = Document::new();
         let data = ObjectData {
             kind: ObjectKind::Sticky(Sticky {
                 text: "idea".into(),
@@ -535,8 +614,7 @@ mod tests {
             .apply(Command::Create(vec![data.into()]))
             .unwrap()
             .created[0];
-        let object = doc.get(id).unwrap().clone();
-        let mut edit = TextEdit::existing(&mut e, &object).unwrap();
+        let mut edit = TextEdit::existing(&mut e, &doc, id, None).unwrap();
         edit.select_all(&mut e);
         edit.editor.backspace(&mut e, false);
         let mut right = edit.next_sticky(&mut e, false).unwrap();
@@ -567,8 +645,8 @@ mod tests {
     #[test]
     fn clicks_map_through_the_box() {
         let mut e = engine();
-        let object = text_object("hello world");
-        let mut edit = TextEdit::existing(&mut e, &object).unwrap();
+        let (doc, object) = text_object("hello world");
+        let mut edit = TextEdit::existing(&mut e, &doc, object, None).unwrap();
         let frame = edit.frame(&mut e);
         assert!(edit.contains(&mut e, frame.center(), 0.0));
         assert!(!edit.contains(&mut e, Point::new(0.0, 0.0), 0.0));
@@ -577,5 +655,58 @@ mod tests {
         let overlay = edit.overlay(&mut e);
         assert_eq!(overlay.selection.len(), 1);
         assert!(overlay.caret.is_none());
+    }
+
+    #[test]
+    fn labels_start_at_the_click_and_blank_ones_go() {
+        let mut e = engine();
+        let mut doc = Document::new();
+        let line = ObjectData {
+            kind: ObjectKind::Connector(pb_core::Connector {
+                start: pb_core::End::Free(Point::new(0.0, 0.0)),
+                end: pb_core::End::Free(Point::new(400.0, 0.0)),
+                route: pb_core::Route::Straight,
+                start_cap: pb_core::Cap::None,
+                end_cap: pb_core::Cap::None,
+                label: Label::default(),
+            }),
+            bounds: Rect::ZERO,
+            rotation: 0.0,
+            style: Style::default(),
+        };
+        let id = doc
+            .apply(Command::Create(vec![line.into()]))
+            .unwrap()
+            .created[0];
+        let near = Some(Point::new(100.0, 10.0));
+        let untouched = TextEdit::existing(&mut e, &doc, id, near).unwrap();
+        assert_eq!(untouched.finish(&mut e), None);
+
+        let mut edit = TextEdit::existing(&mut e, &doc, id, near).unwrap();
+        edit.editor.insert(&mut e, "yes");
+        // The box is centered on the line where it was clicked.
+        let center = edit.frame(&mut e).rect.center();
+        assert!(
+            (center - Point::new(100.0, 0.0)).hypot() < 1e-6,
+            "{center:?}"
+        );
+        let Some(Command::SetLabel { id: target, label }) = edit.finish(&mut e) else {
+            panic!("expected SetLabel");
+        };
+        assert_eq!(target, id);
+        assert_eq!(&*label.text, "yes");
+        assert!((label.at - 0.25).abs() < 1e-6);
+        assert!(label.size.width > 0.0 && label.size.height > 0.0);
+        doc.apply(Command::SetLabel { id, label }).unwrap();
+
+        // Editing again keeps its place; clearing it removes the text.
+        let mut edit = TextEdit::existing(&mut e, &doc, id, Some(Point::ZERO)).unwrap();
+        edit.select_all(&mut e);
+        edit.editor.insert(&mut e, "  ");
+        let Some(Command::SetLabel { label, .. }) = edit.finish(&mut e) else {
+            panic!("expected SetLabel");
+        };
+        assert!(label.is_empty());
+        assert!((label.at - 0.25).abs() < 1e-6);
     }
 }

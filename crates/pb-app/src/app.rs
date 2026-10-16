@@ -170,10 +170,8 @@ impl App {
         let size = window.inner_size().to_logical::<f64>(scale);
         let mut overrides = self.tools.overrides(&self.document);
         let mut previews = self.tools.previews(&self.document);
-        let mut overlay = overlay(&self.document, &self.tools, &overrides, self.camera.zoom());
         if let Some(edit) = &mut self.editing {
-            let engine = self.text.engine();
-            let data = edit.data(engine);
+            let data = edit.data(self.text.engine());
             match edit.target {
                 editing::Target::Existing(id) => overrides.push(Object {
                     id,
@@ -183,6 +181,10 @@ impl App {
                 }),
                 editing::Target::New => previews.push(data),
             }
+        }
+        let mut overlay = overlay(&self.document, &self.tools, &overrides, self.camera.zoom());
+        if let Some(edit) = &mut self.editing {
+            let engine = self.text.engine();
             // The edit box replaces the selection frame and handles.
             overlay.selection = None;
             overlay.selected.clear();
@@ -304,8 +306,8 @@ impl App {
                     ObjectKind::Shape(_) | ObjectKind::Ink(_) | ObjectKind::Connector(_)
                 )
             }),
-            connector: leaves.iter().find_map(|o| match o.data.kind {
-                ObjectKind::Connector(c) => Some(c),
+            connector: leaves.iter().find_map(|o| match &o.data.kind {
+                ObjectKind::Connector(c) => Some(c.clone()),
                 _ => None,
             }),
             has_stroke: leaves
@@ -573,15 +575,13 @@ impl App {
         let [id] = self.tools.selection().ids() else {
             return false;
         };
-        let Some(object) = self
-            .document
-            .get(*id)
-            .filter(|_| !self.document.is_locked(*id))
-        else {
+        let id = *id;
+        if self.document.get(id).is_none() || self.document.is_locked(id) {
             return false;
-        };
-        let Some(mut edit) = TextEdit::existing(self.text.engine(), &object.clone()) else {
-            return self.start_crop(*id);
+        }
+        let Some(mut edit) = TextEdit::existing(self.text.engine(), &self.document, id, None)
+        else {
+            return self.start_crop(id);
         };
         edit.select_all(self.text.engine());
         self.start_editing(edit);
@@ -640,16 +640,18 @@ impl App {
             let target = self
                 .tools
                 .object_at(&self.document, pointer)
-                .filter(|&id| !self.document.is_locked(id))
-                .and_then(|id| self.document.get(id).cloned());
-            if let Some(object) = target {
-                if let Some(mut edit) = TextEdit::existing(self.text.engine(), &object) {
-                    edit.press(self.text.engine(), pointer.world, false, false);
+                .filter(|&id| !self.document.is_locked(id) && self.document.get(id).is_some());
+            if let Some(id) = target {
+                let engine = self.text.engine();
+                if let Some(mut edit) =
+                    TextEdit::existing(engine, &self.document, id, Some(pointer.world))
+                {
+                    edit.press(engine, pointer.world, false, false);
                     self.start_editing(edit);
                     return true;
                 }
                 // Double click on an image crops it, like in Miro.
-                if self.start_crop(object.id) {
+                if self.start_crop(id) {
                     return true;
                 }
             }
@@ -1469,27 +1471,37 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
             .collect(),
     };
     let show_handles = tools.shows_handles(document);
-    // Connectors are outlined along their line rather than with a frame.
+    // Connectors are outlined along their line rather than with a frame, broken where
+    // their label is (as it is mid-gesture or mid-edit).
     let connector_path = |id: ObjectId| {
-        document
-            .get(id)
-            .filter(|o| matches!(o.data.kind, ObjectKind::Connector(_)))
-            .and_then(|_| document.connector_path(id))
-            .map(|path| path.line.clone())
+        let object = document.get(id)?;
+        let ObjectKind::Connector(c) = &overrides.get(&id).copied().unwrap_or(&object.data).kind
+        else {
+            return None;
+        };
+        let path = document.connector_path(id)?;
+        let gap = c.label.rect(path).map(|r| {
+            let pad = pb_core::Label::PADDING;
+            r.inflate(pad, pad)
+        });
+        Some((path.line.clone(), gap))
     };
     let mut lines = Vec::new();
+    let mut gaps = Vec::new();
     let mut hover = tools.hover().and_then(|id| unit_frame(document, id, frame));
-    if let Some(line) = tools.hover().and_then(connector_path) {
+    if let Some((line, gap)) = tools.hover().and_then(connector_path) {
         lines.push(line);
+        gaps.extend(gap);
         hover = None;
     }
     let end_handles = tools.connector_handles(document);
     let mut selection = selection;
-    if let Some(line) = end_handles
+    if let Some((line, gap)) = end_handles
         .and(ids.first().copied())
         .and_then(connector_path)
     {
         lines.push(line);
+        gaps.extend(gap);
         selection = None;
     }
     let (connection_points, connection_active) = tools.connection_hints(document);
@@ -1507,6 +1519,7 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
         eraser: tools.eraser(),
         text_edit: None,
         lines,
+        gaps,
         end_handles: end_handles.map(Vec::from).unwrap_or_default(),
         connection_points,
         connection_active,

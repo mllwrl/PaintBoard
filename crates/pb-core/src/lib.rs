@@ -8,7 +8,7 @@ mod object;
 
 pub use asset::{AssetId, Assets};
 pub use command::{Applied, Command, ZOrder};
-pub use connector::{Anchor, Cap, Connector, ConnectorChange, End, Route};
+pub use connector::{Anchor, Cap, Connector, ConnectorChange, End, Label, Route};
 pub use document::{Document, Error, Result};
 pub use object::{
     Content, Group, Image, Ink, InkPoint, Object, ObjectData, ObjectId, ObjectKind, Rgba, Sticky,

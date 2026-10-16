@@ -103,8 +103,11 @@ pub fn build_scene(
         if let ObjectKind::Connector(c) = &data.kind {
             let width = data.style.stroke_width;
             let path = pb_core::connector::layout(c, width, |id| current.get(&id).copied());
-            if path.bounds().inflate(width, width).overlaps(visible) {
-                objects::draw_connector(scene, transform, &data.style, &path);
+            let label = c.label.rect(&path).map(|r| (&c.label, r));
+            let area = path.bounds().inflate(width, width);
+            let area = label.map_or(area, |(_, r)| area.union(r));
+            if area.overlaps(visible) {
+                objects::draw_connector(scene, transform, &data.style, &path, label, text);
             }
             continue;
         }

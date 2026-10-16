@@ -22,8 +22,8 @@ pub use ink::{ERASER_RADIUS, InkStyle};
 pub use selection::{Selection, selection_frame, unit_frame};
 
 use pb_core::{
-    Cap, Command, Connector, ConnectorChange, Content, Document, End, Object, ObjectData, ObjectId,
-    ObjectKind, Route, ShapeKind, Style,
+    Cap, Command, Connector, ConnectorChange, Content, Document, End, Label, Object, ObjectData,
+    ObjectId, ObjectKind, Route, ShapeKind, Style,
 };
 use pb_geom::kurbo::{Line, Point, Rect, Vec2};
 use pb_geom::{Frame, GridLevel, Snapper, xs_of, ys_of};
@@ -127,6 +127,8 @@ enum Grip {
     Rotate,
     /// An end of the selected connector.
     End(Which),
+    /// The label of the selected connector.
+    Label,
 }
 
 enum Gesture {
@@ -189,6 +191,15 @@ enum Gesture {
         connector: Connector,
         end: End,
         current: Pointer,
+    },
+    /// Sliding the label of a selected connector along its line.
+    MoveLabel {
+        id: ObjectId,
+        label: Label,
+        start: Point,
+        /// From the pointer to the label's middle, kept while dragging.
+        offset: Vec2,
+        dragging: bool,
     },
 }
 
@@ -462,6 +473,21 @@ impl Tools {
                         current: pointer,
                     }
                 }
+                Grip::Label => {
+                    let Some((id, connector)) = self.single_connector(doc) else {
+                        return false;
+                    };
+                    let Some(rect) = doc.connector_label(id) else {
+                        return false;
+                    };
+                    Gesture::MoveLabel {
+                        id,
+                        label: connector.label,
+                        start: p,
+                        offset: rect.center() - p,
+                        dragging: false,
+                    }
+                }
             });
             return true;
         }
@@ -583,6 +609,22 @@ impl Tools {
                 *end = connect::end_at(doc, &pointer, other.object());
                 true
             }
+            Some(Gesture::MoveLabel {
+                id,
+                label,
+                start,
+                offset,
+                dragging,
+            }) => {
+                *dragging |= pointer.screen_distance(*start) >= CLICK_SLOP;
+                if !*dragging {
+                    return false;
+                }
+                if let Some(path) = doc.connector_path(*id) {
+                    label.at = path.nearest_fraction(pointer.world + *offset);
+                }
+                true
+            }
             None if self.active == ToolKind::Eraser => {
                 self.eraser_at = Some((pointer.world, ERASER_RADIUS / pointer.zoom));
                 true
@@ -681,6 +723,16 @@ impl Tools {
                     change,
                 })
             }
+            Gesture::MoveLabel {
+                id,
+                label,
+                dragging: true,
+                ..
+            } => Some(Command::SetLabel {
+                id: *id,
+                label: label.clone(),
+            }),
+            Gesture::MoveLabel { .. } => None,
         };
         self.gesture = None;
         command
@@ -717,7 +769,7 @@ impl Tools {
             return None;
         };
         match doc.get(*id).filter(|_| !doc.is_locked(*id))?.data.kind {
-            ObjectKind::Connector(c) => Some((*id, c)),
+            ObjectKind::Connector(ref c) => Some((*id, c.clone())),
             _ => None,
         }
     }
@@ -751,12 +803,26 @@ impl Tools {
                 let Some(mut o) = doc.get(*id).cloned() else {
                     return Vec::new();
                 };
-                let mut c = *connector;
+                let mut c = connector.clone();
                 match which {
                     Which::Start => c.start = *end,
                     Which::End => c.end = *end,
                 }
                 o.data.kind = ObjectKind::Connector(c);
+                vec![o]
+            }
+            Some(Gesture::MoveLabel {
+                id,
+                label,
+                dragging: true,
+                ..
+            }) => {
+                let Some(mut o) = doc.get(*id).cloned() else {
+                    return Vec::new();
+                };
+                if let ObjectKind::Connector(c) = &mut o.data.kind {
+                    c.label = label.clone();
+                }
                 vec![o]
             }
             Some(Gesture::Resize { .. } | Gesture::Rotate { .. }) => self
@@ -870,11 +936,13 @@ impl Tools {
             Some(Gesture::Shape { .. } | Gesture::Connect { .. } | Gesture::MoveEnd { .. }) => {
                 CursorHint::Crosshair
             }
+            Some(Gesture::MoveLabel { .. }) => CursorHint::Move,
             _ if self.active != ToolKind::Select => CursorHint::Crosshair,
             _ => match self.hover_grip {
                 Some(Grip::Resize(handle)) => handle.cursor(self.hover_rotation),
                 Some(Grip::Rotate) => CursorHint::Rotate,
                 Some(Grip::End(_)) => CursorHint::Crosshair,
+                Some(Grip::Label) => CursorHint::Move,
                 None => CursorHint::Default,
             },
         }
@@ -908,14 +976,19 @@ impl Tools {
         }
         let frame = self.selection.frame(doc)?;
         let radius = HANDLE_HIT_RADIUS / pointer.zoom;
-        // A single connector has handles on its ends instead of around it.
+        // A single connector has handles on its ends instead of around it, and its label
+        // slides along it.
         if let Some((id, _)) = self.single_connector(doc) {
             let (s, e) = doc.connector_ends(id)?;
             let near = |p: Point| (p - pointer.world).hypot() <= radius;
-            return [(s.point, Which::Start), (e.point, Which::End)]
+            let end = [(s.point, Which::Start), (e.point, Which::End)]
                 .into_iter()
                 .find(|&(p, _)| near(p))
                 .map(|(_, which)| (frame, Grip::End(which)));
+            let on_label = doc
+                .connector_label(id)
+                .is_some_and(|r| r.contains(pointer.world));
+            return end.or(on_label.then_some((frame, Grip::Label)));
         }
         if (rotation_knob(frame, pointer.zoom) - pointer.world).hypot() <= radius {
             return Some((frame, Grip::Rotate));
@@ -1132,6 +1205,7 @@ fn connector(start: End, end: End, route: Route) -> ObjectData {
             route,
             start_cap: Cap::None,
             end_cap: Cap::Arrow,
+            label: Label::default(),
         }),
         bounds: Rect::from_points(start.point(), end.point()),
         rotation: 0.0,

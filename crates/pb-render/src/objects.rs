@@ -1,12 +1,12 @@
 use pb_core::connector::ConnectorPath;
-use pb_core::{Assets, Image, ObjectData, ObjectKind, Rgba, Sticky, Style};
+use pb_core::{Assets, Image, Label, ObjectData, ObjectKind, Rgba, Sticky, Style};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use pb_geom::ink::{smooth_path, variable_outline};
 use pb_text::{TextAlign, TextEngine};
 use vello::Scene;
-use vello::kurbo::{Affine, Cap, Join, Line, Rect, Stroke};
+use vello::kurbo::{Affine, BezPath, Cap, Join, Line, Rect, Shape, Stroke};
 use vello::peniko::{Blob, FontData};
 use vello::peniko::{Color, Fill, Mix};
 
@@ -239,28 +239,37 @@ pub(crate) fn draw_object(
     }
 }
 
-/// A connector's line and arrowheads in the outline color.
+/// A connector's line and arrowheads in the outline color, and its label's text in a gap
+/// in the line; `label` is the label with the box of its text.
 pub(crate) fn draw_connector(
     scene: &mut Scene,
     transform: Affine,
     style: &Style,
     path: &ConnectorPath,
+    label: Option<(&Label, Rect)>,
+    text: &mut TextRenderer,
 ) {
     if style.opacity <= 0.0 {
         return;
     }
+    let pad = style.stroke_width;
+    let area = path.bounds().inflate(pad, pad);
+    let area = label.map_or(area, |(_, r)| area.union(r)).inflate(1.0, 1.0);
     // Opacity applies to the whole connector, so the line under an arrowhead does not show.
     let layered = style.opacity < 1.0;
     if layered {
-        let pad = style.stroke_width;
-        let clip = path.bounds().inflate(pad, pad);
         scene.push_layer(
             Fill::NonZero,
             Mix::Normal,
             style.opacity as f32,
             transform,
-            &clip,
+            &area,
         );
+    }
+    // The line breaks around the label.
+    if let Some((_, r)) = label {
+        let gap = Label::PADDING;
+        clip_out(scene, transform, area, &[r.inflate(gap, gap)]);
     }
     let brush = color(style.stroke);
     let stroke = Stroke::new(style.stroke_width.max(0.5))
@@ -270,9 +279,35 @@ pub(crate) fn draw_connector(
     for head in &path.heads {
         scene.fill(Fill::NonZero, transform, brush, None, head);
     }
+    if let Some((label, r)) = label {
+        scene.pop_layer();
+        let size = Label::FONT_SIZE;
+        let layout = text
+            .engine
+            .layout_aligned(&label.text, size, None, TextAlign::Center);
+        let c = r.center();
+        let origin = (c.x - layout.width / 2.0, c.y - layout.height / 2.0);
+        text.draw(scene, transform, origin, size, &layout.glyphs, brush);
+    }
     if layered {
         scene.pop_layer();
     }
+}
+
+/// Pushes a clip layer of `area` without `holes` (all in `transform`'s space).
+pub(crate) fn clip_out(scene: &mut Scene, transform: Affine, area: Rect, holes: &[Rect]) {
+    let mut clip = BezPath::new();
+    clip.extend(area.path_elements(0.1));
+    // Wound the other way, so they are holes whatever the fill rule; vello's clips do not
+    // seem to honor even-odd.
+    for hole in holes {
+        clip.move_to((hole.x0, hole.y0));
+        clip.line_to((hole.x0, hole.y1));
+        clip.line_to((hole.x1, hole.y1));
+        clip.line_to((hole.x1, hole.y0));
+        clip.close_path();
+    }
+    scene.push_clip_layer(Fill::NonZero, transform, &clip);
 }
 
 /// The cropped part of `brush` stretched over `bounds`.

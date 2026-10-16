@@ -3,7 +3,7 @@ use std::sync::Arc;
 use kurbo::{Rect, Vec2};
 use pb_geom::Frame;
 
-use crate::{ConnectorChange, Content, ObjectId, StyleChange};
+use crate::{ConnectorChange, Content, Label, ObjectId, StyleChange};
 
 /// A user-level edit. Each applied command is one undo step and, later, one unit of sync.
 ///
@@ -52,6 +52,11 @@ pub enum Command {
     SetConnector {
         ids: Vec<ObjectId>,
         change: ConnectorChange,
+    },
+    /// Replaces a connector's label. Takes a connector only.
+    SetLabel {
+        id: ObjectId,
+        label: Label,
     },
     /// Changes colors, outline or opacity; a group restyles everything inside it.
     SetStyle {

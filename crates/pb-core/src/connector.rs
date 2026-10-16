@@ -3,7 +3,9 @@
 //! A connector stores only its ends; its path is worked out from the objects' current
 //! positions (see [`layout`]), so moving an object moves the connectors attached to it.
 
-use kurbo::{BezPath, Point, Rect, Shape, Vec2};
+use std::sync::Arc;
+
+use kurbo::{BezPath, Point, Rect, Shape, Size, Vec2};
 use pb_geom::connector::{self as geom, ray_exit, side_normal};
 pub use pb_geom::connector::{Cap, ConnectorPath, EndPoint, Route};
 use pb_geom::rotate;
@@ -53,13 +55,56 @@ impl End {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Connector {
     pub start: End,
     pub end: End,
     pub route: Route,
     pub start_cap: Cap,
     pub end_cap: Cap,
+    pub label: Label,
+}
+
+/// Text on a connector's line, in the connector's color. The line breaks around it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Label {
+    pub text: Arc<str>,
+    /// Where its middle sits, as a fraction of the line's length from the start.
+    pub at: f64,
+    /// Size of the laid-out text, in world units. The document cannot lay out text, so
+    /// whoever edits the label measures it.
+    pub size: Size,
+}
+
+impl Label {
+    /// Font size in world units.
+    pub const FONT_SIZE: f64 = 16.0;
+    /// Gap between the text and the line around it, in world units.
+    pub const PADDING: f64 = 4.0;
+
+    /// An empty label at `at`.
+    pub fn empty(at: f64) -> Self {
+        Self {
+            text: Arc::from(""),
+            at,
+            size: Size::ZERO,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    /// The box of the text on `path`; `None` without text.
+    pub fn rect(&self, path: &ConnectorPath) -> Option<Rect> {
+        (!self.is_empty()).then(|| Rect::from_center_size(path.point_at(self.at), self.size))
+    }
+}
+
+impl Default for Label {
+    fn default() -> Self {
+        Self::empty(0.5)
+    }
 }
 
 /// A partial connector edit: only the set fields change.
@@ -73,13 +118,14 @@ pub struct ConnectorChange {
 }
 
 impl ConnectorChange {
-    pub fn apply_to(&self, c: Connector) -> Connector {
+    pub fn apply_to(&self, c: &Connector) -> Connector {
         Connector {
             start: self.start.unwrap_or(c.start),
             end: self.end.unwrap_or(c.end),
             route: self.route.unwrap_or(c.route),
             start_cap: self.start_cap.unwrap_or(c.start_cap),
             end_cap: self.end_cap.unwrap_or(c.end_cap),
+            label: c.label.clone(),
         }
     }
 }
@@ -245,6 +291,7 @@ mod tests {
             route: Route::Straight,
             start_cap: Cap::None,
             end_cap: Cap::Arrow,
+            label: Label::default(),
         };
         let (s, e) = resolve(&c, |id| objects.get(&id));
         assert!((s.point - Point::new(100.0, 50.0)).hypot() < 1e-6);
@@ -264,6 +311,7 @@ mod tests {
             route: Route::Elbow,
             start_cap: Cap::None,
             end_cap: Cap::None,
+            label: Label::default(),
         };
         let (s, e) = resolve(&c, |id| objects.get(&id));
         // B is mostly below A: A's bottom side and B's top side.
@@ -288,6 +336,7 @@ mod tests {
             route: Route::Straight,
             start_cap: Cap::None,
             end_cap: Cap::None,
+            label: Label::default(),
         };
         let (s, e) = resolve(&c, |id| objects.get(&id));
         // The right side's middle, turned a quarter clockwise about the center (50, 25).

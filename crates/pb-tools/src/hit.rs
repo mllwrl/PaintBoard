@@ -23,12 +23,18 @@ pub fn attachable_at(doc: &Document, point: Point, tolerance: f64) -> Option<&Ob
         .find(|o| hits(&o.data, point, tolerance))
 }
 
-/// [`hits`], with connectors hit along their path.
+/// [`hits`], with connectors hit along their path and on their label.
 fn object_hits(doc: &Document, object: &Object, point: Point, tolerance: f64) -> bool {
     match &object.data.kind {
-        ObjectKind::Connector(_) => doc.connector_path(object.id).is_some_and(|path| {
-            path.distance(point) <= tolerance + object.data.style.stroke_width / 2.0
-        }),
+        ObjectKind::Connector(_) => {
+            let on_line = doc.connector_path(object.id).is_some_and(|path| {
+                path.distance(point) <= tolerance + object.data.style.stroke_width / 2.0
+            });
+            let on_label = doc
+                .connector_label(object.id)
+                .is_some_and(|r| r.inflate(tolerance, tolerance).contains(point));
+            on_line || on_label
+        }
         _ => hits(&object.data, point, tolerance),
     }
 }
@@ -120,9 +126,13 @@ pub fn objects_in(doc: &Document, area: Rect) -> Vec<ObjectId> {
     for object in doc.objects() {
         let id = doc.top_level(object.id);
         let touched = match &object.data.kind {
-            ObjectKind::Connector(_) => doc
-                .connector_path(object.id)
-                .is_some_and(|path| pb_geom::connector::touches(path, area)),
+            ObjectKind::Connector(_) => {
+                doc.connector_path(object.id)
+                    .is_some_and(|path| pb_geom::connector::touches(path, area))
+                    || doc
+                        .connector_label(object.id)
+                        .is_some_and(|r| r.overlaps(area))
+            }
             _ => touches(&object.data, area),
         };
         if touched && !ids.contains(&id) && !doc.is_locked(id) {

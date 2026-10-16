@@ -11,7 +11,7 @@ use loro::{
 use pb_geom::ShapeKind;
 use pb_geom::normalize_angle;
 
-use crate::connector::{self, Anchor, Cap, ConnectorPath, EndPoint, Route};
+use crate::connector::{self, Anchor, Cap, ConnectorPath, EndPoint, Label, Route};
 
 use crate::command::reorder;
 use crate::{
@@ -67,6 +67,10 @@ mod key {
     pub const OBJECT_SUFFIX: &str = "Obj";
     pub const ANCHOR_X_SUFFIX: &str = "AnchorX";
     pub const ANCHOR_Y_SUFFIX: &str = "AnchorY";
+    /// ...and the label: its text under `text`, where it sits and its measured size.
+    pub const LABEL_AT: &str = "labelAt";
+    pub const LABEL_W: &str = "labelW";
+    pub const LABEL_H: &str = "labelH";
 
     /// `kind` of group nodes.
     pub const GROUP: &str = "group";
@@ -125,10 +129,18 @@ pub struct Document {
     nodes: HashMap<ObjectId, TreeID>,
     revision: u64,
     /// Connectors' resolved ends and paths, by connector id; rebuilt with `objects`.
-    connectors: HashMap<ObjectId, (EndPoint, EndPoint, ConnectorPath)>,
+    connectors: HashMap<ObjectId, Resolved>,
     /// Files used by images. They are not part of the CRDT and never removed while the board
     /// is open, so undoing the deletion of an image finds its file again.
     assets: Assets,
+}
+
+/// Where a connector runs now.
+struct Resolved {
+    start: EndPoint,
+    end: EndPoint,
+    path: ConnectorPath,
+    label: Option<Rect>,
 }
 
 /// An object made by a `Create` command, for re-attaching copied connectors.
@@ -202,12 +214,17 @@ impl Document {
 
     /// A connector's path as it is drawn.
     pub fn connector_path(&self, id: ObjectId) -> Option<&ConnectorPath> {
-        self.connectors.get(&id).map(|(_, _, path)| path)
+        self.connectors.get(&id).map(|r| &r.path)
     }
 
     /// A connector's ends where they are now.
     pub fn connector_ends(&self, id: ObjectId) -> Option<(EndPoint, EndPoint)> {
-        self.connectors.get(&id).map(|&(s, e, _)| (s, e))
+        self.connectors.get(&id).map(|r| (r.start, r.end))
+    }
+
+    /// The box of a connector's label text; `None` without a label.
+    pub fn connector_label(&self, id: ObjectId) -> Option<Rect> {
+        self.connectors.get(&id)?.label
     }
 
     /// Assets that objects on the board use, each once, in a stable order.
@@ -458,8 +475,17 @@ impl Document {
                         continue;
                     };
                     let meta = self.tree.get_meta(self.nodes[&id])?;
-                    write_connector(&meta, &change.apply_to(*c), &change)?;
+                    write_connector(&meta, &change.apply_to(c), &change)?;
                 }
+            }
+            Command::SetLabel { id, label } => {
+                if !matches!(
+                    self.get(id).map(|o| &o.data.kind),
+                    Some(ObjectKind::Connector(_))
+                ) {
+                    return Err(Error::UnknownObject(id));
+                }
+                write_label(&self.tree.get_meta(self.nodes[&id])?, &label)?;
             }
             Command::SetLocked { ids, locked } => {
                 self.check_exist(&ids)?;
@@ -539,7 +565,7 @@ impl Document {
         };
         write_data(&meta, data)?;
         let connector = match &data.kind {
-            ObjectKind::Connector(c) => Some(*c),
+            ObjectKind::Connector(c) => Some(c.clone()),
             _ => None,
         };
         made.push(Made {
@@ -559,7 +585,7 @@ impl Document {
             .filter_map(|m| m.from.map(|from| (from, m.id)))
             .collect();
         for m in made {
-            let Some(c) = m.connector else {
+            let Some(c) = &m.connector else {
                 continue;
             };
             let fix = |end: End| match end {
@@ -744,14 +770,23 @@ impl Document {
                     let caps = (c.start_cap, c.end_cap);
                     let width = o.data.style.stroke_width;
                     let path = pb_geom::connector::layout(c.route, s, e, caps, width);
-                    Some((i, o.id, s, e, path))
+                    let label = c.label.rect(&path);
+                    Some((i, o.id, s, e, path, label))
                 }
                 _ => None,
             })
             .collect();
-        for (i, id, s, e, path) in resolved {
-            self.objects[i].data.bounds = path.bounds();
-            self.connectors.insert(id, (s, e, path));
+        for (i, id, start, end, path, label) in resolved {
+            let pad = Label::PADDING;
+            self.objects[i].data.bounds =
+                label.map_or(path.bounds(), |r| path.bounds().union(r.inflate(pad, pad)));
+            let resolved = Resolved {
+                start,
+                end,
+                path,
+                label,
+            };
+            self.connectors.insert(id, resolved);
         }
     }
 
@@ -846,6 +881,7 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
                 end_cap: Some(c.end_cap),
             };
             write_connector(meta, c, &all)?;
+            write_label(meta, &c.label)?;
         }
         ObjectKind::Shape(_) => {}
     }
@@ -937,6 +973,26 @@ fn write_connector(meta: &LoroMap, c: &Connector, change: &crate::ConnectorChang
     Ok(())
 }
 
+fn write_label(meta: &LoroMap, label: &Label) -> Result<()> {
+    meta.insert(key::TEXT, &*label.text)?;
+    meta.insert(key::LABEL_AT, label.at.clamp(0.0, 1.0))?;
+    meta.insert(key::LABEL_W, label.size.width)?;
+    meta.insert(key::LABEL_H, label.size.height)?;
+    Ok(())
+}
+
+fn read_label(meta: &LoroMap) -> Label {
+    let Some(text) = get_str(meta, key::TEXT) else {
+        return Label::default();
+    };
+    let num = |k| get_num(meta, k).unwrap_or(0.0);
+    Label {
+        text: text.into(),
+        at: get_num(meta, key::LABEL_AT).unwrap_or(0.5).clamp(0.0, 1.0),
+        size: kurbo::Size::new(num(key::LABEL_W), num(key::LABEL_H)),
+    }
+}
+
 fn write_end(meta: &LoroMap, prefix: &str, end: &End) -> Result<()> {
     let k = |suffix: &str| format!("{prefix}{suffix}");
     let p = end.point();
@@ -1022,6 +1078,7 @@ fn read_connector(meta: &LoroMap) -> Option<Connector> {
         route,
         start_cap: cap(key::START_CAP),
         end_cap: cap(key::END_CAP),
+        label: read_label(meta),
     })
 }
 
@@ -1738,6 +1795,7 @@ mod tests {
                 route: Route::Straight,
                 start_cap: Cap::None,
                 end_cap: Cap::Arrow,
+                label: Label::default(),
             }),
             bounds: Rect::ZERO,
             rotation: 0.0,
@@ -1800,7 +1858,7 @@ mod tests {
         // Undo brings the object back, still attached.
         doc.undo().unwrap();
         assert!(doc.contains(b));
-        let ObjectKind::Connector(k) = doc.get(c).unwrap().data.kind else {
+        let ObjectKind::Connector(k) = &doc.get(c).unwrap().data.kind else {
             panic!("not a connector");
         };
         assert_eq!(k.end.object(), Some(b));
@@ -1822,7 +1880,7 @@ mod tests {
             ]))
             .unwrap()
             .created;
-        let ObjectKind::Connector(copy) = doc.get(made[1]).unwrap().data.kind else {
+        let ObjectKind::Connector(copy) = &doc.get(made[1]).unwrap().data.kind else {
             panic!("not a connector");
         };
         assert_eq!(copy.start.object(), Some(made[0]));
@@ -1832,7 +1890,7 @@ mod tests {
             .apply(Command::Create(vec![doc.content(c).unwrap()]))
             .unwrap()
             .created[0];
-        let ObjectKind::Connector(lone_c) = doc.get(lone).unwrap().data.kind else {
+        let ObjectKind::Connector(lone_c) = &doc.get(lone).unwrap().data.kind else {
             panic!("not a connector");
         };
         assert!(matches!(lone_c.start, End::Free(p) if close(p, ends(&doc, c).0)));
@@ -1868,7 +1926,7 @@ mod tests {
             },
         })
         .unwrap();
-        let ObjectKind::Connector(k) = doc.get(c).unwrap().data.kind else {
+        let ObjectKind::Connector(k) = &doc.get(c).unwrap().data.kind else {
             panic!("not a connector");
         };
         assert_eq!(k.route, Route::Elbow);
@@ -1884,10 +1942,56 @@ mod tests {
         })
         .unwrap();
         let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
-        let ObjectKind::Connector(k) = loaded.get(c).unwrap().data.kind else {
+        let ObjectKind::Connector(k) = &loaded.get(c).unwrap().data.kind else {
             panic!("not a connector");
         };
         assert_eq!(k.end, End::Free(Point::new(1.0, 2.0)));
+    }
+
+    #[test]
+    fn labels_sit_on_the_line_and_roundtrip() {
+        let mut doc = Document::new();
+        let a = create(&mut doc, rect(0.0, 0.0, 10.0, 10.0));
+        let c = create(
+            &mut doc,
+            connector(
+                End::Free(Point::new(0.0, 100.0)),
+                End::Free(Point::new(400.0, 100.0)),
+            ),
+        );
+        assert_eq!(doc.connector_label(c), None);
+        let label = Label {
+            text: "yes".into(),
+            at: 0.25,
+            size: kurbo::Size::new(40.0, 20.0),
+        };
+        doc.apply(Command::SetLabel {
+            id: c,
+            label: label.clone(),
+        })
+        .unwrap();
+        let r = doc.connector_label(c).unwrap();
+        // A quarter of the line, which stops short of the arrowhead at its end.
+        assert!(
+            (r.center().x - 100.0).abs() < 5.0 && r.center().y == 100.0,
+            "{r:?}"
+        );
+        // The bounds take in the label and the gap around it.
+        let bounds = doc.get(c).unwrap().data.bounds;
+        assert!(bounds.y0 <= 90.0 - Label::PADDING + 1e-9, "{bounds:?}");
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        let ObjectKind::Connector(k) = &loaded.get(c).unwrap().data.kind else {
+            panic!("not a connector");
+        };
+        assert_eq!(k.label, label);
+        // Copies take the label along; only connectors take labels.
+        let copy = doc.content(c).unwrap();
+        let made = doc.apply(Command::Create(vec![copy])).unwrap().created[0];
+        assert!(doc.connector_label(made).is_some());
+        assert!(doc.apply(Command::SetLabel { id: a, label }).is_err());
+        doc.undo().unwrap();
+        doc.undo().unwrap();
+        assert_eq!(doc.connector_label(c), None);
     }
 
     #[test]

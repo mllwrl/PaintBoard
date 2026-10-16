@@ -852,8 +852,8 @@ fn eraser_removes_touched_strokes_only() {
 fn the_connector(doc: &Document) -> (ObjectId, Connector) {
     doc.objects()
         .iter()
-        .find_map(|o| match o.data.kind {
-            ObjectKind::Connector(c) => Some((o.id, c)),
+        .find_map(|o| match &o.data.kind {
+            ObjectKind::Connector(c) => Some((o.id, c.clone())),
             _ => None,
         })
         .expect("a connector")
@@ -950,4 +950,34 @@ fn marquee_selects_connectors_by_their_line() {
     assert!(tools.selection().is_empty());
     drag(&mut tools, &doc, at(190.0, 190.0), at(210.0, 210.0));
     assert_eq!(tools.selection().ids(), [id]);
+}
+
+#[test]
+fn labels_are_hit_and_slide_along_the_line() {
+    let mut doc = Document::new();
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Connector);
+    let cmd = drag(&mut tools, &doc, at(0.0, 0.0), at(400.0, 0.0));
+    let id = apply(&mut doc, cmd).created[0];
+    let label = Label {
+        text: "label".into(),
+        at: 0.25,
+        size: pb_geom::kurbo::Size::new(60.0, 40.0),
+    };
+    doc.apply(Command::SetLabel { id, label }).unwrap();
+    tools.sync(&doc);
+    let middle = doc.connector_label(id).unwrap().center();
+    // The label's box is part of the connector, away from the line too.
+    let below = at(middle.x, middle.y + 15.0);
+    assert_eq!(tools.object_at(&doc, below), Some(id));
+    click(&mut tools, &doc, below);
+    assert_eq!(tools.selection().ids(), [id]);
+    // A click on the label of the selected connector leaves it; a drag slides it.
+    assert!(click(&mut tools, &doc, below).is_none());
+    let cmd = drag(&mut tools, &doc, below, at(middle.x + 100.0, 200.0));
+    let Some(Command::SetLabel { label, .. }) = &cmd else {
+        panic!("expected SetLabel, got {cmd:?}");
+    };
+    assert!(label.at > 0.45 && label.at < 0.55, "{}", label.at);
+    assert_eq!(&*label.text, "label");
 }

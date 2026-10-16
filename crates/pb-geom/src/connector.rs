@@ -3,7 +3,10 @@
 //!
 //! TODO: route elbow connectors around other objects (A* on a sparse grid).
 
-use kurbo::{BezPath, Line, ParamCurve, ParamCurveNearest, PathSeg, Point, Rect, Shape, Vec2};
+use kurbo::{
+    BezPath, Line, ParamCurve, ParamCurveArclen, ParamCurveNearest, PathSeg, Point, Rect, Shape,
+    Vec2,
+};
 
 /// How a connector runs between its ends.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -61,6 +64,8 @@ const ARROW_LENGTH: f64 = 4.0;
 const ARROW_MIN: f64 = 12.0;
 /// Half the arrowhead's width, relative to its length.
 const ARROW_SPREAD: f64 = 0.5;
+/// Accuracy of lengths along curved connectors, in world units.
+const ARCLEN_ACCURACY: f64 = 1e-3;
 
 /// Where a ray from `center` through `toward` leaves `outline`: its outermost crossing.
 /// `None` if `toward` is `center` or the ray misses the outline.
@@ -120,6 +125,50 @@ impl ConnectorPath {
             .segments()
             .map(|seg| seg.nearest(p, 1e-6).distance_sq.sqrt())
             .fold(f64::INFINITY, f64::min)
+    }
+
+    /// The point `fraction` of the way along the line, by length (0 is the start).
+    pub fn point_at(&self, fraction: f64) -> Point {
+        let lengths = self.segment_lengths();
+        let total: f64 = lengths.iter().sum();
+        let mut left = fraction.clamp(0.0, 1.0) * total;
+        let mut last = None;
+        for (seg, len) in self.line.segments().zip(lengths) {
+            if left <= len && len > 0.0 {
+                return seg.eval(seg.inv_arclen(left, ARCLEN_ACCURACY));
+            }
+            left -= len;
+            last = Some(seg.end());
+        }
+        last.or_else(|| self.line.segments().next().map(|s| s.start()))
+            .unwrap_or_default()
+    }
+
+    /// How far along the line, as a fraction of its length, the point nearest to `p` is.
+    pub fn nearest_fraction(&self, p: Point) -> f64 {
+        let lengths = self.segment_lengths();
+        let total: f64 = lengths.iter().sum();
+        if total <= 0.0 {
+            return 0.5;
+        }
+        let mut before = 0.0;
+        let mut best = (f64::INFINITY, 0.0);
+        for (seg, len) in self.line.segments().zip(lengths) {
+            let near = seg.nearest(p, 1e-6);
+            if near.distance_sq < best.0 {
+                let along = seg.subsegment(0.0..near.t).arclen(ARCLEN_ACCURACY);
+                best = (near.distance_sq, before + along);
+            }
+            before += len;
+        }
+        best.1 / total
+    }
+
+    fn segment_lengths(&self) -> Vec<f64> {
+        self.line
+            .segments()
+            .map(|seg| seg.arclen(ARCLEN_ACCURACY))
+            .collect()
     }
 }
 
@@ -492,6 +541,34 @@ mod tests {
         // Both ends point down, so the curve dips below them.
         assert!(path.line.bounding_box().y1 > 20.0);
         assert!(path.bounds().y0 > -1e-9);
+    }
+
+    #[test]
+    fn fractions_along_the_line_go_by_length() {
+        // An elbow: 100 right, then 100 down.
+        let path = layout(
+            Route::Elbow,
+            on(Point::ZERO, Vec2::new(1.0, 0.0)),
+            on(Point::new(100.0, 100.0), Vec2::new(0.0, -1.0)),
+            (Cap::None, Cap::None),
+            2.0,
+        );
+        assert!((path.point_at(0.5) - Point::new(100.0, 0.0)).hypot() < 1e-6);
+        assert!((path.point_at(0.75) - Point::new(100.0, 50.0)).hypot() < 1e-6);
+        assert_eq!(path.point_at(2.0), Point::new(100.0, 100.0));
+        let f = path.nearest_fraction(Point::new(130.0, 50.0));
+        assert!((f - 0.75).abs() < 1e-6, "{f}");
+        let curve = layout(
+            Route::Curved,
+            on(Point::ZERO, Vec2::new(0.0, 1.0)),
+            on(Point::new(100.0, 0.0), Vec2::new(0.0, 1.0)),
+            (Cap::None, Cap::None),
+            2.0,
+        );
+        // Symmetric, so its middle is on the axis.
+        assert!((curve.point_at(0.5).x - 50.0).abs() < 1e-3);
+        let back = curve.nearest_fraction(curve.point_at(0.3));
+        assert!((back - 0.3).abs() < 1e-3, "{back}");
     }
 
     #[test]

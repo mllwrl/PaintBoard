@@ -1,6 +1,8 @@
 use pb_geom::{Camera, Frame};
 use vello::Scene;
-use vello::kurbo::{Affine, Arc, BezPath, Circle, Line, Point, Rect, RoundedRect, Stroke, Vec2};
+use vello::kurbo::{
+    Affine, Arc, BezPath, Circle, Line, Point, Rect, RoundedRect, Shape, Stroke, Vec2,
+};
 use vello::peniko::{Color, Fill};
 
 /// Interaction feedback drawn above the board, in screen space so it keeps a constant size.
@@ -28,6 +30,8 @@ pub struct Overlay {
     pub text_edit: Option<TextEditOverlay>,
     /// Lines outlined like the hovered or selected object: connectors (world).
     pub lines: Vec<BezPath>,
+    /// Where `lines` break for connector labels (world).
+    pub gaps: Vec<Rect>,
     /// Handles on the ends of a selected connector (world).
     pub end_handles: Vec<Point>,
     /// Where a connector can attach on the object under the pointer (world), and the one it
@@ -74,6 +78,20 @@ pub fn draw_overlay(
         scene.stroke(&thick, id, colors.accent, None, &outline(hover));
     }
     let world_to_px = Affine::scale(scale) * camera.transform();
+    let gapped = !overlay.lines.is_empty() && !overlay.gaps.is_empty();
+    if gapped {
+        let area = overlay
+            .lines
+            .iter()
+            .map(|l| l.bounding_box())
+            .chain(overlay.gaps.iter().copied())
+            .reduce(|a, b| a.union(b))
+            .unwrap_or_default();
+        // Wide enough for the outline's width at any zoom.
+        let margin = area.width().max(area.height()) + 1.0;
+        let area = area.inflate(margin, margin);
+        crate::objects::clip_out(scene, world_to_px, area, &overlay.gaps);
+    }
     for line in &overlay.lines {
         scene.stroke(
             &thick,
@@ -82,6 +100,9 @@ pub fn draw_overlay(
             None,
             &(world_to_px * line.clone()),
         );
+    }
+    if gapped {
+        scene.pop_layer();
     }
     if !overlay.selected.is_empty() {
         let faint = colors.accent.multiply_alpha(0.5);
