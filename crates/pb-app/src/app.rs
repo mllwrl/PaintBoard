@@ -12,7 +12,7 @@ use pb_tools::{
     unit_frame,
 };
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorIcon, Window, WindowId};
@@ -47,6 +47,8 @@ pub struct App {
     canvas_drag: bool,
     /// A style slider is being dragged, and its changes form one undo step.
     style_drag: bool,
+    /// Pressure of a pen touching the screen or tablet; `None` for a mouse.
+    pen_pressure: Option<f64>,
     shown_title: String,
 }
 
@@ -69,6 +71,7 @@ impl App {
             ui: None,
             canvas_drag: false,
             style_drag: false,
+            pen_pressure: None,
             shown_title: String::new(),
         }
     }
@@ -112,6 +115,7 @@ impl App {
                 theme: &self.theme,
                 objects: self.document.objects(),
                 overrides: &overrides,
+                hidden: self.tools.hidden(),
                 previews: &previews,
                 overlay: &overlay,
             },
@@ -122,6 +126,9 @@ impl App {
             board: &board,
             tool: self.tools.active(),
             last_shape: self.tools.last_shape(),
+            ink: self
+                .tools
+                .ink_style(self.tools.active() == ToolKind::Marker),
             can_undo: self.document.can_undo(),
             can_redo: self.document.can_redo(),
             zoom: self.camera.zoom(),
@@ -173,6 +180,10 @@ impl App {
             ),
             style: first.data.style,
             has_group: ids.iter().any(|&id| self.document.group(id).is_some()),
+            has_fill: ids
+                .iter()
+                .flat_map(|&id| self.document.leaves(id))
+                .any(|o| !o.data.kind.is_ink()),
             several: ids.len() > 1,
             locked: selection.has_locked(&self.document),
         })
@@ -183,6 +194,7 @@ impl App {
         let viewport = self.viewport();
         match action {
             Action::Tool(tool) => self.tools.set_active(tool),
+            Action::InkStyle { marker, style } => self.tools.set_ink_style(marker, style),
             Action::Undo => self.undo(),
             Action::Redo => self.redo(),
             Action::NewBoard => self.new_board(),
@@ -253,6 +265,7 @@ impl App {
             world: self.camera.screen_to_world(cursor),
             zoom: self.camera.zoom(),
             visible: self.camera.visible_world_rect(self.viewport()),
+            pressure: self.pen_pressure.unwrap_or(1.0),
             shift: self.navigation.modifiers().shift_key(),
             ctrl: self.navigation.modifiers().control_key(),
             alt: self.navigation.modifiers().alt_key(),
@@ -262,7 +275,12 @@ impl App {
     fn apply(&mut self, command: Command) {
         match self.document.apply(command) {
             // New objects get selected, like in Miro, and so do the parts of an ungrouped group.
-            Ok(applied) if !applied.created.is_empty() => self.tools.select_only(applied.created),
+            // Ink is not: the pen stays active for the next stroke.
+            Ok(applied) if !applied.created.is_empty() => {
+                if !self.tools.active().draws_ink() {
+                    self.tools.select_only(applied.created);
+                }
+            }
             Ok(applied) if !applied.ungrouped.is_empty() => {
                 self.tools.select_only(applied.ungrouped)
             }
@@ -425,6 +443,9 @@ impl App {
             KeyCode::KeyR if !ctrl => self.tools.set_active(ToolKind::Shape(ShapeKind::Rectangle)),
             KeyCode::KeyO if !ctrl => self.tools.set_active(ToolKind::Shape(ShapeKind::Ellipse)),
             KeyCode::KeyS if !ctrl => self.tools.cycle_shape(),
+            KeyCode::KeyP if !ctrl => self.tools.set_active(ToolKind::Pen),
+            KeyCode::KeyM if !ctrl => self.tools.set_active(ToolKind::Marker),
+            KeyCode::KeyE if !ctrl => self.tools.set_active(ToolKind::Eraser),
             KeyCode::KeyA if ctrl => self.tools.select_all(&self.document),
             KeyCode::KeyC if ctrl => {
                 self.clipboard.copy(&self.document, self.tools.selection());
@@ -659,6 +680,15 @@ impl ApplicationHandler<UserEvent> for App {
                     true
                 }
             }
+            // Pens report pressure as touch force; the strokes themselves come in as mouse
+            // events, which Windows also sends for pens.
+            WindowEvent::Touch(touch) => {
+                self.pen_pressure = match touch.phase {
+                    TouchPhase::Ended | TouchPhase::Cancelled => None,
+                    _ => touch.force.map(|f| f.normalized()),
+                };
+                false
+            }
             WindowEvent::PinchGesture { delta, .. } => {
                 self.navigation.pinch(&mut self.camera, delta);
                 true
@@ -679,8 +709,8 @@ impl ApplicationHandler<UserEvent> for App {
 
 /// Selection feedback, following objects mid-gesture.
 fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) -> Overlay {
-    let overrides: HashMap<_, _> = overrides.iter().map(|o| (o.id, o.data)).collect();
-    let frame = |o: &Object| overrides.get(&o.id).unwrap_or(&o.data).frame();
+    let overrides: HashMap<_, _> = overrides.iter().map(|o| (o.id, &o.data)).collect();
+    let frame = |o: &Object| overrides.get(&o.id).copied().unwrap_or(&o.data).frame();
     let ids = tools.selection().ids();
     let selection = selection_frame(document, ids, frame);
     let selected = match ids {
@@ -705,5 +735,6 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
         hover: tools.hover().and_then(|id| unit_frame(document, id, frame)),
         marquee: tools.marquee(),
         guides: tools.guides(document),
+        eraser: tools.eraser(),
     }
 }

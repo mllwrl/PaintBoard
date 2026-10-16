@@ -7,11 +7,13 @@ mod arrange;
 mod clipboard;
 mod handles;
 mod hit;
+mod ink;
 mod selection;
 
 pub use arrange::{Align, Axis, align, distribute};
 pub use clipboard::{Clipboard, duplicate};
 pub use handles::{Handle, rotation_knob};
+pub use ink::{ERASER_RADIUS, InkStyle};
 pub use selection::{Selection, selection_frame, unit_frame};
 
 use pb_core::{
@@ -38,6 +40,11 @@ pub enum ToolKind {
     #[default]
     Select,
     Shape(ShapeKind),
+    Pen,
+    /// A wide, see-through pen, like a highlighter.
+    Marker,
+    /// Removes whole ink strokes it touches.
+    Eraser,
 }
 
 impl ToolKind {
@@ -45,7 +52,16 @@ impl ToolKind {
         match self {
             Self::Select => "Select",
             Self::Shape(shape) => shape.name(),
+            Self::Pen => "Pen",
+            Self::Marker => "Marker",
+            Self::Eraser => "Eraser",
         }
+    }
+
+    /// Pen or marker. Like Miro, these stay active after a stroke, and strokes are not
+    /// selected.
+    pub fn draws_ink(self) -> bool {
+        matches!(self, Self::Pen | Self::Marker)
     }
 }
 
@@ -70,6 +86,8 @@ pub struct Pointer {
     pub zoom: f64,
     /// The part of the world on screen; only visible objects are snapped to.
     pub visible: Rect,
+    /// Pen pressure in `[0, 1]`; 1 for a mouse.
+    pub pressure: f64,
     pub shift: bool,
     /// Held during a drag, turns snapping off.
     pub ctrl: bool,
@@ -96,7 +114,7 @@ enum Grip {
 
 enum Gesture {
     Shape {
-        kind: ObjectKind,
+        kind: ShapeKind,
         start: Point,
         /// `start` after snapping: the corner the shape grows from.
         anchor: Point,
@@ -129,6 +147,18 @@ enum Gesture {
         /// Selection before the marquee started (kept when adding with Shift/Ctrl).
         base: Vec<ObjectId>,
     },
+    Ink {
+        marker: bool,
+        /// World points with pressure.
+        points: Vec<(Point, f64)>,
+        /// Zoom when the stroke started; its width and smoothing follow it.
+        zoom: f64,
+    },
+    Erase {
+        last: Point,
+        /// Strokes touched so far; hidden until the eraser is released.
+        erased: Vec<ObjectId>,
+    },
 }
 
 pub struct Tools {
@@ -142,6 +172,10 @@ pub struct Tools {
     snap_to_grid: bool,
     /// Shape the shape tool starts with.
     last_shape: ShapeKind,
+    pen: InkStyle,
+    marker: InkStyle,
+    /// Where the eraser hovers, to show its size.
+    eraser_at: Option<(Point, f64)>,
 }
 
 impl Default for Tools {
@@ -155,6 +189,9 @@ impl Default for Tools {
             hover_rotation: 0.0,
             snap_to_grid: false,
             last_shape: ShapeKind::Rectangle,
+            pen: InkStyle::PEN,
+            marker: InkStyle::MARKER,
+            eraser_at: None,
         }
     }
 }
@@ -172,6 +209,20 @@ impl Tools {
         self.gesture = None;
         self.hover = None;
         self.hover_grip = None;
+        self.eraser_at = None;
+    }
+
+    /// Color and width of the pen, or of the marker.
+    pub fn ink_style(&self, marker: bool) -> InkStyle {
+        if marker { self.marker } else { self.pen }
+    }
+
+    pub fn set_ink_style(&mut self, marker: bool, style: InkStyle) {
+        if marker {
+            self.marker = style;
+        } else {
+            self.pen = style;
+        }
     }
 
     /// The shape the shape tool starts with.
@@ -196,7 +247,7 @@ impl Tools {
     pub fn cycle_shape(&mut self) {
         let shape = match self.active {
             ToolKind::Shape(shape) => shape.next(),
-            ToolKind::Select => self.last_shape,
+            _ => self.last_shape,
         };
         self.set_active(ToolKind::Shape(shape));
     }
@@ -291,9 +342,31 @@ impl Tools {
     /// Returns true if the view needs a redraw.
     pub fn pointer_down(&mut self, doc: &Document, pointer: Pointer) -> bool {
         let p = pointer.world;
+        match self.active {
+            ToolKind::Pen | ToolKind::Marker => {
+                let marker = self.active == ToolKind::Marker;
+                // A highlighter has an even width.
+                let pressure = if marker { 1.0 } else { pointer.pressure };
+                self.gesture = Some(Gesture::Ink {
+                    marker,
+                    points: vec![(p, pressure)],
+                    zoom: pointer.zoom,
+                });
+                return true;
+            }
+            ToolKind::Eraser => {
+                let radius = ERASER_RADIUS / pointer.zoom;
+                self.gesture = Some(Gesture::Erase {
+                    last: p,
+                    erased: ink::erased(doc, p, p, radius),
+                });
+                return true;
+            }
+            _ => {}
+        }
         if let ToolKind::Shape(shape) = self.active {
             self.gesture = Some(Gesture::Shape {
-                kind: shape.into(),
+                kind: shape,
                 start: p,
                 anchor: self.snap_point(doc, pointer).0,
                 current: pointer,
@@ -391,6 +464,30 @@ impl Tools {
                 self.selection.set(ids);
                 true
             }
+            Some(Gesture::Ink { marker, points, .. }) => {
+                let last = points.last().map(|(p, _)| *p);
+                if last.is_some_and(|last| pointer.screen_distance(last) < ink::MIN_STEP) {
+                    return false;
+                }
+                let pressure = if *marker { 1.0 } else { pointer.pressure };
+                points.push((pointer.world, pressure));
+                true
+            }
+            Some(Gesture::Erase { last, erased }) => {
+                let radius = ERASER_RADIUS / pointer.zoom;
+                for id in ink::erased(doc, *last, pointer.world, radius) {
+                    if !erased.contains(&id) {
+                        erased.push(id);
+                    }
+                }
+                *last = pointer.world;
+                self.eraser_at = Some((pointer.world, radius));
+                true
+            }
+            None if self.active == ToolKind::Eraser => {
+                self.eraser_at = Some((pointer.world, ERASER_RADIUS / pointer.zoom));
+                true
+            }
             None => self.update_hover(doc, pointer),
         }
     }
@@ -403,7 +500,16 @@ impl Tools {
                 // Like Miro, a shape tool is one-shot: go back to selecting afterwards.
                 self.active = ToolKind::Select;
                 let (bounds, _) = self.shape_bounds(doc, true);
-                Some(Command::Create(vec![shape(kind, bounds).into()]))
+                Some(Command::Create(vec![shape(kind.into(), bounds).into()]))
+            }
+            Gesture::Ink {
+                marker,
+                points,
+                zoom,
+            } => ink::stroke(points, self.ink_style(*marker), *marker, *zoom, true)
+                .map(|data| Command::Create(vec![data.into()])),
+            Gesture::Erase { erased, .. } => {
+                (!erased.is_empty()).then(|| Command::Delete(erased.clone()))
             }
             Gesture::Move {
                 dragging: true,
@@ -452,7 +558,7 @@ impl Tools {
                     .into_iter()
                     .flat_map(|id| doc.leaves(id))
                     .map(|o| {
-                        let mut o = *o;
+                        let mut o = o.clone();
                         o.data.bounds = o.data.bounds + delta;
                         o
                     })
@@ -462,7 +568,7 @@ impl Tools {
                 .geometry_changes(doc)
                 .into_iter()
                 .filter_map(|(id, frame)| {
-                    let mut o = *doc.get(id)?;
+                    let mut o = doc.get(id)?.clone();
                     o.data.set_frame(frame);
                     Some(o)
                 })
@@ -475,8 +581,15 @@ impl Tools {
     pub fn previews(&self, doc: &Document) -> Vec<ObjectData> {
         match &self.gesture {
             Some(Gesture::Shape { kind, .. }) => {
-                vec![shape(*kind, self.shape_bounds(doc, false).0)]
+                vec![shape((*kind).into(), self.shape_bounds(doc, false).0)]
             }
+            Some(Gesture::Ink {
+                marker,
+                points,
+                zoom,
+            }) => ink::stroke(points, self.ink_style(*marker), *marker, *zoom, false)
+                .into_iter()
+                .collect(),
             Some(Gesture::Move {
                 dragging: true,
                 duplicate: true,
@@ -498,6 +611,19 @@ impl Tools {
             Some(Gesture::Shape { .. }) => self.shape_bounds(doc, false).1,
             _ => Vec::new(),
         }
+    }
+
+    /// Objects the gesture is about to delete (the eraser), hidden until it ends.
+    pub fn hidden(&self) -> &[ObjectId] {
+        match &self.gesture {
+            Some(Gesture::Erase { erased, .. }) => erased,
+            _ => &[],
+        }
+    }
+
+    /// The eraser's outline: center and radius in world units.
+    pub fn eraser(&self) -> Option<(Point, f64)> {
+        self.eraser_at.filter(|_| self.active == ToolKind::Eraser)
     }
 
     pub fn marquee(&self) -> Option<Rect> {

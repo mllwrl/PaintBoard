@@ -1,6 +1,8 @@
 use std::fmt;
 
-use kurbo::{Rect, Vec2};
+use std::sync::Arc;
+
+use kurbo::{Point, Rect, Vec2};
 use loro::TreeID;
 use pb_geom::{Frame, ShapeKind};
 
@@ -45,15 +47,18 @@ impl fmt::Display for ObjectId {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ObjectKind {
     Shape(ShapeKind),
+    /// Freehand drawing; drawn with the outline color and width.
+    Ink(Ink),
 }
 
 impl ObjectKind {
     /// Name stored in the document. Never change existing names: old files depend on them.
-    pub(crate) fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
+            Self::Ink(_) => "ink",
             Self::Shape(shape) => match shape {
                 ShapeKind::Rectangle => "rect",
                 ShapeKind::RoundedRectangle => "roundRect",
@@ -68,11 +73,15 @@ impl ObjectKind {
         }
     }
 
-    pub(crate) fn parse(s: &str) -> Option<Self> {
+    /// The shape stored under `s`. Ink is read separately, with its points.
+    pub(crate) fn parse_shape(s: &str) -> Option<ShapeKind> {
         ShapeKind::ALL
             .into_iter()
-            .map(Self::Shape)
-            .find(|kind| kind.as_str() == s)
+            .find(|&shape| Self::Shape(shape).as_str() == s)
+    }
+
+    pub fn is_ink(&self) -> bool {
+        matches!(self, Self::Ink(_))
     }
 }
 
@@ -139,8 +148,103 @@ impl StyleChange {
     }
 }
 
-/// Everything about an object except its identity.
+/// A point of a freehand stroke, relative to the object's bounds: `(0, 0)` is the top-left
+/// corner and `(1, 1)` the bottom-right one.
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InkPoint {
+    pub x: f32,
+    pub y: f32,
+    /// Pen pressure in `[0, 1]`; 1 for a mouse.
+    pub pressure: f32,
+}
+
+/// A freehand stroke. Its points are relative to the object's bounds, so moving, resizing
+/// and rotating the object reshape the stroke with it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ink {
+    points: Arc<[InkPoint]>,
+}
+
+impl Ink {
+    /// A stroke through world points with their pressures, and the bounds it spans.
+    /// `None` for no points.
+    pub fn from_world(points: &[(Point, f64)]) -> Option<(Self, Rect)> {
+        let (first, _) = points.first()?;
+        let bounds = points
+            .iter()
+            .fold(Rect::from_points(*first, *first), |r, (p, _)| {
+                r.union_pt(*p)
+            });
+        let relative = |v: f64, min: f64, size: f64| {
+            if size > 0.0 {
+                ((v - min) / size) as f32
+            } else {
+                0.5
+            }
+        };
+        let points = points
+            .iter()
+            .map(|&(p, pressure)| InkPoint {
+                x: relative(p.x, bounds.x0, bounds.width()),
+                y: relative(p.y, bounds.y0, bounds.height()),
+                pressure: pressure.clamp(0.0, 1.0) as f32,
+            })
+            .collect();
+        Some((Self { points }, bounds))
+    }
+
+    pub fn points(&self) -> &[InkPoint] {
+        &self.points
+    }
+
+    /// The points placed in `bounds` (unrotated), with their pressures.
+    pub fn points_in(&self, bounds: Rect) -> Vec<(Point, f64)> {
+        self.points
+            .iter()
+            .map(|p| {
+                let x = bounds.x0 + f64::from(p.x) * bounds.width();
+                let y = bounds.y0 + f64::from(p.y) * bounds.height();
+                (Point::new(x, y), f64::from(p.pressure))
+            })
+            .collect()
+    }
+
+    /// Whether the pressure varies, so the stroke needs a variable-width outline.
+    pub fn has_pressure(&self) -> bool {
+        self.points.iter().any(|p| p.pressure != 1.0)
+    }
+
+    /// Stored form: little-endian `f32` triples `x, y, pressure`.
+    pub(crate) fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.points.len() * 12);
+        for p in self.points.iter() {
+            for v in [p.x, p.y, p.pressure] {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        bytes
+    }
+
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.is_empty() || !bytes.len().is_multiple_of(12) {
+            return None;
+        }
+        let f = |b: &[u8]| f32::from_le_bytes(b.try_into().expect("chunk of 4 bytes"));
+        let (chunks, _) = bytes.as_chunks::<12>();
+        let points = chunks
+            .iter()
+            .map(|c| InkPoint {
+                x: f(&c[0..4]),
+                y: f(&c[4..8]),
+                pressure: f(&c[8..12]),
+            })
+            .collect();
+        Some(Self { points })
+    }
+}
+
+/// Everything about an object except its identity.
+#[derive(Clone, Debug, PartialEq)]
 pub struct ObjectData {
     pub kind: ObjectKind,
     /// Unrotated bounds in world coordinates, always normalized (`x0 <= x1`, `y0 <= y1`).
@@ -161,8 +265,8 @@ impl ObjectData {
     }
 }
 
-/// A shape on the board, as cached by the document.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// An object on the board, as cached by the document.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Object {
     pub id: ObjectId,
     pub data: ObjectData,
@@ -199,7 +303,7 @@ impl Content {
 
     fn collect_shapes(&self, out: &mut Vec<ObjectData>) {
         match self {
-            Self::Object(data) => out.push(*data),
+            Self::Object(data) => out.push(data.clone()),
             Self::Group(children) => children.iter().for_each(|c| c.collect_shapes(out)),
         }
     }

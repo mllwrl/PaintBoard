@@ -22,6 +22,8 @@ pub struct Overlay {
     pub marquee: Option<Rect>,
     /// Smart guides showing what a dragged object lines up with (world).
     pub guides: Vec<Line>,
+    /// The eraser: center and radius (world).
+    pub eraser: Option<(Point, f64)>,
 }
 
 pub struct OverlayColors {
@@ -108,6 +110,17 @@ pub fn draw_overlay(
             Line::new((line.p0.x, snap(line.p0.y)), (line.p1.x, snap(line.p1.y)))
         };
         scene.stroke(&thin, id, colors.guide, None, &line);
+    }
+    if let Some((center, radius)) = overlay.eraser {
+        let circle = Circle::new(to_px(center), radius * camera.zoom() * scale);
+        scene.fill(
+            Fill::NonZero,
+            id,
+            colors.handle_fill.multiply_alpha(0.6),
+            None,
+            &circle,
+        );
+        scene.stroke(&thin, id, Color::from_rgb8(0x6B, 0x72, 0x80), None, &circle);
     }
     if let Some(marquee) = overlay.marquee {
         let r = frame_path(Frame::axis_aligned(marquee).corners().map(to_px), true);

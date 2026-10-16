@@ -7,6 +7,7 @@ fn at(x: f64, y: f64) -> Pointer {
         world: Point::new(x, y),
         zoom: 1.0,
         visible: Rect::new(-1e6, -1e6, 1e6, 1e6),
+        pressure: 1.0,
         shift: false,
         ctrl: false,
         alt: false,
@@ -681,4 +682,140 @@ fn shape_tool_draws_the_chosen_kind_and_cycles() {
     // Back to Select after drawing; the shape tool remembers the star.
     tools.cycle_shape();
     assert_eq!(tools.active(), ToolKind::Shape(ShapeKind::Star));
+}
+
+// Ink
+
+fn ink_of(cmd: Option<Command>) -> ObjectData {
+    match cmd {
+        Some(Command::Create(items)) => match &items[..] {
+            [Content::Object(data)] if data.kind.is_ink() => data.clone(),
+            other => panic!("expected one stroke, got {other:?}"),
+        },
+        other => panic!("expected Create, got {other:?}"),
+    }
+}
+
+fn draw(tools: &mut Tools, doc: &Document, points: &[Pointer]) -> Option<Command> {
+    tools.pointer_down(doc, points[0]);
+    for &p in &points[1..] {
+        tools.pointer_move(doc, p);
+    }
+    tools.pointer_up(doc, *points.last().unwrap())
+}
+
+#[test]
+fn pen_draws_a_simplified_stroke_and_stays_active() {
+    let doc = Document::new();
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Pen);
+    let line: Vec<_> = (0..=20).map(|i| at(i as f64 * 5.0, 10.0)).collect();
+    tools.pointer_down(&doc, line[0]);
+    tools.pointer_move(&doc, line[1]);
+    // While drawing, the stroke shows as a preview.
+    assert!(tools.previews(&doc)[0].kind.is_ink());
+    for &p in &line[2..] {
+        tools.pointer_move(&doc, p);
+    }
+    let data = ink_of(tools.pointer_up(&doc, line[20]));
+    let ObjectKind::Ink(ink) = &data.kind else {
+        unreachable!()
+    };
+    // A straight line needs only its two ends.
+    assert_eq!(ink.points().len(), 2);
+    assert_eq!(data.bounds, Rect::new(0.0, 10.0, 100.0, 10.0));
+    assert_eq!(data.style.stroke_width, InkStyle::PEN.width);
+    assert_eq!(tools.active(), ToolKind::Pen);
+}
+
+#[test]
+fn ink_width_follows_zoom_and_pressure_is_kept() {
+    let doc = Document::new();
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Pen);
+    let pen = |x, y, pressure| Pointer {
+        zoom: 2.0,
+        pressure,
+        ..at(x, y)
+    };
+    let data = ink_of(draw(
+        &mut tools,
+        &doc,
+        &[
+            pen(0.0, 0.0, 0.2),
+            pen(10.0, 10.0, 0.9),
+            pen(20.0, 0.0, 0.5),
+        ],
+    ));
+    assert_eq!(data.style.stroke_width, InkStyle::PEN.width / 2.0);
+    let ObjectKind::Ink(ink) = &data.kind else {
+        unreachable!()
+    };
+    assert!(ink.has_pressure());
+}
+
+#[test]
+fn marker_is_wide_and_see_through() {
+    let doc = Document::new();
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Marker);
+    let data = ink_of(draw(&mut tools, &doc, &[at(0.0, 0.0), at(50.0, 0.0)]));
+    assert_eq!(data.style.stroke_width, InkStyle::MARKER.width);
+    assert!(data.style.opacity < 1.0);
+}
+
+#[test]
+fn click_with_pen_makes_a_dot() {
+    let doc = Document::new();
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Pen);
+    let data = ink_of(click(&mut tools, &doc, at(5.0, 5.0)));
+    assert_eq!(data.bounds, Rect::new(5.0, 5.0, 5.0, 5.0));
+}
+
+#[test]
+fn ink_is_hit_along_its_line() {
+    let mut doc = Document::new();
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Pen);
+    let cmd = draw(&mut tools, &doc, &[at(0.0, 0.0), at(100.0, 100.0)]).unwrap();
+    let id = doc.apply(cmd).unwrap().created[0];
+    tools.set_active(ToolKind::Select);
+    // Inside the bounds but far from the diagonal: nothing.
+    click(&mut tools, &doc, at(90.0, 10.0));
+    assert!(tools.selection().is_empty());
+    click(&mut tools, &doc, at(51.0, 50.0));
+    assert_eq!(tools.selection().ids(), [id]);
+}
+
+#[test]
+fn eraser_removes_touched_strokes_only() {
+    let mut doc = Document::new();
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Pen);
+    let a = draw(&mut tools, &doc, &[at(0.0, 0.0), at(100.0, 0.0)]).unwrap();
+    let b = draw(&mut tools, &doc, &[at(0.0, 50.0), at(100.0, 50.0)]).unwrap();
+    let a = doc.apply(a).unwrap().created[0];
+    doc.apply(b).unwrap();
+    let rect = doc
+        .apply(Command::Create(vec![
+            shape(
+                ShapeKind::Rectangle.into(),
+                Rect::new(40.0, -20.0, 60.0, 20.0),
+            )
+            .into(),
+        ]))
+        .unwrap()
+        .created[0];
+    tools.set_active(ToolKind::Eraser);
+    // Sweep across the first stroke (and the rectangle), fast enough to skip pixels.
+    tools.pointer_down(&doc, at(50.0, -30.0));
+    tools.pointer_move(&doc, at(50.0, 30.0));
+    assert_eq!(tools.hidden(), [a]);
+    assert_eq!(
+        tools.pointer_up(&doc, at(50.0, 30.0)),
+        Some(Command::Delete(vec![a]))
+    );
+    assert!(doc.get(rect).is_some());
+    assert!(tools.eraser().is_some());
 }

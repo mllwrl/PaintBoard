@@ -3,6 +3,7 @@
 mod camera;
 mod frame;
 mod grid;
+pub mod ink;
 mod shape;
 mod snap;
 

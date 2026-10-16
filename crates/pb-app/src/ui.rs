@@ -13,13 +13,17 @@ use pb_core::{Rgba, ShapeKind, Style, StyleChange, ZOrder};
 use pb_geom::kurbo::{self, PathEl};
 use pb_platform::Instant;
 use pb_render::{FrameTarget, Gpu, GridStyle};
-use pb_tools::ToolKind;
+use pb_tools::{InkStyle, ToolKind};
 use winit::window::Window;
 
 /// Something the user asked for through the UI.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
     Tool(ToolKind),
+    InkStyle {
+        marker: bool,
+        style: InkStyle,
+    },
     Undo,
     Redo,
     NewBoard,
@@ -48,6 +52,8 @@ pub struct Model<'a> {
     pub board: &'a str,
     pub tool: ToolKind,
     pub last_shape: ShapeKind,
+    /// Style of the pen or marker, whichever is active.
+    pub ink: InkStyle,
     pub can_undo: bool,
     pub can_redo: bool,
     pub zoom: f64,
@@ -63,6 +69,8 @@ pub struct SelectionInfo {
     /// Style of the first selected object.
     pub style: Style,
     pub has_group: bool,
+    /// Anything with a fill (not only ink) is selected.
+    pub has_fill: bool,
     pub several: bool,
     pub locked: bool,
 }
@@ -325,13 +333,32 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                     let shape_active = matches!(model.tool, ToolKind::Shape(_));
                     let shape = match model.tool {
                         ToolKind::Shape(shape) => shape,
-                        ToolKind::Select => model.last_shape,
+                        _ => model.last_shape,
                     };
                     let shapes = icon_button(ui, shape_active, "Shapes (S, R, O)", |p, r, c| {
                         paint_shape(p, r, c, shape)
                     });
                     if shapes.clicked() && !shape_active {
                         actions.push(Action::Tool(ToolKind::Shape(shape)));
+                    }
+                    let ink_tools = [
+                        (
+                            ToolKind::Pen,
+                            "Pen (P)",
+                            paint_pen as fn(&Painter, Rect, Color32),
+                        ),
+                        (ToolKind::Marker, "Marker (M)", paint_marker),
+                        (ToolKind::Eraser, "Eraser (E)", paint_eraser),
+                    ];
+                    let mut ink_button = shapes.rect;
+                    for (tool, tooltip, paint) in ink_tools {
+                        let button = icon_button(ui, model.tool == tool, tooltip, paint);
+                        if button.clicked() {
+                            actions.push(Action::Tool(tool));
+                        }
+                        if model.tool == tool {
+                            ink_button = button.rect;
+                        }
                     }
                     ui.separator();
                     let undo = ui.add_enabled_ui(model.can_undo, |ui| {
@@ -350,11 +377,16 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                     if redo.inner.clicked() {
                         actions.push(Action::Redo);
                     }
-                    shapes.rect
+                    (shapes.rect, ink_button)
                 })
                 .inner
         })
         .inner;
+    let (shapes_button, ink_button) = shapes_button;
+
+    if model.tool.draws_ink() {
+        ink_panel(ctx, model, ink_button, actions);
+    }
 
     // Like Miro, the shape tool shows its shapes next to the toolbar.
     if let ToolKind::Shape(active) = model.tool {
@@ -385,6 +417,48 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                 });
             });
     }
+}
+
+/// Widths offered for the pen and the marker, in logical pixels.
+const PEN_WIDTHS: [f64; 4] = [2.0, 3.0, 6.0, 10.0];
+const MARKER_WIDTHS: [f64; 4] = [10.0, 18.0, 28.0, 40.0];
+
+/// Color and width of the active pen or marker, next to its button.
+fn ink_panel(ctx: &Context, model: &Model, button: Rect, actions: &mut Vec<Action>) {
+    let marker = model.tool == ToolKind::Marker;
+    let style = model.ink;
+    Area::new(Id::unique("ink"))
+        .fixed_pos(Pos2::new(button.right() + 18.0, button.top() - 8.0))
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            panel().show(ui, |ui| {
+                if let Some(color) = palette(ui, style.color, false) {
+                    actions.push(Action::InkStyle {
+                        marker,
+                        style: InkStyle { color, ..style },
+                    });
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let widths = if marker { MARKER_WIDTHS } else { PEN_WIDTHS };
+                    let largest = widths[widths.len() - 1];
+                    for width in widths {
+                        let tooltip = format!("{width:.0} px");
+                        let button = icon_button(ui, style.width == width, &tooltip, |p, r, c| {
+                            // Dots grow with the width, scaled to fit the button.
+                            let radius = (width / largest) as f32 * r.width() / 2.0;
+                            p.circle_filled(r.center(), radius.max(1.5), c);
+                        });
+                        if button.clicked() {
+                            actions.push(Action::InkStyle {
+                                marker,
+                                style: InkStyle { width, ..style },
+                            });
+                        }
+                    }
+                });
+            });
+        });
 }
 
 fn view_controls(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
@@ -465,9 +539,16 @@ fn selection_toolbar(
                         return;
                     }
                     let style = selection.style;
-                    let fill = swatch_button(ui, style.fill, false, "Fill color");
-                    toggle(popup, Popup::Fill, fill.clicked());
-                    let stroke = swatch_button(ui, style.stroke, true, "Outline");
+                    if selection.has_fill {
+                        let fill = swatch_button(ui, style.fill, false, "Fill color");
+                        toggle(popup, Popup::Fill, fill.clicked());
+                    }
+                    let outline = if selection.has_fill {
+                        "Outline"
+                    } else {
+                        "Color"
+                    };
+                    let stroke = swatch_button(ui, style.stroke, true, outline);
                     toggle(popup, Popup::Stroke, stroke.clicked());
                     let opacity = format!("{:.0}%", style.opacity * 100.0);
                     let opacity = ui.button(opacity).on_hover_text("Opacity");
@@ -520,7 +601,7 @@ fn selection_toolbar(
         .show(ctx, |ui| {
             panel().show(ui, |ui| match open {
                 Popup::Fill => {
-                    if let Some(color) = palette(ui, selection.style.fill) {
+                    if let Some(color) = palette(ui, selection.style.fill, true) {
                         actions.push(Action::SetStyle(StyleChange {
                             fill: Some(color),
                             ..StyleChange::default()
@@ -528,7 +609,7 @@ fn selection_toolbar(
                     }
                 }
                 Popup::Stroke => {
-                    if let Some(color) = palette(ui, selection.style.stroke) {
+                    if let Some(color) = palette(ui, selection.style.stroke, true) {
                         actions.push(Action::SetStyle(StyleChange {
                             stroke: Some(color),
                             ..StyleChange::default()
@@ -591,13 +672,18 @@ fn style_slider(
     }
 }
 
-/// Grid of color swatches; returns the picked color.
-fn palette(ui: &mut egui::Ui, current: Rgba) -> Option<Rgba> {
+/// Grid of color swatches; returns the picked color. `with_none` offers "no color" too.
+fn palette(ui: &mut egui::Ui, current: Rgba, with_none: bool) -> Option<Rgba> {
     let mut picked = None;
+    let colors = if with_none {
+        &PALETTE[..]
+    } else {
+        &PALETTE[..PALETTE.len() - 1]
+    };
     egui::Grid::new("palette")
         .spacing(Vec2::splat(4.0))
         .show(ui, |ui| {
-            for (i, color) in PALETTE.into_iter().enumerate() {
+            for (i, &color) in colors.iter().enumerate() {
                 let (rect, response) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
                 paint_swatch(ui.painter(), rect, color);
                 if color == current {
@@ -693,6 +779,40 @@ fn paint_cursor(painter: &Painter, rect: Rect, color: Color32) {
         at(0.15, 0.0),
     ];
     painter.add(Shape::line(points, Stroke::new(1.6, color)));
+}
+
+fn paint_pen(painter: &Painter, rect: Rect, color: Color32) {
+    let at = |x: f32, y: f32| rect.min + Vec2::new(x, y) * rect.width();
+    let body = vec![
+        at(0.25, 0.95),
+        at(0.05, 0.75),
+        at(0.7, 0.1),
+        at(0.9, 0.3),
+        at(0.25, 0.95),
+    ];
+    painter.add(Shape::line(body, Stroke::new(1.6, color)));
+    painter.line_segment([at(0.05, 0.75), at(0.0, 1.0)], Stroke::new(1.6, color));
+    painter.line_segment([at(0.0, 1.0), at(0.25, 0.95)], Stroke::new(1.6, color));
+}
+
+fn paint_marker(painter: &Painter, rect: Rect, color: Color32) {
+    let at = |x: f32, y: f32| rect.min + Vec2::new(x, y) * rect.width();
+    let highlight = Color32::from_rgba_unmultiplied(0xFF, 0xD5, 0x4F, 200);
+    painter.line_segment([at(0.1, 0.9), at(0.9, 0.1)], Stroke::new(7.0, highlight));
+    painter.line_segment([at(0.1, 0.9), at(0.9, 0.1)], Stroke::new(1.2, color));
+}
+
+fn paint_eraser(painter: &Painter, rect: Rect, color: Color32) {
+    let at = |x: f32, y: f32| rect.min + Vec2::new(x, y) * rect.width();
+    let body = vec![
+        at(0.05, 0.6),
+        at(0.55, 0.1),
+        at(0.95, 0.5),
+        at(0.45, 1.0),
+        at(0.05, 0.6),
+    ];
+    painter.add(Shape::line(body, Stroke::new(1.6, color)));
+    painter.line_segment([at(0.3, 0.35), at(0.7, 0.75)], Stroke::new(1.6, color));
 }
 
 fn paint_shape(painter: &Painter, rect: Rect, color: Color32, kind: ShapeKind) {

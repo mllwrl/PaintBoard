@@ -1,4 +1,5 @@
-use pb_core::{Document, ObjectId, ObjectKind};
+use pb_core::{Document, ObjectData, ObjectId, ObjectKind};
+use pb_geom::ink::polyline_distance;
 use pb_geom::kurbo::{Point, Rect};
 
 /// Topmost top-level object or group under `point`. `tolerance` (world units) makes thin
@@ -9,14 +10,77 @@ pub fn object_at(doc: &Document, point: Point, tolerance: f64) -> Option<ObjectI
     doc.objects()
         .iter()
         .rev()
-        .find(|o| match o.data.kind {
-            ObjectKind::Shape(shape) => {
-                let pad = tolerance + o.data.style.stroke_width / 2.0;
-                let local = o.data.frame().to_local(point);
-                shape.hit(o.data.bounds, local, pad)
-            }
-        })
+        .find(|o| hits(&o.data, point, tolerance))
         .map(|o| doc.top_level(o.id))
+}
+
+/// Whether the object reaches into `area` (world): its frame for shapes, its line for ink.
+fn touches(data: &ObjectData, area: Rect) -> bool {
+    if !data.frame().overlaps(area) {
+        return false;
+    }
+    match &data.kind {
+        ObjectKind::Shape(_) => true,
+        ObjectKind::Ink(ink) => {
+            let frame = data.frame();
+            let points: Vec<_> = ink
+                .points_in(data.bounds)
+                .into_iter()
+                .map(|(p, _)| frame.to_world(p))
+                .collect();
+            match &points[..] {
+                [only] => area.contains(*only),
+                _ => points.windows(2).any(|w| segment_touches(w[0], w[1], area)),
+            }
+        }
+    }
+}
+
+/// Whether the segment `a`-`b` has a point inside `rect` (Liang–Barsky clipping).
+fn segment_touches(a: Point, b: Point, rect: Rect) -> bool {
+    let d = b - a;
+    let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
+    for (p, q) in [
+        (-d.x, a.x - rect.x0),
+        (d.x, rect.x1 - a.x),
+        (-d.y, a.y - rect.y0),
+        (d.y, rect.y1 - a.y),
+    ] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return false;
+            }
+        } else {
+            let t = q / p;
+            if p < 0.0 {
+                t0 = t0.max(t);
+            } else {
+                t1 = t1.min(t);
+            }
+        }
+    }
+    t0 <= t1
+}
+
+/// Whether `point` (world) is on the object or within `tolerance` of what it paints.
+pub(crate) fn hits(data: &ObjectData, point: Point, tolerance: f64) -> bool {
+    let pad = tolerance + data.style.stroke_width / 2.0;
+    let local = data.frame().to_local(point);
+    match &data.kind {
+        ObjectKind::Shape(shape) => shape.hit(data.bounds, local, pad),
+        // Ink is hit along its line, not anywhere in its bounds.
+        ObjectKind::Ink(ink) => {
+            if !data.bounds.inflate(pad, pad).contains(local) {
+                return false;
+            }
+            let points: Vec<_> = ink
+                .points_in(data.bounds)
+                .into_iter()
+                .map(|(p, _)| p)
+                .collect();
+            polyline_distance(&points, local) <= pad
+        }
+    }
 }
 
 /// Unlocked top-level objects and groups touched by `area`, in z-order.
@@ -24,7 +88,7 @@ pub fn objects_in(doc: &Document, area: Rect) -> Vec<ObjectId> {
     let mut ids = Vec::new();
     for object in doc.objects() {
         let id = doc.top_level(object.id);
-        if object.data.frame().overlaps(area) && !ids.contains(&id) && !doc.is_locked(id) {
+        if touches(&object.data, area) && !ids.contains(&id) && !doc.is_locked(id) {
             ids.push(id);
         }
     }

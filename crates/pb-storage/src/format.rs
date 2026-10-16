@@ -87,7 +87,7 @@ mod tests {
             style: Style::default(),
         };
         let ids = doc
-            .apply(Command::Create(vec![data.into(), data.into()]))
+            .apply(Command::Create(vec![data.clone().into(), data.into()]))
             .unwrap()
             .created;
         doc.apply(Command::Group(ids)).unwrap();

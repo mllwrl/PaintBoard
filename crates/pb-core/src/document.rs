@@ -12,7 +12,7 @@ use pb_geom::normalize_angle;
 
 use crate::command::reorder;
 use crate::{
-    Applied, Command, Content, Group, Object, ObjectData, ObjectId, ObjectKind, Rgba, Style,
+    Applied, Command, Content, Group, Ink, Object, ObjectData, ObjectId, ObjectKind, Rgba, Style,
     StyleChange, ZOrder,
 };
 
@@ -37,6 +37,8 @@ mod key {
     pub const STROKE_WIDTH: &str = "strokeWidth";
     pub const OPACITY: &str = "opacity";
     pub const LOCKED: &str = "locked";
+    /// Points of an ink stroke, see `Ink::to_bytes`.
+    pub const POINTS: &str = "points";
 
     /// `kind` of group nodes.
     pub const GROUP: &str = "group";
@@ -214,7 +216,7 @@ impl Document {
     /// A copy of `id` and everything inside it, e.g. for the clipboard.
     pub fn content(&self, id: ObjectId) -> Option<Content> {
         match self.get(id) {
-            Some(object) => Some(Content::Object(object.data)),
+            Some(object) => Some(Content::Object(object.data.clone())),
             None => Some(Content::Group(
                 self.groups
                     .get(&id)?
@@ -574,6 +576,9 @@ fn is_group(meta: &LoroMap) -> bool {
 
 fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
     meta.insert(key::KIND, data.kind.as_str())?;
+    if let ObjectKind::Ink(ink) = &data.kind {
+        meta.insert(key::POINTS, ink.to_bytes())?;
+    }
     write_bounds(meta, data.bounds.abs())?;
     meta.insert(key::ROTATION, normalize_angle(data.rotation))?;
     let style = data.style;
@@ -615,7 +620,17 @@ fn write_bounds(meta: &LoroMap, bounds: Rect) -> Result<()> {
 
 fn read_data(meta: &LoroMap) -> Option<ObjectData> {
     let kind = match meta.get(key::KIND)? {
-        ValueOrContainer::Value(LoroValue::String(s)) => ObjectKind::parse(&s)?,
+        ValueOrContainer::Value(LoroValue::String(s)) if &**s == "ink" => {
+            match meta.get(key::POINTS)? {
+                ValueOrContainer::Value(LoroValue::Binary(bytes)) => {
+                    ObjectKind::Ink(Ink::from_bytes(&bytes)?)
+                }
+                _ => return None,
+            }
+        }
+        ValueOrContainer::Value(LoroValue::String(s)) => {
+            ObjectKind::Shape(ObjectKind::parse_shape(&s)?)
+        }
         _ => return None,
     };
     let num = |k| match meta.get(k) {
@@ -1119,6 +1134,41 @@ mod tests {
         doc.refresh();
         let style = doc.get(a).unwrap().data.style;
         assert_eq!((style.fill, style.opacity), (red, 0.5));
+    }
+
+    #[test]
+    fn ink_roundtrips_and_follows_its_bounds() {
+        use kurbo::Point;
+        let points = [
+            (Point::new(10.0, 10.0), 1.0),
+            (Point::new(30.0, 20.0), 0.5),
+            (Point::new(50.0, 10.0), 0.25),
+        ];
+        let (ink, bounds) = Ink::from_world(&points).unwrap();
+        assert_eq!(bounds, Rect::new(10.0, 10.0, 50.0, 20.0));
+        let mut data = rect(0.0, 0.0, 0.0, 0.0);
+        data.kind = ObjectKind::Ink(ink.clone());
+        data.bounds = bounds;
+        let mut doc = Document::new();
+        let id = create(&mut doc, data);
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        let stored = &loaded.get(id).unwrap().data;
+        assert_eq!(stored.kind, ObjectKind::Ink(ink.clone()));
+        // Twice as wide: the middle point moves with the bounds.
+        let wide = Rect::new(10.0, 10.0, 90.0, 20.0);
+        assert_eq!(ink.points_in(wide)[1], (Point::new(50.0, 20.0), 0.5));
+        assert!(ink.has_pressure());
+    }
+
+    #[test]
+    fn flat_ink_stays_on_its_line() {
+        use kurbo::Point;
+        let (ink, bounds) =
+            Ink::from_world(&[(Point::new(0.0, 5.0), 1.0), (Point::new(10.0, 5.0), 1.0)]).unwrap();
+        assert_eq!(bounds.height(), 0.0);
+        let taller = Rect::new(0.0, 0.0, 10.0, 10.0);
+        assert_eq!(ink.points_in(taller)[0].0, Point::new(0.0, 5.0));
+        assert!(Ink::from_world(&[]).is_none());
     }
 
     #[test]

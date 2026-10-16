@@ -12,7 +12,7 @@ pub use vello;
 
 use std::collections::HashMap;
 
-use pb_core::{Object, ObjectData};
+use pb_core::{Object, ObjectData, ObjectId};
 use pb_geom::Camera;
 use vello::Scene;
 use vello::kurbo::{Affine, Size};
@@ -54,6 +54,8 @@ pub struct View<'a> {
     pub objects: &'a [Object],
     /// Objects mid-gesture (moved, resized) that replace their stored state.
     pub overrides: &'a [Object],
+    /// Objects not to draw (about to be erased).
+    pub hidden: &'a [ObjectId],
     /// Objects the active tool is about to create, shown on top.
     pub previews: &'a [ObjectData],
     pub overlay: &'a Overlay,
@@ -78,6 +80,7 @@ pub fn build_scene(scene: &mut Scene, view: &View<'_>) {
     let on_screen = view
         .objects
         .iter()
+        .filter(|o| !view.hidden.contains(&o.id))
         .map(|o| overrides.get(&o.id).copied().unwrap_or(&o.data))
         .filter(|data| objects::painted_bounds(data).overlaps(visible));
     for data in on_screen.chain(view.previews) {
