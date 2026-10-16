@@ -1,15 +1,15 @@
 use pb_core::connector::ConnectorPath;
 use pb_core::{
-    Assets, FrameData, HAlign, Image, Label, ObjectData, ObjectKind, Rgba, Style, TextBox,
+    Assets, FrameData, HAlign, Image, Label, ObjectData, ObjectKind, Rgba, Span, Spans, Style,
+    TextBox,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use pb_geom::ink::{smooth_path, variable_outline};
-use pb_text::{TextAlign, TextEngine};
+use pb_text::{TextAlign, TextEngine, TextLayout};
 use vello::Scene;
 use vello::kurbo::{Affine, BezPath, Cap, Join, Line, Rect, Shape, Stroke};
-use vello::peniko::{Blob, FontData};
 use vello::peniko::{Color, Fill, Mix};
 
 /// Ink never gets thinner than this fraction of its width, however light the pressure.
@@ -29,10 +29,16 @@ const FRAME_TITLE: Color = Color::from_rgb8(0x5F, 0x63, 0x68);
 /// Fitted sizes kept by [`TextRenderer`]; the cache is dropped when it grows past this.
 const FIT_CACHE_LIMIT: usize = 4096;
 
-/// Font size of text fitted into a sticky note or shape: as large as fits in its box.
-pub fn fitted_font_size(engine: &mut TextEngine, text: &str, text_box: TextBox) -> f64 {
+/// Font size of text with `spans` fitted into a sticky note or shape: as large as fits
+/// in its box.
+pub fn fitted_font_size(
+    engine: &mut TextEngine,
+    text: &str,
+    spans: &[Span],
+    text_box: TextBox,
+) -> f64 {
     let area = text_box.area;
-    engine.fit_size(text, area.width(), area.height(), text_box.max_size)
+    engine.fit_size(text, spans, area.width(), area.height(), text_box.max_size)
 }
 
 /// How lines aligned with `align` are laid out.
@@ -49,24 +55,23 @@ pub fn text_align(align: HAlign) -> TextAlign {
 /// TODO: cache layouts per object; laying out every text each frame will not scale.
 pub struct TextRenderer {
     engine: TextEngine,
-    font: FontData,
-    /// Font sizes of fitted text by text and box, as fitting takes several layouts.
-    fitted: HashMap<(Arc<str>, [u64; 3]), f64>,
+    /// Font sizes of fitted text by text, styles and box, as fitting takes several layouts.
+    fitted: HashMap<(Arc<str>, Spans, [u64; 3]), f64>,
 }
 
 impl TextRenderer {
     pub fn new() -> Self {
         Self {
             engine: TextEngine::new(),
-            font: FontData::new(Blob::new(Arc::new(pb_text::FONT)), 0),
             fitted: HashMap::new(),
         }
     }
 
-    fn fitted_font_size(&mut self, text: &Arc<str>, text_box: TextBox) -> f64 {
+    fn fitted_font_size(&mut self, text: &Arc<str>, spans: &Spans, text_box: TextBox) -> f64 {
         let area = text_box.area;
         let key = (
             text.clone(),
+            spans.clone(),
             [area.width(), area.height(), text_box.max_size].map(f64::to_bits),
         );
         if let Some(&size) = self.fitted.get(&key) {
@@ -75,61 +80,31 @@ impl TextRenderer {
         if self.fitted.len() >= FIT_CACHE_LIMIT {
             self.fitted.clear();
         }
-        let size = fitted_font_size(&mut self.engine, text, text_box);
+        let size = fitted_font_size(&mut self.engine, text, spans, text_box);
         self.fitted.insert(key, size);
         size
     }
 
-    /// Draws `text` fitted into `text_box`, centered in it.
+    /// Draws `text` with `spans` fitted into `text_box` and aligned in it.
     fn draw_fitted(
         &mut self,
         scene: &mut Scene,
         transform: Affine,
-        text: &Arc<str>,
+        (text, spans): (&Arc<str>, &Spans),
         text_box: TextBox,
         brush: Color,
     ) {
         if text.is_empty() {
             return;
         }
-        let size = self.fitted_font_size(text, text_box);
+        let size = self.fitted_font_size(text, spans, text_box);
         let area = text_box.area;
         let align = text_align(text_box.align);
         let layout = self
             .engine
-            .layout_aligned(text, size, Some(area.width()), align);
+            .layout_aligned(text, spans, size, Some(area.width()), align);
         let top = text_box.top(layout.height);
-        self.draw(
-            scene,
-            transform,
-            (area.x0, top),
-            size,
-            &layout.glyphs,
-            brush,
-        );
-    }
-
-    /// Draws `text` laid out at `size`, its top-left corner at `origin` in `transform`.
-    fn draw(
-        &mut self,
-        scene: &mut Scene,
-        transform: Affine,
-        origin: (f64, f64),
-        size: f64,
-        glyphs: &[pb_text::Glyph],
-        brush: Color,
-    ) {
-        let glyphs = glyphs.iter().map(|g| vello::Glyph {
-            id: g.id,
-            x: g.x,
-            y: g.y,
-        });
-        scene
-            .draw_glyphs(&self.font)
-            .font_size(size as f32)
-            .transform(transform * Affine::translate(origin))
-            .brush(brush)
-            .draw(Fill::NonZero, glyphs);
+        draw_text(scene, transform, (area.x0, top), &layout, brush);
     }
 
     /// For measuring text before creating objects.
@@ -141,6 +116,42 @@ impl TextRenderer {
 impl Default for TextRenderer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Draws a laid out text, its top-left corner at `origin` in `transform`. Runs without a
+/// color of their own take `brush`.
+fn draw_text(
+    scene: &mut Scene,
+    transform: Affine,
+    origin: (f64, f64),
+    layout: &TextLayout,
+    brush: Color,
+) {
+    let transform = transform * Affine::translate(origin);
+    let paint = |b: pb_text::Brush| b.map_or(brush, color);
+    for run in &layout.runs {
+        let glyphs = run.glyphs.iter().map(|g| vello::Glyph {
+            id: g.id,
+            x: g.x,
+            y: g.y,
+        });
+        scene
+            .draw_glyphs(&run.font)
+            .font_size(run.size)
+            .transform(transform)
+            .brush(paint(run.brush))
+            .draw(Fill::NonZero, glyphs);
+    }
+    for d in &layout.decorations {
+        let half = f64::from(d.thickness) / 2.0;
+        let bar = Rect::new(
+            f64::from(d.x0),
+            f64::from(d.y) - half,
+            f64::from(d.x1),
+            f64::from(d.y) + half,
+        );
+        scene.fill(Fill::NonZero, transform, paint(d.brush), None, &bar);
     }
 }
 
@@ -202,25 +213,27 @@ pub(crate) fn draw_object(
             }
             if let Some(text_box) = data.text_box() {
                 let brush = color(style.text_color());
-                text.draw_fitted(scene, transform, &shape.text, text_box, brush);
+                text.draw_fitted(
+                    scene,
+                    transform,
+                    (&shape.text, &shape.spans),
+                    text_box,
+                    brush,
+                );
             }
         }
         ObjectKind::Text(content) => {
             let b = data.bounds;
             // A hair of slack, so text measured to fit exactly does not wrap.
-            let layout = text
-                .engine
-                .layout(&content.text, content.size, Some(b.width() + 0.5));
-            let top = b.y0 + (b.height() - layout.height) / 2.0;
-            let brush = color(style.stroke);
-            text.draw(
-                scene,
-                transform,
-                (b.x0, top),
+            let layout = text.engine.layout_aligned(
+                &content.text,
+                &content.spans,
                 content.size,
-                &layout.glyphs,
-                brush,
+                Some(b.width() + 0.5),
+                TextAlign::Start,
             );
+            let top = b.y0 + (b.height() - layout.height) / 2.0;
+            draw_text(scene, transform, (b.x0, top), &layout, color(style.stroke));
         }
         ObjectKind::Sticky(sticky) => {
             let b = data.bounds;
@@ -238,7 +251,7 @@ pub(crate) fn draw_object(
                 text.draw_fitted(
                     scene,
                     transform,
-                    &sticky.text,
+                    (&sticky.text, &sticky.spans),
                     text_box,
                     color(style.stroke),
                 );
@@ -257,14 +270,7 @@ pub(crate) fn draw_object(
                 let top = b.y0 - FrameData::TITLE_GAP / zoom - layout.height;
                 // A long title is cut at the frame's width.
                 scene.push_clip_layer(Fill::NonZero, transform, &band);
-                text.draw(
-                    scene,
-                    transform,
-                    (b.x0, top),
-                    size,
-                    &layout.glyphs,
-                    FRAME_TITLE,
-                );
+                draw_text(scene, transform, (b.x0, top), &layout, FRAME_TITLE);
                 scene.pop_layer();
             }
         }
@@ -343,10 +349,10 @@ pub(crate) fn draw_connector(
         let size = Label::FONT_SIZE;
         let layout = text
             .engine
-            .layout_aligned(&label.text, size, None, TextAlign::Center);
+            .layout_aligned(&label.text, &[], size, None, TextAlign::Center);
         let c = r.center();
         let origin = (c.x - layout.width / 2.0, c.y - layout.height / 2.0);
-        text.draw(scene, transform, origin, size, &layout.glyphs, brush);
+        draw_text(scene, transform, origin, &layout, brush);
     }
     if layered {
         scene.pop_layer();

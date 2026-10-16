@@ -3,7 +3,7 @@ use std::sync::Arc;
 use kurbo::{Rect, Vec2};
 use pb_geom::Frame;
 
-use crate::{ConnectorChange, Content, Label, ObjectId, StyleChange};
+use crate::{ConnectorChange, Content, Label, ObjectId, Spans, StyleChange};
 
 /// A user-level edit. Each applied command is one undo step and, later, one unit of sync.
 ///
@@ -39,6 +39,8 @@ pub enum Command {
     SetText {
         id: ObjectId,
         text: Arc<str>,
+        /// Inline styles of `text`; a frame's title has none.
+        spans: Spans,
         bounds: Rect,
     },
     /// Shows another part of an image's picture (see `Image::crop`) over new bounds.

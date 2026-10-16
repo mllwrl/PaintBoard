@@ -6,7 +6,7 @@ use kurbo::{Point, Rect, Vec2};
 use loro::TreeID;
 use pb_geom::{Frame, ShapeKind};
 
-use crate::{AssetId, Connector};
+use crate::{AssetId, Connector, Span, Spans};
 
 /// Stable identifier of a board object, unique across replicas.
 ///
@@ -109,6 +109,16 @@ impl ObjectKind {
             Self::Shape(shape) => Some(&shape.text),
             Self::Frame(frame) => Some(&frame.title),
             Self::Ink(_) | Self::Image(_) | Self::Connector(_) => None,
+        }
+    }
+
+    /// Inline styles of the text of a text object, sticky note or shape.
+    pub fn spans(&self) -> &[Span] {
+        match self {
+            Self::Text(text) => &text.spans,
+            Self::Sticky(sticky) => &sticky.spans,
+            Self::Shape(shape) => &shape.spans,
+            Self::Frame(_) | Self::Ink(_) | Self::Image(_) | Self::Connector(_) => &[],
         }
     }
 }
@@ -238,6 +248,8 @@ impl VAlign {
 pub struct Shape {
     pub kind: ShapeKind,
     pub text: Arc<str>,
+    /// Inline styles of `text`.
+    pub spans: Spans,
 }
 
 impl Shape {
@@ -268,12 +280,13 @@ impl From<ShapeKind> for Shape {
         Self {
             kind,
             text: Arc::from(""),
+            spans: Spans::default(),
         }
     }
 }
 
 /// Color as `0xRRGGBBAA`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Rgba(pub u32);
 
 impl Rgba {
@@ -382,6 +395,8 @@ impl StyleChange {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Text {
     pub text: Arc<str>,
+    /// Inline styles of `text`.
+    pub spans: Spans,
     /// Font size in world units.
     pub size: f64,
 }
@@ -390,6 +405,8 @@ pub struct Text {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sticky {
     pub text: Arc<str>,
+    /// Inline styles of `text`.
+    pub spans: Spans,
 }
 
 impl Sticky {

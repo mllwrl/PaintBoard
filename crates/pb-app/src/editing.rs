@@ -5,14 +5,14 @@
 //! the whole edit and autosave and sync see finished text only.
 
 use pb_core::{
-    Command, Document, FrameData, Label, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Sticky,
-    Style, Text, TextBox,
+    Command, Document, FrameData, Label, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Span,
+    Sticky, Style, Text, TextBox, TextMarks,
 };
 use pb_geom::kurbo::{Point, Rect, Size, Vec2};
 use pb_geom::{Frame, ShapeKind};
 use pb_platform::{Duration, Instant, clipboard};
 use pb_render::{TextEditOverlay, fitted_font_size, text_align};
-use pb_text::{Motion, TextAlign, TextEditor, TextEngine, TextRect};
+use pb_text::{Mark, Motion, TextAlign, TextEditor, TextEngine, TextRect};
 use winit::event::{ElementState, Ime, KeyEvent};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
@@ -96,6 +96,7 @@ pub struct TextEdit {
     style: Style,
     /// Text when editing started, to skip edits that change nothing.
     original: String,
+    original_spans: Vec<Span>,
     selecting: bool,
     /// Last input; the caret blinks from then on, starting shown.
     active_at: Instant,
@@ -126,6 +127,7 @@ impl TextEdit {
                 ..Style::default()
             },
             original: String::new(),
+            original_spans: Vec::new(),
             selecting: false,
             active_at: Instant::now(),
             caret_drawn: false,
@@ -139,20 +141,20 @@ impl TextEdit {
             bounds,
             shape: None,
         };
-        Self::fitted(engine, Target::New, "", placement, 0.0, style)
+        Self::fitted(engine, Target::New, ("", &[]), placement, 0.0, style)
     }
 
     /// Text fitted into a sticky note or shape; `placement` is [`Placement::Fitted`].
     fn fitted(
         engine: &mut TextEngine,
         target: Target,
-        text: &str,
+        (text, spans): (&str, &[Span]),
         placement: Placement,
         rotation: f64,
         style: Style,
     ) -> Self {
         let text_box = placement.text_box(&style).expect("fitted placement");
-        let mut editor = TextEditor::new(engine, text, text_box.max_size);
+        let mut editor = TextEditor::with_spans(engine, text, spans, text_box.max_size);
         editor.set_wrap(Some(text_box.area.width()), text_align(text_box.align));
         let mut this = Self {
             target,
@@ -161,6 +163,7 @@ impl TextEdit {
             rotation,
             style,
             original: text.to_owned(),
+            original_spans: spans.to_vec(),
             selecting: false,
             active_at: Instant::now(),
             caret_drawn: false,
@@ -178,7 +181,7 @@ impl TextEdit {
     }
 
     fn text_editor(engine: &mut TextEngine, text: &Text, bounds: Rect) -> TextEditor {
-        let mut editor = TextEditor::new(engine, &text.text, text.size);
+        let mut editor = TextEditor::with_spans(engine, &text.text, &text.spans, text.size);
         if let Some(width) = Self::wrap_width(engine, text, bounds) {
             // Wrapped as drawn, see `pb_render`.
             editor.set_wrap(Some(width + WRAP_SLACK), TextAlign::Start);
@@ -209,6 +212,7 @@ impl TextEdit {
                 rotation: data.rotation,
                 style: data.style,
                 original: text.text.to_string(),
+                original_spans: text.spans.to_vec(),
                 selecting: false,
                 active_at: Instant::now(),
                 caret_drawn: false,
@@ -217,7 +221,7 @@ impl TextEdit {
             ObjectKind::Sticky(sticky) => Some(Self::fitted(
                 engine,
                 target,
-                &sticky.text,
+                (&sticky.text, &sticky.spans),
                 Placement::Fitted {
                     bounds: data.bounds,
                     shape: None,
@@ -228,7 +232,7 @@ impl TextEdit {
             ObjectKind::Shape(shape) => Some(Self::fitted(
                 engine,
                 target,
-                &shape.text,
+                (&shape.text, &shape.spans),
                 Placement::Fitted {
                     bounds: data.bounds,
                     shape: Some(shape.kind),
@@ -254,6 +258,7 @@ impl TextEdit {
                     rotation: 0.0,
                     style: data.style,
                     original: c.label.text.to_string(),
+                    original_spans: Vec::new(),
                     selecting: false,
                     active_at: Instant::now(),
                     caret_drawn: false,
@@ -270,6 +275,7 @@ impl TextEdit {
                 rotation: 0.0,
                 style: data.style,
                 original: frame.title.to_string(),
+                original_spans: Vec::new(),
                 selecting: false,
                 active_at: Instant::now(),
                 caret_drawn: false,
@@ -282,7 +288,8 @@ impl TextEdit {
     /// Sizes fitted text to fit, after it changed.
     fn refit(&mut self, engine: &mut TextEngine) {
         if let Some(text_box) = self.placement.text_box(&self.style) {
-            let size = fitted_font_size(engine, &self.editor.display_text(), text_box);
+            let (text, spans) = (self.editor.display_text(), self.editor.display_spans());
+            let size = fitted_font_size(engine, &text, &spans, text_box);
             self.editor.set_size(size);
         }
     }
@@ -372,6 +379,37 @@ impl TextEdit {
         self.frame(engine).contains(world, pad)
     }
 
+    /// Whether the text takes inline styles: connector labels and frame titles do not.
+    pub fn is_rich(&self) -> bool {
+        matches!(
+            self.placement,
+            Placement::Free { .. } | Placement::Fitted { .. }
+        )
+    }
+
+    /// The marks of the selection or of what is typed next; `None` for plain text.
+    pub fn marks(&self) -> Option<TextMarks> {
+        self.is_rich().then(|| self.editor.marks())
+    }
+
+    /// Turns a mark on or off for the selection, or for what is typed next.
+    pub fn toggle_mark(&mut self, engine: &mut TextEngine, mark: Mark) {
+        if self.is_rich() {
+            self.touch();
+            self.editor.toggle(engine, mark);
+            self.refit(engine);
+        }
+    }
+
+    /// Colors the selection, or what is typed next; `None` for the object's text color.
+    pub fn set_mark_color(&mut self, engine: &mut TextEngine, color: Option<Rgba>) {
+        if self.is_rich() {
+            self.touch();
+            self.editor.set_color(engine, color);
+            self.refit(engine);
+        }
+    }
+
     /// Restarts the caret's blinking, shown, after input.
     fn touch(&mut self) {
         self.active_at = Instant::now();
@@ -446,6 +484,18 @@ impl TextEdit {
         if ctrl && let PhysicalKey::Code(code) = event.physical_key {
             match code {
                 KeyCode::KeyA => ed.select_all(engine),
+                KeyCode::KeyB | KeyCode::KeyI | KeyCode::KeyU | KeyCode::KeyX
+                    if (code != KeyCode::KeyX) != shift =>
+                {
+                    let mark = match code {
+                        KeyCode::KeyB => Mark::Bold,
+                        KeyCode::KeyI => Mark::Italic,
+                        KeyCode::KeyU => Mark::Underline,
+                        _ => Mark::Strike,
+                    };
+                    self.toggle_mark(engine, mark);
+                    return KeyOutcome::Handled;
+                }
                 KeyCode::KeyC => {
                     if let Some(text) = ed.selected_text() {
                         clipboard::set_text(&text);
@@ -582,18 +632,27 @@ impl TextEdit {
         let frame = self.frame(engine);
         let bounds = self.object_bounds(engine);
         let text = display.into();
+        let spans: pb_core::Spans = self.editor.display_spans().into();
         ObjectData {
             kind: match self.placement {
                 Placement::Free { .. } => ObjectKind::Text(Text {
+                    spans: spans.clone(),
                     text,
                     size: self.editor.size(),
                 }),
                 Placement::Fitted {
                     shape: Some(kind), ..
-                } => ObjectKind::Shape(Shape { kind, text }),
+                } => ObjectKind::Shape(Shape {
+                    spans: spans.clone(),
+                    kind,
+                    text,
+                }),
                 Placement::Title { .. } => ObjectKind::Frame(FrameData { title: text }),
                 Placement::Fitted { shape: None, .. } | Placement::Label { .. } => {
-                    ObjectKind::Sticky(Sticky { text })
+                    ObjectKind::Sticky(Sticky {
+                        spans: spans.clone(),
+                        text,
+                    })
                 }
             },
             bounds,
@@ -655,11 +714,13 @@ impl TextEdit {
             let label = self.label(engine, text)?;
             return Some(Command::SetLabel { id, label });
         }
+        let spans = self.editor.spans();
         let empty = text.trim().is_empty() && matches!(self.placement, Placement::Free { .. });
         match self.target {
-            Target::Existing(_) if text == self.original => None,
+            Target::Existing(_) if text == self.original && spans == self.original_spans => None,
             Target::Existing(id) if empty => Some(Command::Delete(vec![id])),
             Target::Existing(id) => Some(Command::SetText {
+                spans: spans.into(),
                 id,
                 text: text.into(),
                 bounds: self.object_bounds(engine),
@@ -700,6 +761,7 @@ mod tests {
         let mut doc = Document::new();
         let data = ObjectData {
             kind: ObjectKind::Text(Text {
+                spans: Default::default(),
                 text: text.into(),
                 size: 20.0,
             }),
@@ -724,7 +786,9 @@ mod tests {
         let mut edit = TextEdit::existing(&mut e, &doc, object, None, 1.0).unwrap();
         edit.editor.insert(&mut e, "d");
         match edit.finish(&mut e) {
-            Some(Command::SetText { id, text, bounds }) => {
+            Some(Command::SetText {
+                id, text, bounds, ..
+            }) => {
                 assert_eq!(id, object);
                 assert_eq!(&*text, "abcd");
                 assert_eq!(bounds.origin(), Point::new(10.0, 10.0));
@@ -779,6 +843,7 @@ mod tests {
         let mut doc = Document::new();
         let data = ObjectData {
             kind: ObjectKind::Sticky(Sticky {
+                spans: Default::default(),
                 text: "idea".into(),
             }),
             bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
@@ -864,6 +929,7 @@ mod tests {
         };
         let data = ObjectData {
             kind: ObjectKind::Shape(Shape {
+                spans: Default::default(),
                 kind: pb_geom::ShapeKind::Rectangle,
                 text: "hi".into(),
             }),
@@ -971,6 +1037,23 @@ mod tests {
         };
         assert_eq!(&*text, "Roadmap");
         assert_eq!(kept, bounds);
+    }
+
+    #[test]
+    fn styling_alone_is_an_edit_and_labels_take_none() {
+        let mut e = engine();
+        let (doc, object) = text_object("abc");
+        let mut edit = TextEdit::existing(&mut e, &doc, object, None, 1.0).unwrap();
+        assert_eq!(edit.marks(), Some(TextMarks::default()));
+        edit.select_all(&mut e);
+        edit.toggle_mark(&mut e, Mark::Bold);
+        assert!(edit.marks().unwrap().bold);
+        let Some(Command::SetText { text, spans, .. }) = edit.finish(&mut e) else {
+            panic!("expected SetText");
+        };
+        assert_eq!(&*text, "abc");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].range(), 0..3);
     }
 
     #[test]

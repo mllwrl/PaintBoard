@@ -2,7 +2,12 @@
 
 use std::borrow::Cow;
 
-use parley::{FontFamily, FontFamilyName, PlainEditor, PlainEditorDriver, StyleProperty};
+use parley::{FontFamily, FontFamilyName, StyleProperty};
+
+use pb_core::Rgba;
+use pb_core::rich::{self, Span, TextMarks};
+
+use crate::rich_editor::{RichEditor, RichEditorDriver};
 
 use crate::{FAMILY, LINE_HEIGHT, TextAlign, TextEngine, TextLayout, extract};
 
@@ -42,12 +47,43 @@ enum EditKind {
     Other,
 }
 
-/// Text and selection (anchor, focus as byte offsets) before an edit.
+/// Text, styles and selection (anchor, focus as byte offsets) before an edit.
 #[derive(Clone, Debug, PartialEq)]
 struct Snapshot {
     text: String,
+    spans: Vec<Span>,
     anchor: usize,
     focus: usize,
+}
+
+/// A mark that is on or off, see [`TextMarks`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mark {
+    Bold,
+    Italic,
+    Underline,
+    Strike,
+}
+
+impl Mark {
+    fn get(self, m: &TextMarks) -> bool {
+        match self {
+            Self::Bold => m.bold,
+            Self::Italic => m.italic,
+            Self::Underline => m.underline,
+            Self::Strike => m.strike,
+        }
+    }
+
+    fn set(self, mut m: TextMarks, on: bool) -> TextMarks {
+        match self {
+            Self::Bold => m.bold = on,
+            Self::Italic => m.italic = on,
+            Self::Underline => m.underline = on,
+            Self::Strike => m.strike = on,
+        }
+        m
+    }
 }
 
 /// An editable text with the same layout as displayed text (see [`TextEngine::layout`]).
@@ -55,7 +91,7 @@ struct Snapshot {
 /// Keeps its own undo history while it lives: consecutive typing or deleting is one step,
 /// and a space, a cursor move or another kind of edit starts the next.
 pub struct TextEditor {
-    editor: PlainEditor<()>,
+    editor: RichEditor,
     size: f64,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
@@ -66,8 +102,13 @@ pub struct TextEditor {
 impl TextEditor {
     /// Starts with the cursor at the end of `text`.
     pub fn new(engine: &mut TextEngine, text: &str, size: f64) -> Self {
-        let mut editor = PlainEditor::new(size as f32);
-        editor.set_text(text);
+        Self::with_spans(engine, text, &[], size)
+    }
+
+    /// Like [`Self::new`], for text with inline styles.
+    pub fn with_spans(engine: &mut TextEngine, text: &str, spans: &[Span], size: f64) -> Self {
+        let mut editor = RichEditor::new(size as f32);
+        editor.set_text(text, spans);
         editor.set_width(None);
         editor.set_alignment(parley::Alignment::Start);
         // Unrounded, like displayed text, so nothing shifts when editing ends.
@@ -90,7 +131,7 @@ impl TextEditor {
         this
     }
 
-    fn driver<'a>(&'a mut self, engine: &'a mut TextEngine) -> PlainEditorDriver<'a, ()> {
+    fn driver<'a>(&'a mut self, engine: &'a mut TextEngine) -> RichEditorDriver<'a> {
         self.editor.driver(&mut engine.fonts, &mut engine.layouts)
     }
 
@@ -124,6 +165,75 @@ impl TextEditor {
         self.editor.raw_text().to_owned()
     }
 
+    /// Inline styles of [`Self::text`]; meant for when no IME composition is in progress.
+    pub fn spans(&self) -> Vec<Span> {
+        self.editor.spans().to_vec()
+    }
+
+    /// Inline styles of [`Self::display_text`].
+    pub fn display_spans(&self) -> Vec<Span> {
+        self.editor.spans().to_vec()
+    }
+
+    fn selection_range(&self) -> std::ops::Range<usize> {
+        self.editor.raw_selection().text_range()
+    }
+
+    /// The marks the selection has throughout (a mark is on only if all of it has it),
+    /// or those the next typed text gets.
+    pub fn marks(&self) -> TextMarks {
+        let range = self.selection_range();
+        if range.is_empty() {
+            return self
+                .editor
+                .insert_marks()
+                .unwrap_or_else(|| rich::marks_for_typing(self.editor.spans(), range.start));
+        }
+        let spans = self.editor.spans();
+        let on = |mark: Mark| rich::all(spans, range.clone(), |m| mark.get(m));
+        let first = rich::marks_at(spans, range.start).color;
+        TextMarks {
+            bold: on(Mark::Bold),
+            italic: on(Mark::Italic),
+            underline: on(Mark::Underline),
+            strike: on(Mark::Strike),
+            color: first.filter(|_| rich::all(spans, range.clone(), |m| m.color == first)),
+        }
+    }
+
+    /// Turns `mark` on for the selection, or off if all of it has it already. With nothing
+    /// selected, it is for the text typed next.
+    pub fn toggle(&mut self, engine: &mut TextEngine, mark: Mark) {
+        let on = !mark.get(&self.marks());
+        self.restyle(engine, |m| mark.set(m, on));
+    }
+
+    /// Colors the selection, or the text typed next; `None` for the text's own color.
+    pub fn set_color(&mut self, engine: &mut TextEngine, color: Option<Rgba>) {
+        self.restyle(engine, |m| TextMarks { color, ..m });
+    }
+
+    fn restyle(&mut self, engine: &mut TextEngine, change: impl Fn(TextMarks) -> TextMarks) {
+        let range = self.selection_range();
+        if range.is_empty() {
+            let marks = change(self.marks());
+            self.editor.set_insert_marks(Some(marks));
+            // Text typed in the new style is a step of its own.
+            self.last_edit = None;
+            return;
+        }
+        let before = self.snapshot();
+        let len = self.editor.raw_text().len();
+        let spans = rich::apply(self.editor.spans(), range, len, change);
+        self.editor.set_spans(spans);
+        self.driver(engine).refresh_layout();
+        if self.editor.spans() != before.spans.as_slice() {
+            self.undo.push(before);
+            self.redo.clear();
+            self.last_edit = None;
+        }
+    }
+
     pub fn selected_text(&self) -> Option<String> {
         self.editor.selected_text().map(str::to_owned)
     }
@@ -136,13 +246,14 @@ impl TextEditor {
         let selection = self.editor.raw_selection();
         Snapshot {
             text: self.text(),
+            spans: self.spans(),
             anchor: selection.anchor().index(),
             focus: selection.focus().index(),
         }
     }
 
     fn restore(&mut self, engine: &mut TextEngine, snapshot: &Snapshot) {
-        self.editor.set_text(&snapshot.text);
+        self.editor.set_text(&snapshot.text, &snapshot.spans);
         self.driver(engine)
             .select_byte_range(snapshot.anchor, snapshot.focus);
     }
@@ -152,7 +263,9 @@ impl TextEditor {
     fn edit(&mut self, kind: EditKind, joins: bool, f: impl FnOnce(&mut Self)) {
         let before = self.snapshot();
         f(self);
-        if self.editor.text() == before.text.as_str() {
+        if self.editor.text() == before.text.as_str()
+            && self.editor.spans() == before.spans.as_slice()
+        {
             return;
         }
         let continues = joins && kind != EditKind::Other && self.last_edit == Some(kind);
@@ -163,9 +276,11 @@ impl TextEditor {
         self.last_edit = Some(kind);
     }
 
-    /// Ends the current undo step, so the next edit starts another.
+    /// Ends the current undo step, so the next edit starts another; the cursor moved, so
+    /// marks set for typing there are dropped.
     fn break_step(&mut self) {
         self.last_edit = None;
+        self.editor.set_insert_marks(None);
     }
 
     pub fn can_undo(&self) -> bool {
@@ -433,6 +548,48 @@ mod tests {
     }
 
     #[test]
+    fn marks_apply_to_the_selection_or_what_is_typed_next() {
+        let mut engine = TextEngine::new();
+        let mut ed = TextEditor::new(&mut engine, "one two", 20.0);
+        // Select "two" and make it bold: one undo step.
+        ed.motion(&mut engine, Motion::WordLeft, true);
+        ed.toggle(&mut engine, Mark::Bold);
+        assert!(ed.marks().bold);
+        assert_eq!(ed.spans().len(), 1);
+        assert_eq!(ed.spans()[0].range(), 4..7);
+        // Typing after it continues bold.
+        ed.motion(&mut engine, Motion::TextEnd, false);
+        type_chars(&mut ed, &mut engine, "s");
+        assert_eq!(ed.spans()[0].range(), 4..8);
+        // Bold off for what comes next, then plain typing.
+        ed.toggle(&mut engine, Mark::Bold);
+        type_chars(&mut ed, &mut engine, "!");
+        assert_eq!(ed.text(), "one twos!");
+        assert_eq!(ed.spans()[0].range(), 4..8);
+        assert!(!ed.marks().bold);
+        // The layout as edited matches the layout as shown.
+        let shown = engine.layout_aligned(&ed.text(), &ed.spans(), 20.0, None, TextAlign::Start);
+        assert_eq!(ed.layout(&mut engine), shown);
+        // Undo: the "!", the "s", then the bold.
+        ed.undo(&mut engine);
+        ed.undo(&mut engine);
+        assert_eq!(ed.text(), "one two");
+        assert_eq!(ed.spans()[0].range(), 4..7);
+        ed.undo(&mut engine);
+        assert!(ed.spans().is_empty());
+        // A color over part of the text, and the selection reports it only if uniform.
+        let red = Rgba::rgb(0xF2, 0x55, 0x55);
+        ed.select_all(&mut engine);
+        ed.set_color(&mut engine, Some(red));
+        assert_eq!(ed.marks().color, Some(red));
+        ed.motion(&mut engine, Motion::TextStart, false);
+        ed.motion(&mut engine, Motion::WordRight, true);
+        ed.set_color(&mut engine, None);
+        ed.select_all(&mut engine);
+        assert_eq!(ed.marks().color, None);
+    }
+
+    #[test]
     fn typing_and_deleting() {
         let mut engine = TextEngine::new();
         let mut ed = TextEditor::new(&mut engine, "Hello", 20.0);
@@ -479,8 +636,13 @@ mod tests {
         let mut ed = TextEditor::new(&mut engine, "one two three four", 20.0);
         ed.set_wrap(Some(90.0), TextAlign::Center);
         ed.set_size(16.0);
-        let shown =
-            engine.layout_aligned("one two three four", 16.0, Some(90.0), TextAlign::Center);
+        let shown = engine.layout_aligned(
+            "one two three four",
+            &[],
+            16.0,
+            Some(90.0),
+            TextAlign::Center,
+        );
         assert_eq!(ed.layout(&mut engine), shown);
         assert_eq!(ed.size(), 16.0);
     }

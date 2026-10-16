@@ -28,7 +28,7 @@ use crate::editing::{self, KeyOutcome, NEW_TEXT_SIZE, TextEdit};
 use crate::navigation::Navigation;
 use crate::pictures::{self, Picture};
 use crate::session::Session;
-use crate::ui::{Action, Model, STICKY_COLORS, SelectionInfo, ShapeText, Ui};
+use crate::ui::{Action, Model, STICKY_COLORS, SelectionInfo, ShapeText, TextFormat, Ui};
 
 pub enum UserEvent {
     /// GPU initialization finished (asynchronous on the web).
@@ -260,6 +260,7 @@ impl App {
             grid: self.grid,
             snap: self.tools.snap_to_grid(),
             selection: self.selection_info(),
+            text_format: self.text_format(),
         };
         let actions = match &mut self.ui {
             Some(ui) => ui.run(&window, &model),
@@ -288,6 +289,19 @@ impl App {
         }
     }
 
+    /// What the formatting bar needs while text that takes styles is edited.
+    fn text_format(&mut self) -> Option<TextFormat> {
+        let edit = self.editing.as_mut()?;
+        let marks = edit.marks()?;
+        let area = edit.frame(self.text.engine()).aabb();
+        let a = self.camera.world_to_screen(area.origin());
+        let b = self.camera.world_to_screen(Point::new(area.x1, area.y1));
+        Some(TextFormat {
+            screen: pb_geom::kurbo::Rect::from_points(a, b),
+            marks,
+        })
+    }
+
     /// What the selection toolbar needs; nothing while a gesture is in progress.
     fn selection_info(&mut self) -> Option<SelectionInfo> {
         if self.editing.is_some()
@@ -309,7 +323,8 @@ impl App {
             ObjectKind::Shape(shape) => {
                 let style = o.data.style;
                 let text_box = o.data.text_box()?;
-                let size = fitted_font_size(self.text.engine(), &shape.text, text_box);
+                let size =
+                    fitted_font_size(self.text.engine(), &shape.text, &shape.spans, text_box);
                 Some(ShapeText {
                     color: style.text_color(),
                     size,
@@ -463,6 +478,16 @@ impl App {
             }
             Action::ToText => self.recognize(Recognition::ToText),
             Action::Calculate => self.recognize(Recognition::Calculate),
+            Action::ToggleMark(mark) => {
+                if let Some(edit) = &mut self.editing {
+                    edit.toggle_mark(self.text.engine(), mark);
+                }
+            }
+            Action::MarkColor(color) => {
+                if let Some(edit) = &mut self.editing {
+                    edit.set_mark_color(self.text.engine(), color);
+                }
+            }
         }
     }
 
@@ -851,6 +876,7 @@ impl App {
         let at = place(layout.width, layout.height);
         ObjectData {
             kind: ObjectKind::Text(Text {
+                spans: Default::default(),
                 text: text.into(),
                 size,
             }),

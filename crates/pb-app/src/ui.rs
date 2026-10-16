@@ -11,11 +11,12 @@ use egui::{
 };
 use pb_core::{
     Cap, Connector, ConnectorChange, HAlign, ObjectId, Rgba, Route, ShapeKind, Style, StyleChange,
-    VAlign, ZOrder,
+    TextMarks, VAlign, ZOrder,
 };
 use pb_geom::kurbo::{self, PathEl};
 use pb_platform::Instant;
 use pb_render::{FrameTarget, Gpu, GridStyle};
+use pb_text::Mark;
 use pb_tools::{InkStyle, ToolKind};
 use winit::window::Window;
 
@@ -60,6 +61,10 @@ pub enum Action {
     Crop,
     /// Show and select a frame.
     GoToFrame(ObjectId),
+    /// Turns a mark on or off in the text being edited.
+    ToggleMark(Mark),
+    /// Colors the selected part of the text being edited; `None` for the object's color.
+    MarkColor(Option<Rgba>),
     /// Replace the selected handwriting with typed text.
     ToText,
     /// Solve the selected handwritten expression.
@@ -84,7 +89,28 @@ pub struct Model<'a> {
     pub snap: bool,
     /// Hidden while a gesture is in progress.
     pub selection: Option<SelectionInfo>,
+    /// Styles of the text being edited, if it takes them.
+    pub text_format: Option<TextFormat>,
 }
+
+/// The text being edited, for the formatting bar.
+pub struct TextFormat {
+    /// The edit box on screen, in logical pixels.
+    pub screen: kurbo::Rect,
+    /// Marks of the selection, or of what is typed next.
+    pub marks: TextMarks,
+}
+
+/// Text colors offered while editing; the default color comes first.
+const TEXT_COLORS: [Option<Rgba>; 7] = [
+    None,
+    Some(Rgba::rgb(0xF2, 0x55, 0x55)),
+    Some(Rgba::rgb(0xF5, 0x8A, 0x1F)),
+    Some(Rgba::rgb(0x2E, 0x9E, 0x4F)),
+    Some(Rgba::rgb(0x3B, 0x6E, 0xF5)),
+    Some(Rgba::rgb(0x8E, 0x4D, 0xD6)),
+    Some(Rgba::rgb(0x80, 0x80, 0x80)),
+];
 
 pub struct SelectionInfo {
     /// Selection bounds on screen, in logical pixels.
@@ -258,6 +284,9 @@ impl Ui {
                 selection_toolbar(ctx, selection, popup, &mut actions);
             } else {
                 *popup = None;
+            }
+            if let Some(format) = &model.text_format {
+                format_bar(ctx, format, &mut actions);
             }
         });
         self.state
@@ -905,6 +934,89 @@ fn selection_toolbar(
     {
         *popup = None;
     }
+}
+
+/// Bold, italic, underline, strikethrough and colors for the text being edited, above it.
+fn format_bar(ctx: &Context, format: &TextFormat, actions: &mut Vec<Action>) {
+    let r = format.screen;
+    let (anchor, pivot) = if (r.y0 as f32) - SELECTION_GAP > 90.0 {
+        (
+            Pos2::new(r.center().x as f32, r.y0 as f32 - 12.0),
+            Align2::CENTER_BOTTOM,
+        )
+    } else {
+        (
+            Pos2::new(r.center().x as f32, r.y1 as f32 + 12.0),
+            Align2::CENTER_TOP,
+        )
+    };
+    Area::new(Id::unique("format"))
+        .fixed_pos(anchor)
+        .pivot(pivot)
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            panel().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let m = format.marks;
+                    let marks = [
+                        (
+                            Mark::Bold,
+                            m.bold,
+                            RichText::new("B").strong(),
+                            "Bold (Ctrl+B)",
+                        ),
+                        (
+                            Mark::Italic,
+                            m.italic,
+                            RichText::new("I").italics(),
+                            "Italic (Ctrl+I)",
+                        ),
+                        (
+                            Mark::Underline,
+                            m.underline,
+                            RichText::new("U").underline(),
+                            "Underline (Ctrl+U)",
+                        ),
+                        (
+                            Mark::Strike,
+                            m.strike,
+                            RichText::new("S").strikethrough(),
+                            "Strikethrough (Ctrl+Shift+X)",
+                        ),
+                    ];
+                    for (mark, on, label, tip) in marks {
+                        if ui.selectable_label(on, label).on_hover_text(tip).clicked() {
+                            actions.push(Action::ToggleMark(mark));
+                        }
+                    }
+                    ui.separator();
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    for color in TEXT_COLORS {
+                        let (rect, response) =
+                            ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
+                        // The object's own color is shown as the default dark ink.
+                        let swatch = color.unwrap_or(Rgba::rgb(0x1F, 0x29, 0x37));
+                        paint_swatch(ui.painter(), rect, swatch);
+                        if m.color == color {
+                            ui.painter().rect_stroke(
+                                rect.expand(2.0),
+                                6,
+                                Stroke::new(2.0, ACCENT),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+                        let tip = if color.is_none() {
+                            "Text color of the object"
+                        } else {
+                            "Text color"
+                        };
+                        if response.on_hover_text(tip).clicked() {
+                            actions.push(Action::MarkColor(color));
+                        }
+                    }
+                });
+            });
+        });
 }
 
 fn toggle(popup: &mut Option<Popup>, which: Popup, clicked: bool) {

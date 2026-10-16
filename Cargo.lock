@@ -2799,6 +2799,7 @@ name = "pb-text"
 version = "0.1.0"
 dependencies = [
  "parley",
+ "pb-core",
 ]
 
 [[package]]

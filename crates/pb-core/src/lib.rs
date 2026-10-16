@@ -5,6 +5,7 @@ mod command;
 pub mod connector;
 mod document;
 mod object;
+pub mod rich;
 
 pub use asset::{AssetId, Assets};
 pub use command::{Applied, Command, ZOrder};
@@ -15,3 +16,4 @@ pub use object::{
     ObjectKind, Rgba, Shape, Sticky, Style, StyleChange, Text, TextBox, VAlign,
 };
 pub use pb_geom::ShapeKind;
+pub use rich::{Span, Spans, TextMarks};

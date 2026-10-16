@@ -12,6 +12,7 @@ use pb_geom::ShapeKind;
 use pb_geom::normalize_angle;
 
 use crate::connector::{self, Anchor, Cap, ConnectorPath, EndPoint, Label, Route};
+use crate::rich::{self, Span, Spans};
 
 use crate::command::reorder;
 use crate::{
@@ -54,6 +55,8 @@ mod key {
     pub const POINTS: &str = "points";
     pub const TEXT: &str = "text";
     pub const FONT_SIZE: &str = "fontSize";
+    /// Inline styles of `text`, see `rich::to_bytes`.
+    pub const MARKS: &str = "marks";
     /// Hash of an image's file, see `AssetId`.
     pub const ASSET: &str = "asset";
     /// Shown part of an image, see `Image::crop`.
@@ -457,12 +460,18 @@ impl Document {
                     }
                 }
             }
-            Command::SetText { id, text, bounds } => {
+            Command::SetText {
+                id,
+                text,
+                spans,
+                bounds,
+            } => {
                 if self.get(id).and_then(|o| o.data.kind.text()).is_none() {
                     return Err(Error::UnknownObject(id));
                 }
                 let meta = self.tree.get_meta(self.nodes[&id])?;
                 meta.insert(key::TEXT, &*text)?;
+                write_spans(&meta, &rich::fit_to(&spans, &text))?;
                 write_bounds(&meta, bounds.abs())?;
             }
             Command::SetCrop { id, crop, bounds } => {
@@ -916,8 +925,35 @@ fn is_group(meta: &LoroMap) -> bool {
     )
 }
 
+/// Writes inline styles, or removes them when there are none.
+fn write_spans(meta: &LoroMap, spans: &[Span]) -> Result<()> {
+    if spans.is_empty() {
+        if meta.get(key::MARKS).is_some() {
+            meta.delete(key::MARKS)?;
+        }
+        Ok(())
+    } else {
+        meta.insert(key::MARKS, rich::to_bytes(spans))?;
+        Ok(())
+    }
+}
+
+/// Inline styles stored with a text, fitted to it.
+fn read_spans(meta: &LoroMap, text: &str) -> Spans {
+    match meta.get(key::MARKS) {
+        Some(ValueOrContainer::Value(LoroValue::Binary(bytes))) => {
+            rich::fit_to(&rich::from_bytes(&bytes), text).into()
+        }
+        _ => Spans::default(),
+    }
+}
+
 fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
     meta.insert(key::KIND, data.kind.as_str())?;
+    let spans = data.kind.spans();
+    if !spans.is_empty() {
+        write_spans(meta, spans)?;
+    }
     match &data.kind {
         ObjectKind::Ink(ink) => meta.insert(key::POINTS, ink.to_bytes())?,
         ObjectKind::Text(text) => {
@@ -1202,14 +1238,16 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
                 Some(ValueOrContainer::Value(LoroValue::Double(v))) => v,
                 _ => DEFAULT_FONT_SIZE,
             };
-            ObjectKind::Text(Text { text, size })
+            let spans = read_spans(meta, &text);
+            ObjectKind::Text(Text { text, spans, size })
         }
         ValueOrContainer::Value(LoroValue::String(s)) if &**s == "sticky" => {
             let text = match meta.get(key::TEXT) {
                 Some(ValueOrContainer::Value(LoroValue::String(t))) => Arc::from(&**t),
                 _ => Arc::from(""),
             };
-            ObjectKind::Sticky(Sticky { text })
+            let spans = read_spans(meta, &text);
+            ObjectKind::Sticky(Sticky { text, spans })
         }
         ValueOrContainer::Value(LoroValue::String(s)) if &**s == "frame" => {
             let title = get_str(meta, key::TEXT).unwrap_or_default();
@@ -1245,9 +1283,11 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
                 Some(ValueOrContainer::Value(LoroValue::String(t))) => Arc::from(&**t),
                 _ => Arc::from(""),
             };
+            let spans = read_spans(meta, &text);
             ObjectKind::Shape(Shape {
                 kind: ObjectKind::parse_shape(&s)?,
                 text,
+                spans,
             })
         }
         _ => return None,
@@ -1792,6 +1832,7 @@ mod tests {
         let mut doc = Document::new();
         let mut data = rect(0.0, 0.0, 100.0, 30.0);
         data.kind = ObjectKind::Text(Text {
+            spans: Default::default(),
             text: "2 + 7 = 9, привет".into(),
             size: 18.0,
         });
@@ -1805,6 +1846,7 @@ mod tests {
         let mut doc = Document::new();
         let mut data = rect(0.0, 0.0, 10.0, 10.0);
         data.kind = ObjectKind::Text(Text {
+            spans: Default::default(),
             text: "old".into(),
             size: 12.0,
         });
@@ -1815,6 +1857,7 @@ mod tests {
         let stroke = create(&mut doc, stroke);
         let bounds = Rect::new(0.0, 0.0, 40.0, 15.0);
         doc.apply(Command::SetText {
+            spans: Default::default(),
             id,
             text: "new text".into(),
             bounds,
@@ -1827,6 +1870,7 @@ mod tests {
         assert_eq!(stored.bounds, bounds);
         assert!(
             doc.apply(Command::SetText {
+                spans: Default::default(),
                 id: stroke,
                 text: "x".into(),
                 bounds,
@@ -1843,11 +1887,15 @@ mod tests {
     fn sticky_roundtrips_and_takes_text() {
         let mut doc = Document::new();
         let mut data = rect(0.0, 0.0, 200.0, 200.0);
-        data.kind = ObjectKind::Sticky(Sticky { text: "".into() });
+        data.kind = ObjectKind::Sticky(Sticky {
+            spans: Default::default(),
+            text: "".into(),
+        });
         let id = create(&mut doc, data.clone());
         let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
         assert_eq!(loaded.get(id).unwrap().data, data);
         doc.apply(Command::SetText {
+            spans: Default::default(),
             id,
             text: "идея".into(),
             bounds: data.bounds,
@@ -1865,12 +1913,14 @@ mod tests {
         let id = create(&mut doc, data.clone());
         assert_eq!(doc.get(id).unwrap().data.kind.text(), Some(""));
         doc.apply(Command::SetText {
+            spans: Default::default(),
             id,
             text: "Start".into(),
             bounds: data.bounds,
         })
         .unwrap();
         let expected = ObjectKind::Shape(Shape {
+            spans: Default::default(),
             kind: ShapeKind::Rectangle,
             text: "Start".into(),
         });
@@ -1886,7 +1936,10 @@ mod tests {
         let mut doc = Document::new();
         let shape = create(&mut doc, rect(0.0, 0.0, 100.0, 60.0));
         let mut note = rect(200.0, 0.0, 100.0, 100.0);
-        note.kind = ObjectKind::Sticky(Sticky { text: "".into() });
+        note.kind = ObjectKind::Sticky(Sticky {
+            spans: Default::default(),
+            text: "".into(),
+        });
         let note = create(&mut doc, note);
         let red = Rgba::rgb(0xF2, 0x55, 0x55);
         doc.apply(Command::SetStyle {
@@ -1973,6 +2026,47 @@ mod tests {
         assert_eq!(doc.get(across).unwrap().data.bounds.x0, 350.0);
         // Connectors do not attach to frames.
         assert!(!connector::can_attach(&doc.get(outer).unwrap().data.kind));
+    }
+
+    #[test]
+    fn inline_styles_roundtrip_and_follow_set_text() {
+        let mut doc = Document::new();
+        let mut data = rect(0.0, 0.0, 200.0, 200.0);
+        let bold = crate::TextMarks {
+            bold: true,
+            ..Default::default()
+        };
+        let span = |start, end| crate::Span {
+            start,
+            end,
+            marks: bold,
+        };
+        data.kind = ObjectKind::Sticky(Sticky {
+            text: "один два".into(),
+            spans: vec![span(0, 8)].into(),
+        });
+        let id = create(&mut doc, data.clone());
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(loaded.get(id).unwrap().data, data);
+        // Spans past the new text are cut to it.
+        doc.apply(Command::SetText {
+            id,
+            text: "од".into(),
+            spans: vec![span(0, 8)].into(),
+            bounds: data.bounds,
+        })
+        .unwrap();
+        assert_eq!(doc.get(id).unwrap().data.kind.spans(), &[span(0, 4)]);
+        doc.apply(Command::SetText {
+            id,
+            text: "plain".into(),
+            spans: Spans::default(),
+            bounds: data.bounds,
+        })
+        .unwrap();
+        assert!(doc.get(id).unwrap().data.kind.spans().is_empty());
+        doc.undo().unwrap();
+        assert_eq!(doc.get(id).unwrap().data.kind.spans(), &[span(0, 4)]);
     }
 
     #[test]

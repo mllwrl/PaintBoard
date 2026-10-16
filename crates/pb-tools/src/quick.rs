@@ -95,7 +95,10 @@ pub fn copy_beside(doc: &Document, id: ObjectId, side: Side, zoom: f64) -> Optio
     let mut data = object.data.clone();
     data.kind = match &data.kind {
         ObjectKind::Shape(shape) => ObjectKind::Shape(Shape::from(shape.kind)),
-        _ => ObjectKind::Sticky(Sticky { text: "".into() }),
+        _ => ObjectKind::Sticky(Sticky {
+            spans: Default::default(),
+            text: "".into(),
+        }),
     };
     let size = data.bounds.size();
     let step = match side {
@@ -152,6 +155,7 @@ mod tests {
         let mut doc = Document::new();
         let data = ObjectData {
             kind: ObjectKind::Shape(Shape {
+                spans: Default::default(),
                 kind: ShapeKind::Diamond,
                 text: "Start".into(),
             }),

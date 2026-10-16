@@ -10,3 +10,4 @@ workspace = true
 
 [dependencies]
 parley.workspace = true
+pb-core.workspace = true
