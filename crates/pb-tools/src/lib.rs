@@ -14,6 +14,7 @@ mod ink;
 pub mod math;
 pub mod quick;
 mod selection;
+mod table;
 
 pub use arrange::{Align, Axis, align, distribute};
 pub use clipboard::{Clipboard, duplicate};
@@ -30,6 +31,7 @@ use pb_core::{
 };
 use pb_geom::kurbo::{Line, Point, Rect, Vec2};
 use pb_geom::{Frame, GridLevel, Snapper, xs_of, ys_of};
+use table::Divider;
 
 /// Drags shorter than this on screen (logical pixels) count as clicks.
 const CLICK_SLOP: f64 = 4.0;
@@ -140,6 +142,8 @@ enum Grip {
     Label,
     /// A bend handle of the selected connector.
     Bend(BendGrip),
+    /// A line between two rows or columns of the selected table.
+    Divider(Divider),
 }
 
 /// What a drawing gesture makes.
@@ -212,6 +216,13 @@ enum Gesture {
         current: Pointer,
     },
     /// Sliding the label of a selected connector along its line.
+    /// Dragging a line between rows or columns of table `id`; `lines` is the result so far.
+    MoveDivider {
+        id: ObjectId,
+        divider: Divider,
+        start: Point,
+        lines: Option<std::sync::Arc<[pb_core::Line]>>,
+    },
     /// Dragging a bend handle of connector `id`; `bends` is the result so far.
     MoveBend {
         id: ObjectId,
@@ -505,6 +516,17 @@ impl Tools {
                         current: pointer,
                     }
                 }
+                Grip::Divider(divider) => {
+                    let Some((id, _, _)) = self.single_table(doc) else {
+                        return false;
+                    };
+                    Gesture::MoveDivider {
+                        id,
+                        divider,
+                        start: p,
+                        lines: None,
+                    }
+                }
                 Grip::Bend(grip) => {
                     let Some((id, _)) = self.single_connector(doc) else {
                         return false;
@@ -652,6 +674,25 @@ impl Tools {
                 *end = connect::end_at(doc, &pointer, other.object());
                 true
             }
+            Some(Gesture::MoveDivider {
+                id,
+                divider,
+                start,
+                lines,
+            }) => {
+                let Some(object) = doc.get(*id) else {
+                    return false;
+                };
+                let ObjectKind::Table(t) = &object.data.kind else {
+                    return false;
+                };
+                // Along the table's own axes, so rotated tables work too.
+                let frame = object.data.frame();
+                let moved = frame.to_local(pointer.world) - frame.to_local(*start);
+                let delta = if divider.rows { moved.y } else { moved.x };
+                *lines = Some(table::resized(&object.data, t, *divider, delta));
+                true
+            }
             Some(Gesture::MoveBend {
                 id,
                 grip,
@@ -797,6 +838,29 @@ impl Tools {
                 bends: bends.clone().into(),
             }),
             Gesture::MoveBend { .. } => None,
+            Gesture::MoveDivider {
+                id,
+                divider,
+                lines: Some(lines),
+                ..
+            } => match doc.get(*id).map(|o| (&o.data.kind, o.data.bounds)) {
+                Some((ObjectKind::Table(t), bounds)) => {
+                    let (rows, cols) = if divider.rows {
+                        (lines.clone(), t.cols.clone())
+                    } else {
+                        (t.rows.clone(), lines.clone())
+                    };
+                    let changed = rows != t.rows || cols != t.cols;
+                    changed.then_some(Command::SetTable {
+                        id: *id,
+                        rows,
+                        cols,
+                        bounds,
+                    })
+                }
+                _ => None,
+            },
+            Gesture::MoveDivider { .. } => None,
         };
         self.gesture = None;
         command
@@ -980,6 +1044,24 @@ impl Tools {
                 o.data.kind = ObjectKind::Connector(c);
                 vec![o]
             }
+            Some(Gesture::MoveDivider {
+                id,
+                divider,
+                lines: Some(lines),
+                ..
+            }) => {
+                let Some(mut o) = doc.get(*id).cloned() else {
+                    return Vec::new();
+                };
+                if let ObjectKind::Table(t) = &mut o.data.kind {
+                    if divider.rows {
+                        t.rows = lines.clone();
+                    } else {
+                        t.cols = lines.clone();
+                    }
+                }
+                vec![o]
+            }
             Some(Gesture::MoveBend {
                 id,
                 bends: Some(bends),
@@ -1103,6 +1185,7 @@ impl Tools {
     pub fn cursor(&self) -> CursorHint {
         match &self.gesture {
             Some(Gesture::Resize { handle, from, .. }) => handle.cursor(from.rotation),
+            Some(Gesture::MoveDivider { divider, .. }) => divider_cursor(*divider),
             Some(Gesture::Rotate { .. }) => CursorHint::Rotate,
             Some(Gesture::Move {
                 dragging: true,
@@ -1122,6 +1205,7 @@ impl Tools {
             _ if self.active != ToolKind::Select => CursorHint::Crosshair,
             _ => match self.hover_grip {
                 Some(Grip::Resize(handle)) => handle.cursor(self.hover_rotation),
+                Some(Grip::Divider(divider)) => divider_cursor(divider),
                 Some(Grip::Rotate) => CursorHint::Rotate,
                 Some(Grip::End(_)) => CursorHint::Crosshair,
                 Some(Grip::Label | Grip::Bend(_)) => CursorHint::Move,
@@ -1227,7 +1311,12 @@ impl Tools {
         {
             return Some((frame, Grip::Rotate));
         }
-        handles::handle_at(frame, pointer.world, radius).map(|h| (frame, Grip::Resize(h)))
+        if let Some(h) = handles::handle_at(frame, pointer.world, radius) {
+            return Some((frame, Grip::Resize(h)));
+        }
+        let (_, data, table) = self.single_table(doc)?;
+        let divider = table::divider_at(data, table, pointer.world, radius)?;
+        Some((frame, Grip::Divider(divider)))
     }
 
     fn update_hover(&mut self, doc: &Document, pointer: Pointer) -> bool {
@@ -1442,6 +1531,15 @@ impl Tools {
             }
             _ => Vec::new(),
         }
+    }
+}
+
+/// Up-down arrows over a line between rows, left-right ones over a line between columns.
+fn divider_cursor(divider: Divider) -> CursorHint {
+    if divider.rows {
+        CursorHint::ResizeNs
+    } else {
+        CursorHint::ResizeEw
     }
 }
 
