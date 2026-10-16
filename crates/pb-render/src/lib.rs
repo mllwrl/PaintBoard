@@ -15,7 +15,7 @@ pub use vello;
 
 use std::collections::HashMap;
 
-use pb_core::{Assets, Object, ObjectData, ObjectId};
+use pb_core::{Assets, Object, ObjectData, ObjectId, ObjectKind};
 use pb_geom::Camera;
 use vello::Scene;
 use vello::kurbo::{Affine, Size};
@@ -88,13 +88,29 @@ pub fn build_scene(
     let visible = view.camera.visible_world_rect(view.viewport);
     // TODO: query an R-tree instead of scanning every object.
     let overrides: HashMap<_, _> = view.overrides.iter().map(|o| (o.id, &o.data)).collect();
-    let on_screen = view
+    // Objects as they are now, mid-gesture included, for connectors to follow.
+    let current: HashMap<_, _> = view
+        .objects
+        .iter()
+        .map(|o| (o.id, overrides.get(&o.id).copied().unwrap_or(&o.data)))
+        .collect();
+    let shown = view
         .objects
         .iter()
         .filter(|o| !view.hidden.contains(&o.id))
-        .map(|o| overrides.get(&o.id).copied().unwrap_or(&o.data))
-        .filter(|data| objects::painted_bounds(data).overlaps(visible));
-    for data in on_screen.chain(view.previews) {
+        .map(|o| current[&o.id]);
+    for data in shown.chain(view.previews) {
+        if let ObjectKind::Connector(c) = &data.kind {
+            let width = data.style.stroke_width;
+            let path = pb_core::connector::layout(c, width, |id| current.get(&id).copied());
+            if path.bounds().inflate(width, width).overlaps(visible) {
+                objects::draw_connector(scene, transform, &data.style, &path);
+            }
+            continue;
+        }
+        if !objects::painted_bounds(data).overlaps(visible) {
+            continue;
+        }
         let resources = objects::Resources {
             text: &mut *text,
             images: &mut *images,

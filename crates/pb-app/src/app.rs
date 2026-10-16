@@ -232,6 +232,7 @@ impl App {
                 .tools
                 .ink_style(self.tools.active() == ToolKind::Marker),
             sticky_color: self.sticky_color,
+            connector_route: self.tools.connector_route(),
             can_undo: self.document.can_undo(),
             can_redo: self.document.can_redo(),
             zoom: self.camera.zoom(),
@@ -294,9 +295,16 @@ impl App {
             has_fill: leaves
                 .iter()
                 .any(|o| matches!(o.data.kind, ObjectKind::Shape(_) | ObjectKind::Sticky(_))),
-            has_width: leaves
-                .iter()
-                .any(|o| matches!(o.data.kind, ObjectKind::Shape(_) | ObjectKind::Ink(_))),
+            has_width: leaves.iter().any(|o| {
+                matches!(
+                    o.data.kind,
+                    ObjectKind::Shape(_) | ObjectKind::Ink(_) | ObjectKind::Connector(_)
+                )
+            }),
+            connector: leaves.iter().find_map(|o| match o.data.kind {
+                ObjectKind::Connector(c) => Some(c),
+                _ => None,
+            }),
             has_stroke: leaves
                 .iter()
                 .any(|o| !matches!(o.data.kind, ObjectKind::Image(_))),
@@ -305,7 +313,10 @@ impl App {
                 .any(|o| matches!(o.data.kind, ObjectKind::Shape(_)))
             {
                 "Outline"
-            } else if leaves.iter().any(|o| o.data.kind.is_ink()) {
+            } else if leaves
+                .iter()
+                .any(|o| matches!(o.data.kind, ObjectKind::Ink(_) | ObjectKind::Connector(_)))
+            {
                 "Color"
             } else {
                 "Text color"
@@ -329,6 +340,22 @@ impl App {
             }
             Action::InkStyle { marker, style } => self.tools.set_ink_style(marker, style),
             Action::StickyColor(color) => self.sticky_color = color,
+            Action::ConnectorRoute(route) => self.tools.set_connector_route(route),
+            Action::SetConnector(change) => {
+                let ids: Vec<_> = self
+                    .tools
+                    .selection()
+                    .ids()
+                    .iter()
+                    .filter(|&&id| !self.document.is_locked(id))
+                    .flat_map(|&id| self.document.leaves(id))
+                    .filter(|o| matches!(o.data.kind, ObjectKind::Connector(_)))
+                    .map(|o| o.id)
+                    .collect();
+                if !ids.is_empty() {
+                    self.apply(Command::SetConnector { ids, change });
+                }
+            }
             Action::Undo => self.undo(),
             Action::Redo => self.redo(),
             Action::NewBoard => self.new_board(),
@@ -1034,6 +1061,7 @@ impl App {
             KeyCode::KeyS if !ctrl => self.tools.cycle_shape(),
             KeyCode::KeyT if !ctrl => self.tools.set_active(ToolKind::Text),
             KeyCode::KeyN if !ctrl => self.tools.set_active(ToolKind::Sticky),
+            KeyCode::KeyL if !ctrl => self.tools.set_active(ToolKind::Connector),
             KeyCode::Enter | KeyCode::NumpadEnter if !ctrl => return self.edit_selected_text(),
             KeyCode::KeyP if !ctrl => self.tools.set_active(ToolKind::Pen),
             KeyCode::KeyM if !ctrl => self.tools.set_active(ToolKind::Marker),
@@ -1384,6 +1412,30 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
             .collect(),
     };
     let show_handles = tools.shows_handles(document);
+    // Connectors are outlined along their line rather than with a frame.
+    let connector_path = |id: ObjectId| {
+        document
+            .get(id)
+            .filter(|o| matches!(o.data.kind, ObjectKind::Connector(_)))
+            .and_then(|_| document.connector_path(id))
+            .map(|path| path.line.clone())
+    };
+    let mut lines = Vec::new();
+    let mut hover = tools.hover().and_then(|id| unit_frame(document, id, frame));
+    if let Some(line) = tools.hover().and_then(connector_path) {
+        lines.push(line);
+        hover = None;
+    }
+    let end_handles = tools.connector_handles(document);
+    let mut selection = selection;
+    if let Some(line) = end_handles
+        .and(ids.first().copied())
+        .and_then(connector_path)
+    {
+        lines.push(line);
+        selection = None;
+    }
+    let (connection_points, connection_active) = tools.connection_hints(document);
     Overlay {
         selected,
         selection,
@@ -1392,10 +1444,14 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
         rotate_knob: selection
             .filter(|_| show_handles)
             .map(|f| rotation_knob(f, zoom)),
-        hover: tools.hover().and_then(|id| unit_frame(document, id, frame)),
+        hover,
         marquee: tools.marquee(),
         guides: tools.guides(document),
         eraser: tools.eraser(),
         text_edit: None,
+        lines,
+        end_handles: end_handles.map(Vec::from).unwrap_or_default(),
+        connection_points,
+        connection_active,
     }
 }

@@ -3,14 +3,16 @@ use std::sync::Arc;
 use kurbo::{Rect, Vec2};
 use pb_geom::Frame;
 
-use crate::{Content, ObjectId, StyleChange};
+use crate::{ConnectorChange, Content, ObjectId, StyleChange};
 
 /// A user-level edit. Each applied command is one undo step and, later, one unit of sync.
 ///
 /// Ids may name objects or groups unless noted; a group stands for everything inside it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
-    /// Adds content on top of all others, in the given order.
+    /// Adds content on top of all others, in the given order. Connectors copied along with
+    /// the objects they attach to attach to the copies; copied ends attached to anything
+    /// else come loose.
     Create(Vec<Content>),
     /// Groups left empty are deleted too.
     Delete(Vec<ObjectId>),
@@ -45,6 +47,11 @@ pub enum Command {
         id: ObjectId,
         crop: Rect,
         bounds: Rect,
+    },
+    /// Changes connectors' ends, route or arrowheads; other ids are ignored.
+    SetConnector {
+        ids: Vec<ObjectId>,
+        change: ConnectorChange,
     },
     /// Changes colors, outline or opacity; a group restyles everything inside it.
     SetStyle {

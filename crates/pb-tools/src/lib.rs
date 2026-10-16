@@ -5,6 +5,7 @@
 
 mod arrange;
 mod clipboard;
+mod connect;
 mod crop;
 mod handles;
 mod hit;
@@ -14,13 +15,15 @@ mod selection;
 
 pub use arrange::{Align, Axis, align, distribute};
 pub use clipboard::{Clipboard, duplicate};
+pub use connect::Which;
 pub use crop::Crop;
 pub use handles::{Handle, rotation_knob};
 pub use ink::{ERASER_RADIUS, InkStyle};
 pub use selection::{Selection, selection_frame, unit_frame};
 
 use pb_core::{
-    Command, Content, Document, Object, ObjectData, ObjectId, ObjectKind, ShapeKind, Style,
+    Cap, Command, Connector, ConnectorChange, Content, Document, End, Object, ObjectData, ObjectId,
+    ObjectKind, Route, ShapeKind, Style,
 };
 use pb_geom::kurbo::{Line, Point, Rect, Vec2};
 use pb_geom::{Frame, GridLevel, Snapper, xs_of, ys_of};
@@ -52,6 +55,8 @@ pub enum ToolKind {
     Text,
     /// Click to place a sticky note and type on it; run by the app like [`Self::Text`].
     Sticky,
+    /// Drag from an object (or anywhere) to another to connect them.
+    Connector,
 }
 
 impl ToolKind {
@@ -64,6 +69,7 @@ impl ToolKind {
             Self::Eraser => "Eraser",
             Self::Text => "Text",
             Self::Sticky => "Sticky note",
+            Self::Connector => "Connector",
         }
     }
 
@@ -119,6 +125,8 @@ impl Pointer {
 enum Grip {
     Resize(Handle),
     Rotate,
+    /// An end of the selected connector.
+    End(Which),
 }
 
 enum Gesture {
@@ -168,6 +176,20 @@ enum Gesture {
         /// Strokes touched so far; hidden until the eraser is released.
         erased: Vec<ObjectId>,
     },
+    /// Drawing a new connector.
+    Connect {
+        start: End,
+        end: End,
+        current: Pointer,
+    },
+    /// Dragging an end of a selected connector to another place or object.
+    MoveEnd {
+        id: ObjectId,
+        which: Which,
+        connector: Connector,
+        end: End,
+        current: Pointer,
+    },
 }
 
 pub struct Tools {
@@ -185,6 +207,10 @@ pub struct Tools {
     marker: InkStyle,
     /// Where the eraser hovers, to show its size.
     eraser_at: Option<(Point, f64)>,
+    /// Route of new connectors.
+    connector_route: Route,
+    /// Where a connector would start, while the connector tool hovers.
+    connect_hover: Option<End>,
 }
 
 impl Default for Tools {
@@ -201,6 +227,8 @@ impl Default for Tools {
             pen: InkStyle::PEN,
             marker: InkStyle::MARKER,
             eraser_at: None,
+            connector_route: Route::default(),
+            connect_hover: None,
         }
     }
 }
@@ -219,6 +247,16 @@ impl Tools {
         self.hover = None;
         self.hover_grip = None;
         self.eraser_at = None;
+        self.connect_hover = None;
+    }
+
+    /// Route of new connectors.
+    pub fn connector_route(&self) -> Route {
+        self.connector_route
+    }
+
+    pub fn set_connector_route(&mut self, route: Route) {
+        self.connector_route = route;
     }
 
     /// Color and width of the pen, or of the marker.
@@ -365,6 +403,16 @@ impl Tools {
             }
             // Text editing is handled by the app.
             ToolKind::Text | ToolKind::Sticky => return false,
+            ToolKind::Connector => {
+                let start = connect::end_at(doc, &pointer, None);
+                self.gesture = Some(Gesture::Connect {
+                    start,
+                    end: End::Free(p),
+                    current: pointer,
+                });
+                self.connect_hover = None;
+                return true;
+            }
             ToolKind::Eraser => {
                 let radius = ERASER_RADIUS / pointer.zoom;
                 self.gesture = Some(Gesture::Erase {
@@ -398,6 +446,22 @@ impl Tools {
                     start: p,
                     current: pointer,
                 },
+                Grip::End(which) => {
+                    let Some((id, connector)) = self.single_connector(doc) else {
+                        return false;
+                    };
+                    let end = match which {
+                        Which::Start => connector.start,
+                        Which::End => connector.end,
+                    };
+                    Gesture::MoveEnd {
+                        id,
+                        which,
+                        connector,
+                        end,
+                        current: pointer,
+                    }
+                }
             });
             return true;
         }
@@ -495,9 +559,39 @@ impl Tools {
                 self.eraser_at = Some((pointer.world, radius));
                 true
             }
+            Some(Gesture::Connect {
+                start,
+                end,
+                current,
+            }) => {
+                *current = pointer;
+                *end = connect::end_at(doc, &pointer, start.object());
+                true
+            }
+            Some(Gesture::MoveEnd {
+                which,
+                connector,
+                end,
+                current,
+                ..
+            }) => {
+                *current = pointer;
+                let other = match which {
+                    Which::Start => connector.end,
+                    Which::End => connector.start,
+                };
+                *end = connect::end_at(doc, &pointer, other.object());
+                true
+            }
             None if self.active == ToolKind::Eraser => {
                 self.eraser_at = Some((pointer.world, ERASER_RADIUS / pointer.zoom));
                 true
+            }
+            None if self.active == ToolKind::Connector => {
+                let hover = Some(connect::end_at(doc, &pointer, None));
+                let changed = hover != self.connect_hover;
+                self.connect_hover = hover;
+                changed
             }
             None => self.update_hover(doc, pointer),
         }
@@ -551,9 +645,81 @@ impl Tools {
                 changed.then_some(Command::SetGeometry(changes))
             }
             Gesture::Marquee { .. } => None,
+            Gesture::Connect { start, end, .. } => {
+                self.active = ToolKind::Select;
+                // A click, not a drag, between two free points draws nothing.
+                let tiny = start.object().is_none()
+                    && end.object().is_none()
+                    && pointer.screen_distance(start.point()) < CLICK_SLOP;
+                (!tiny).then(|| {
+                    Command::Create(vec![connector(*start, *end, self.connector_route).into()])
+                })
+            }
+            Gesture::MoveEnd {
+                id,
+                which,
+                connector,
+                end,
+                ..
+            } => {
+                let old = match which {
+                    Which::Start => connector.start,
+                    Which::End => connector.end,
+                };
+                let change = match which {
+                    Which::Start => ConnectorChange {
+                        start: Some(*end),
+                        ..Default::default()
+                    },
+                    Which::End => ConnectorChange {
+                        end: Some(*end),
+                        ..Default::default()
+                    },
+                };
+                (*end != old).then(|| Command::SetConnector {
+                    ids: vec![*id],
+                    change,
+                })
+            }
         };
         self.gesture = None;
         command
+    }
+
+    /// The selected connector's end handles, when a single unlocked connector is selected
+    /// and nothing else is going on.
+    pub fn connector_handles(&self, doc: &Document) -> Option<[Point; 2]> {
+        if self.active != ToolKind::Select || self.gesture.is_some() {
+            return None;
+        }
+        let (id, _) = self.single_connector(doc)?;
+        let (s, e) = doc.connector_ends(id)?;
+        Some([s.point, e.point])
+    }
+
+    /// Connection points to show while placing a connector end, and the one it snaps to.
+    pub fn connection_hints(&self, doc: &Document) -> (Vec<Point>, Option<Point>) {
+        match &self.gesture {
+            Some(Gesture::Connect { end, .. } | Gesture::MoveEnd { end, .. }) => {
+                connect::hints(doc, end)
+            }
+            None if self.active == ToolKind::Connector => match &self.connect_hover {
+                Some(end) => connect::hints(doc, end),
+                None => (Vec::new(), None),
+            },
+            _ => (Vec::new(), None),
+        }
+    }
+
+    /// The single selected connector, if it is not locked.
+    fn single_connector(&self, doc: &Document) -> Option<(ObjectId, Connector)> {
+        let [id] = self.selection.ids() else {
+            return None;
+        };
+        match doc.get(*id).filter(|_| !doc.is_locked(*id))?.data.kind {
+            ObjectKind::Connector(c) => Some((*id, c)),
+            _ => None,
+        }
     }
 
     /// Objects as they look mid-gesture (moved, resized, rotated), replacing stored state.
@@ -570,10 +736,28 @@ impl Tools {
                     .flat_map(|id| doc.leaves(id))
                     .map(|o| {
                         let mut o = o.clone();
-                        o.data.bounds = o.data.bounds + delta;
+                        o.data.translate(delta);
                         o
                     })
                     .collect()
+            }
+            Some(Gesture::MoveEnd {
+                id,
+                which,
+                connector,
+                end,
+                ..
+            }) => {
+                let Some(mut o) = doc.get(*id).cloned() else {
+                    return Vec::new();
+                };
+                let mut c = *connector;
+                match which {
+                    Which::Start => c.start = *end,
+                    Which::End => c.end = *end,
+                }
+                o.data.kind = ObjectKind::Connector(c);
+                vec![o]
             }
             Some(Gesture::Resize { .. } | Gesture::Rotate { .. }) => self
                 .geometry_changes(doc)
@@ -593,6 +777,9 @@ impl Tools {
         match &self.gesture {
             Some(Gesture::Shape { kind, .. }) => {
                 vec![shape((*kind).into(), self.shape_bounds(doc, false).0)]
+            }
+            Some(Gesture::Connect { start, end, .. }) => {
+                vec![connector(*start, *end, self.connector_route)]
             }
             Some(Gesture::Ink {
                 marker,
@@ -656,6 +843,7 @@ impl Tools {
     pub fn shows_handles(&self, doc: &Document) -> bool {
         self.active == ToolKind::Select
             && !self.selection.has_locked(doc)
+            && self.single_connector(doc).is_none()
             && !matches!(
                 self.gesture,
                 Some(Gesture::Move { dragging: true, .. })
@@ -679,11 +867,14 @@ impl Tools {
                     CursorHint::Move
                 }
             }
-            Some(Gesture::Shape { .. }) => CursorHint::Crosshair,
+            Some(Gesture::Shape { .. } | Gesture::Connect { .. } | Gesture::MoveEnd { .. }) => {
+                CursorHint::Crosshair
+            }
             _ if self.active != ToolKind::Select => CursorHint::Crosshair,
             _ => match self.hover_grip {
                 Some(Grip::Resize(handle)) => handle.cursor(self.hover_rotation),
                 Some(Grip::Rotate) => CursorHint::Rotate,
+                Some(Grip::End(_)) => CursorHint::Crosshair,
                 None => CursorHint::Default,
             },
         }
@@ -717,6 +908,15 @@ impl Tools {
         }
         let frame = self.selection.frame(doc)?;
         let radius = HANDLE_HIT_RADIUS / pointer.zoom;
+        // A single connector has handles on its ends instead of around it.
+        if let Some((id, _)) = self.single_connector(doc) {
+            let (s, e) = doc.connector_ends(id)?;
+            let near = |p: Point| (p - pointer.world).hypot() <= radius;
+            return [(s.point, Which::Start), (e.point, Which::End)]
+                .into_iter()
+                .find(|&(p, _)| near(p))
+                .map(|(_, which)| (frame, Grip::End(which)));
+        }
         if (rotation_knob(frame, pointer.zoom) - pointer.world).hypot() <= radius {
             return Some((frame, Grip::Rotate));
         }
@@ -920,6 +1120,22 @@ impl Tools {
             }
             _ => Vec::new(),
         }
+    }
+}
+
+/// A new connector with an arrow at its end, in the default outline style.
+fn connector(start: End, end: End, route: Route) -> ObjectData {
+    ObjectData {
+        kind: ObjectKind::Connector(Connector {
+            start,
+            end,
+            route,
+            start_cap: Cap::None,
+            end_cap: Cap::Arrow,
+        }),
+        bounds: Rect::from_points(start.point(), end.point()),
+        rotation: 0.0,
+        style: Style::default(),
     }
 }
 

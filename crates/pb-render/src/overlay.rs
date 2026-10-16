@@ -26,6 +26,14 @@ pub struct Overlay {
     pub eraser: Option<(Point, f64)>,
     /// Text being edited.
     pub text_edit: Option<TextEditOverlay>,
+    /// Lines outlined like the hovered or selected object: connectors (world).
+    pub lines: Vec<BezPath>,
+    /// Handles on the ends of a selected connector (world).
+    pub end_handles: Vec<Point>,
+    /// Where a connector can attach on the object under the pointer (world), and the one it
+    /// would snap to.
+    pub connection_points: Vec<Point>,
+    pub connection_active: Option<Point>,
 }
 
 /// The text box being edited, in world space.
@@ -64,6 +72,16 @@ pub fn draw_overlay(
 
     if let Some(hover) = &overlay.hover {
         scene.stroke(&thick, id, colors.accent, None, &outline(hover));
+    }
+    let world_to_px = Affine::scale(scale) * camera.transform();
+    for line in &overlay.lines {
+        scene.stroke(
+            &thick,
+            id,
+            colors.accent,
+            None,
+            &(world_to_px * line.clone()),
+        );
     }
     if !overlay.selected.is_empty() {
         let faint = colors.accent.multiply_alpha(0.5);
@@ -124,6 +142,24 @@ pub fn draw_overlay(
             Line::new((line.p0.x, snap(line.p0.y)), (line.p1.x, snap(line.p1.y)))
         };
         scene.stroke(&thin, id, colors.guide, None, &line);
+    }
+    let handle_stroke = Stroke::new(1.5 * scale);
+    for &end in &overlay.end_handles {
+        let handle = Circle::new(to_px(end), HANDLE_RADIUS * scale);
+        scene.fill(Fill::NonZero, id, colors.handle_fill, None, &handle);
+        scene.stroke(&handle_stroke, id, colors.accent, None, &handle);
+    }
+    for &point in &overlay.connection_points {
+        let active = overlay.connection_active == Some(point);
+        let radius = if active { 5.0 } else { 3.5 } * scale;
+        let dot = Circle::new(to_px(point), radius);
+        let fill = if active {
+            colors.accent
+        } else {
+            colors.handle_fill
+        };
+        scene.fill(Fill::NonZero, id, fill, None, &dot);
+        scene.stroke(&handle_stroke, id, colors.accent, None, &dot);
     }
     if let Some(edit) = &overlay.text_edit {
         let selection = colors.accent.multiply_alpha(0.25);

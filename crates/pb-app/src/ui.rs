@@ -9,7 +9,9 @@ use egui::{
     Align2, Area, Button, Color32, Context, FontData, FontDefinitions, FontFamily, Frame, Id,
     Order, Painter, Pos2, Rect, Response, Sense, Shadow, Shape, Slider, Stroke, Vec2,
 };
-use pb_core::{Rgba, ShapeKind, Style, StyleChange, ZOrder};
+use pb_core::{
+    Cap, Connector, ConnectorChange, Rgba, Route, ShapeKind, Style, StyleChange, ZOrder,
+};
 use pb_geom::kurbo::{self, PathEl};
 use pb_platform::Instant;
 use pb_render::{FrameTarget, Gpu, GridStyle};
@@ -26,6 +28,10 @@ pub enum Action {
     },
     /// Color of new sticky notes.
     StickyColor(Rgba),
+    /// Route of new connectors.
+    ConnectorRoute(Route),
+    /// Changes the selected connectors.
+    SetConnector(ConnectorChange),
     Undo,
     Redo,
     NewBoard,
@@ -65,6 +71,7 @@ pub struct Model<'a> {
     /// Style of the pen or marker, whichever is active.
     pub ink: InkStyle,
     pub sticky_color: Rgba,
+    pub connector_route: Route,
     pub can_undo: bool,
     pub can_redo: bool,
     pub zoom: f64,
@@ -84,6 +91,8 @@ pub struct SelectionInfo {
     pub has_fill: bool,
     /// Something with an outline width (shape or ink) is selected.
     pub has_width: bool,
+    /// The first selected connector, for its route and arrowheads.
+    pub connector: Option<Connector>,
     /// Something other than images is selected, so there is an outline or text color.
     pub has_stroke: bool,
     /// What the outline color is called for this selection.
@@ -384,6 +393,7 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         (ToolKind::Eraser, "Eraser (E)", paint_eraser),
                         (ToolKind::Text, "Text (T)", paint_text),
                         (ToolKind::Sticky, "Sticky note (N)", paint_sticky),
+                        (ToolKind::Connector, "Connector (L)", paint_connector),
                     ];
                     let mut ink_button = shapes.rect;
                     for (tool, tooltip, paint) in ink_tools {
@@ -428,6 +438,9 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
     }
     if model.tool == ToolKind::Sticky {
         sticky_panel(ctx, model, ink_button, actions);
+    }
+    if model.tool == ToolKind::Connector {
+        connector_panel(ctx, model, ink_button, actions);
     }
 
     // Like Miro, the shape tool shows its shapes next to the toolbar.
@@ -513,6 +526,67 @@ fn sticky_panel(ctx: &Context, model: &Model, button: Rect, actions: &mut Vec<Ac
                 }
             });
         });
+}
+
+/// Route of new connectors, next to the tool's button.
+fn connector_panel(ctx: &Context, model: &Model, button: Rect, actions: &mut Vec<Action>) {
+    Area::new(Id::unique("connector"))
+        .fixed_pos(Pos2::new(button.right() + 18.0, button.top() - 8.0))
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            panel().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for route in Route::ALL {
+                        let on = model.connector_route == route;
+                        if ui.selectable_label(on, route.name()).clicked() {
+                            actions.push(Action::ConnectorRoute(route));
+                        }
+                    }
+                });
+            });
+        });
+}
+
+/// Route and arrowhead buttons for the selected connectors.
+fn connector_controls(ui: &mut egui::Ui, c: &Connector, actions: &mut Vec<Action>) {
+    for route in Route::ALL {
+        if ui
+            .selectable_label(c.route == route, route.name())
+            .clicked()
+        {
+            actions.push(Action::SetConnector(ConnectorChange {
+                route: Some(route),
+                ..ConnectorChange::default()
+            }));
+        }
+    }
+    ui.separator();
+    let toggled = |cap: Cap| {
+        if cap == Cap::Arrow {
+            Cap::None
+        } else {
+            Cap::Arrow
+        }
+    };
+    let start = ui
+        .selectable_label(c.start_cap == Cap::Arrow, "Start arrow")
+        .on_hover_text("Arrowhead at the start");
+    if start.clicked() {
+        actions.push(Action::SetConnector(ConnectorChange {
+            start_cap: Some(toggled(c.start_cap)),
+            ..ConnectorChange::default()
+        }));
+    }
+    let end = ui
+        .selectable_label(c.end_cap == Cap::Arrow, "End arrow")
+        .on_hover_text("Arrowhead at the end");
+    if end.clicked() {
+        actions.push(Action::SetConnector(ConnectorChange {
+            end_cap: Some(toggled(c.end_cap)),
+            ..ConnectorChange::default()
+        }));
+    }
+    ui.separator();
 }
 
 fn view_controls(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
@@ -621,6 +695,9 @@ fn selection_toolbar(
                             }
                         });
                         ui.separator();
+                    }
+                    if let Some(c) = &selection.connector {
+                        connector_controls(ui, c, actions);
                     }
                     if selection.can_crop
                         && ui
@@ -940,6 +1017,26 @@ fn paint_image(painter: &Painter, rect: Rect, color: Color32) {
         at(1.0, 0.85),
     ];
     painter.add(Shape::line(hills, stroke));
+}
+
+fn paint_connector(painter: &Painter, rect: Rect, color: Color32) {
+    let at = |x: f32, y: f32| {
+        Pos2::new(
+            rect.left() + rect.width() * x,
+            rect.top() + rect.height() * y,
+        )
+    };
+    let stroke = Stroke::new(1.6, color);
+    painter.circle_stroke(at(0.12, 0.88), rect.width() * 0.1, stroke);
+    painter.add(Shape::line(
+        vec![at(0.2, 0.8), at(0.2, 0.3), at(0.85, 0.3)],
+        stroke,
+    ));
+    painter.add(Shape::convex_polygon(
+        vec![at(1.0, 0.3), at(0.75, 0.15), at(0.75, 0.45)],
+        color,
+        Stroke::NONE,
+    ));
 }
 
 fn paint_shape(painter: &Painter, rect: Rect, color: Color32, kind: ShapeKind) {

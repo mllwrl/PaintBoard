@@ -1,4 +1,5 @@
-use pb_core::{Assets, Image, ObjectData, ObjectKind, Rgba, Sticky};
+use pb_core::connector::ConnectorPath;
+use pb_core::{Assets, Image, ObjectData, ObjectKind, Rgba, Sticky, Style};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -206,6 +207,8 @@ pub(crate) fn draw_object(
                 );
             }
         }
+        // Drawn by `draw_connector`, which needs the objects they attach to.
+        ObjectKind::Connector(_) => {}
         ObjectKind::Image(image) => match images.get(assets, image.asset) {
             Some(brush) => draw_image(scene, transform, data.bounds, image, brush),
             None => draw_placeholder(scene, transform, data.bounds),
@@ -230,6 +233,42 @@ pub(crate) fn draw_object(
                 scene.stroke(&stroke, transform, ink_color, None, &smooth_path(&line));
             }
         }
+    }
+    if layered {
+        scene.pop_layer();
+    }
+}
+
+/// A connector's line and arrowheads in the outline color.
+pub(crate) fn draw_connector(
+    scene: &mut Scene,
+    transform: Affine,
+    style: &Style,
+    path: &ConnectorPath,
+) {
+    if style.opacity <= 0.0 {
+        return;
+    }
+    // Opacity applies to the whole connector, so the line under an arrowhead does not show.
+    let layered = style.opacity < 1.0;
+    if layered {
+        let pad = style.stroke_width;
+        let clip = path.bounds().inflate(pad, pad);
+        scene.push_layer(
+            Fill::NonZero,
+            Mix::Normal,
+            style.opacity as f32,
+            transform,
+            &clip,
+        );
+    }
+    let brush = color(style.stroke);
+    let stroke = Stroke::new(style.stroke_width.max(0.5))
+        .with_caps(Cap::Round)
+        .with_join(Join::Round);
+    scene.stroke(&stroke, transform, brush, None, &path.line);
+    for head in &path.heads {
+        scene.fill(Fill::NonZero, transform, brush, None, head);
     }
     if layered {
         scene.pop_layer();

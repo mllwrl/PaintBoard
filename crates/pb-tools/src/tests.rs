@@ -51,7 +51,7 @@ fn drag(tools: &mut Tools, doc: &Document, from: Pointer, to: Pointer) -> Option
 fn created_bounds(cmd: Option<Command>) -> Rect {
     match cmd {
         Some(Command::Create(items)) => match &items[..] {
-            [Content::Object(data)] => data.bounds,
+            [Content::Object(data) | Content::Copied { data, .. }] => data.bounds,
             other => panic!("expected one object, got {other:?}"),
         },
         other => panic!("expected Create, got {other:?}"),
@@ -845,4 +845,109 @@ fn eraser_removes_touched_strokes_only() {
     );
     assert!(doc.get(rect).is_some());
     assert!(tools.eraser().is_some());
+}
+
+// Connectors
+
+fn the_connector(doc: &Document) -> (ObjectId, Connector) {
+    doc.objects()
+        .iter()
+        .find_map(|o| match o.data.kind {
+            ObjectKind::Connector(c) => Some((o.id, c)),
+            _ => None,
+        })
+        .expect("a connector")
+}
+
+fn apply(doc: &mut Document, cmd: Option<Command>) -> pb_core::Applied {
+    doc.apply(cmd.expect("a command")).unwrap()
+}
+
+#[test]
+fn connector_tool_connects_two_objects() {
+    let (mut doc, ids) = doc_with(&[
+        Rect::new(0.0, 0.0, 100.0, 100.0),
+        Rect::new(300.0, 0.0, 400.0, 100.0),
+    ]);
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Connector);
+    tools.pointer_down(&doc, at(50.0, 50.0));
+    // Near the second box's left connection point (300, 50): it snaps there.
+    tools.pointer_move(&doc, at(305.0, 45.0));
+    let (points, active) = tools.connection_hints(&doc);
+    assert_eq!(points.len(), 4);
+    assert!(active.is_some_and(|p| (p - Point::new(300.0, 50.0)).hypot() < 1e-6));
+    assert_eq!(tools.previews(&doc).len(), 1);
+    let cmd = tools.pointer_up(&doc, at(305.0, 45.0));
+    apply(&mut doc, cmd);
+    assert_eq!(tools.active(), ToolKind::Select);
+    let (id, c) = the_connector(&doc);
+    assert_eq!(c.start.object(), Some(ids[0]));
+    assert!(matches!(
+        c.start,
+        End::Attached {
+            anchor: pb_core::Anchor::Auto,
+            ..
+        }
+    ));
+    assert!(matches!(
+        c.end,
+        End::Attached { object, anchor: pb_core::Anchor::Fixed(_), .. } if object == ids[1]
+    ));
+    let (s, e) = doc.connector_ends(id).unwrap();
+    assert!((s.point - Point::new(100.0, 50.0)).hypot() < 1e-6);
+    assert!((e.point - Point::new(300.0, 50.0)).hypot() < 1e-6);
+}
+
+#[test]
+fn connector_click_draws_nothing_and_free_drag_draws_a_line() {
+    let mut doc = Document::new();
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Connector);
+    assert!(click(&mut tools, &doc, at(10.0, 10.0)).is_none());
+    tools.set_active(ToolKind::Connector);
+    let cmd = drag(&mut tools, &doc, at(10.0, 10.0), at(200.0, 10.0));
+    apply(&mut doc, cmd);
+    let (_, c) = the_connector(&doc);
+    assert_eq!(c.start, End::Free(Point::new(10.0, 10.0)));
+    assert_eq!(c.end, End::Free(Point::new(200.0, 10.0)));
+}
+
+#[test]
+fn connectors_are_picked_along_their_line_and_ends_can_be_reattached() {
+    let (mut doc, ids) = doc_with(&[Rect::new(300.0, 0.0, 400.0, 100.0)]);
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Connector);
+    let cmd = drag(&mut tools, &doc, at(0.0, 300.0), at(200.0, 300.0));
+    let id = apply(&mut doc, cmd).created[0];
+    tools.sync(&doc);
+    // Beside the line nothing is hit; on it the connector is.
+    assert_eq!(tools.object_at(&doc, at(100.0, 330.0)), None);
+    assert_eq!(tools.object_at(&doc, at(100.0, 301.0)), Some(id));
+    click(&mut tools, &doc, at(100.0, 300.0));
+    assert_eq!(tools.selection().ids(), [id]);
+    assert!(!tools.shows_handles(&doc));
+    let handles = tools.connector_handles(&doc).unwrap();
+    assert!((handles[1] - Point::new(200.0, 300.0)).hypot() < 1e-6);
+    // Drag the end onto the box.
+    let cmd = drag(&mut tools, &doc, at(200.0, 300.0), at(350.0, 50.0));
+    apply(&mut doc, cmd);
+    let (_, c) = the_connector(&doc);
+    assert_eq!(c.end.object(), Some(ids[0]));
+    assert_eq!(c.start, End::Free(Point::new(0.0, 300.0)));
+}
+
+#[test]
+fn marquee_selects_connectors_by_their_line() {
+    let mut doc = Document::new();
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Connector);
+    let cmd = drag(&mut tools, &doc, at(0.0, 0.0), at(400.0, 400.0));
+    let id = apply(&mut doc, cmd).created[0];
+    tools.sync(&doc);
+    // A box inside the connector's bounds but away from the diagonal.
+    drag(&mut tools, &doc, at(300.0, 20.0), at(380.0, 80.0));
+    assert!(tools.selection().is_empty());
+    drag(&mut tools, &doc, at(190.0, 190.0), at(210.0, 210.0));
+    assert_eq!(tools.selection().ids(), [id]);
 }

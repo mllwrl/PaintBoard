@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use kurbo::{Rect, Vec2};
+use kurbo::{Point, Rect, Vec2};
 use loro::{
     ExportMode, LoroDoc, LoroError, LoroMap, LoroTree, LoroValue, TreeID, TreeParentId,
     UndoManager, ValueOrContainer,
@@ -11,10 +11,12 @@ use loro::{
 use pb_geom::ShapeKind;
 use pb_geom::normalize_angle;
 
+use crate::connector::{self, Anchor, Cap, ConnectorPath, EndPoint, Route};
+
 use crate::command::reorder;
 use crate::{
-    Applied, AssetId, Assets, Command, Content, Group, Image, Ink, Object, ObjectData, ObjectId,
-    ObjectKind, Rgba, Sticky, Style, StyleChange, Text, ZOrder,
+    Applied, AssetId, Assets, Command, Connector, Content, End, Group, Image, Ink, Object,
+    ObjectData, ObjectId, ObjectKind, Rgba, Sticky, Style, StyleChange, Text, ZOrder,
 };
 
 /// Font size of text objects stored without one.
@@ -52,6 +54,19 @@ mod key {
     pub const CROP_Y0: &str = "cropY0";
     pub const CROP_X1: &str = "cropX1";
     pub const CROP_Y1: &str = "cropY1";
+    /// Connectors: route and arrowheads...
+    pub const ROUTE: &str = "route";
+    pub const START_CAP: &str = "startCap";
+    pub const END_CAP: &str = "endCap";
+    /// ...and per end (prefixed `start` or `end`): a point (free, or last known position),
+    /// the attached object's id, and a fixed anchor (absent for an automatic one).
+    pub const START: &str = "start";
+    pub const END: &str = "end";
+    pub const X_SUFFIX: &str = "X";
+    pub const Y_SUFFIX: &str = "Y";
+    pub const OBJECT_SUFFIX: &str = "Obj";
+    pub const ANCHOR_X_SUFFIX: &str = "AnchorX";
+    pub const ANCHOR_Y_SUFFIX: &str = "AnchorY";
 
     /// `kind` of group nodes.
     pub const GROUP: &str = "group";
@@ -109,9 +124,20 @@ pub struct Document {
     /// Tree node currently holding each object or group.
     nodes: HashMap<ObjectId, TreeID>,
     revision: u64,
+    /// Connectors' resolved ends and paths, by connector id; rebuilt with `objects`.
+    connectors: HashMap<ObjectId, (EndPoint, EndPoint, ConnectorPath)>,
     /// Files used by images. They are not part of the CRDT and never removed while the board
     /// is open, so undoing the deletion of an image finds its file again.
     assets: Assets,
+}
+
+/// An object made by a `Create` command, for re-attaching copied connectors.
+struct Made {
+    id: ObjectId,
+    node: TreeID,
+    /// The object it copies.
+    from: Option<ObjectId>,
+    connector: Option<Connector>,
 }
 
 impl Document {
@@ -152,6 +178,7 @@ impl Document {
             nodes: HashMap::new(),
             revision: 0,
             assets: Assets::default(),
+            connectors: HashMap::new(),
         };
         document.refresh();
         document
@@ -171,6 +198,16 @@ impl Document {
     /// undo history.
     pub fn add_asset(&mut self, bytes: impl Into<std::sync::Arc<[u8]>>) -> AssetId {
         self.assets.insert(bytes)
+    }
+
+    /// A connector's path as it is drawn.
+    pub fn connector_path(&self, id: ObjectId) -> Option<&ConnectorPath> {
+        self.connectors.get(&id).map(|(_, _, path)| path)
+    }
+
+    /// A connector's ends where they are now.
+    pub fn connector_ends(&self, id: ObjectId) -> Option<(EndPoint, EndPoint)> {
+        self.connectors.get(&id).map(|&(s, e, _)| (s, e))
     }
 
     /// Assets that objects on the board use, each once, in a stable order.
@@ -258,7 +295,16 @@ impl Document {
     /// A copy of `id` and everything inside it, e.g. for the clipboard.
     pub fn content(&self, id: ObjectId) -> Option<Content> {
         match self.get(id) {
-            Some(object) => Some(Content::Object(object.data.clone())),
+            Some(object) => {
+                let mut data = object.data.clone();
+                if let (ObjectKind::Connector(c), Some((s, e))) =
+                    (&mut data.kind, self.connector_ends(id))
+                {
+                    c.start = with_position(c.start, s.point);
+                    c.end = with_position(c.end, e.point);
+                }
+                Some(Content::Copied { from: id, data })
+            }
             None => Some(Content::Group(
                 self.groups
                     .get(&id)?
@@ -279,15 +325,19 @@ impl Document {
         let mut applied = Applied::default();
         match command {
             Command::Create(contents) => {
+                let mut made = Vec::new();
                 for content in &contents {
                     applied
                         .created
-                        .push(self.create(TreeParentId::Root, content)?);
+                        .push(self.create(TreeParentId::Root, content, &mut made)?);
                 }
+                self.attach_copies(&made)?;
                 self.prune_empty_groups(TreeParentId::Root)?;
             }
             Command::Delete(ids) => {
-                for id in self.outermost(&ids)? {
+                let outermost = self.outermost(&ids)?;
+                self.remember_connector_ends(&outermost)?;
+                for id in outermost {
                     self.tree.delete(self.nodes[&id])?;
                 }
                 self.prune_empty_groups(TreeParentId::Root)?;
@@ -303,6 +353,19 @@ impl Document {
                 }
                 for (id, frame) in changes {
                     let meta = self.tree.get_meta(self.nodes[&id])?;
+                    if let Some(ObjectKind::Connector(c)) = self.get(id).map(|o| &o.data.kind) {
+                        // Free ends keep their place relative to the connector's bounds.
+                        let from = self.objects[self.index[&id]].data.bounds;
+                        let map = |end: End| match end {
+                            End::Free(p) => End::Free(map_point(p, from, frame)),
+                            end => end,
+                        };
+                        write_end(&meta, key::START, &map(c.start))?;
+                        write_end(&meta, key::END, &map(c.end))?;
+                        write_bounds(&meta, frame.aabb())?;
+                        meta.insert(key::ROTATION, 0.0)?;
+                        continue;
+                    }
                     write_bounds(&meta, frame.rect.abs())?;
                     meta.insert(key::ROTATION, normalize_angle(frame.rotation))?;
                 }
@@ -388,6 +451,16 @@ impl Document {
                 write_crop(&meta, crop)?;
                 write_bounds(&meta, bounds.abs())?;
             }
+            Command::SetConnector { ids, change } => {
+                self.check_exist(&ids)?;
+                for id in ids {
+                    let Some(ObjectKind::Connector(c)) = self.get(id).map(|o| &o.data.kind) else {
+                        continue;
+                    };
+                    let meta = self.tree.get_meta(self.nodes[&id])?;
+                    write_connector(&meta, &change.apply_to(*c), &change)?;
+                }
+            }
             Command::SetLocked { ids, locked } => {
                 self.check_exist(&ids)?;
                 for id in ids {
@@ -441,21 +514,103 @@ impl Document {
         Ok(done)
     }
 
-    fn create(&self, parent: TreeParentId, content: &Content) -> Result<ObjectId> {
+    /// Creates `content` under `parent`. `made` collects created objects with the object
+    /// each copies and their connector, for [`Self::attach_copies`].
+    fn create(
+        &self,
+        parent: TreeParentId,
+        content: &Content,
+        made: &mut Vec<Made>,
+    ) -> Result<ObjectId> {
         let node = self.tree.create(parent)?;
         let id = ObjectId::from_node(node);
         let meta = self.tree.get_meta(node)?;
         meta.insert(key::ID, id.to_string())?;
-        match content {
-            Content::Object(data) => write_data(&meta, data)?,
+        let (from, data) = match content {
+            Content::Object(data) => (None, data),
+            Content::Copied { from, data } => (Some(*from), data),
             Content::Group(children) => {
                 meta.insert(key::KIND, key::GROUP)?;
                 for child in children {
-                    self.create(TreeParentId::Node(node), child)?;
+                    self.create(TreeParentId::Node(node), child, made)?;
+                }
+                return Ok(id);
+            }
+        };
+        write_data(&meta, data)?;
+        let connector = match &data.kind {
+            ObjectKind::Connector(c) => Some(*c),
+            _ => None,
+        };
+        made.push(Made {
+            id,
+            node,
+            from,
+            connector,
+        });
+        Ok(id)
+    }
+
+    /// Points copied connectors at the copies of their objects. Ends of copied connectors
+    /// whose object was not copied come loose where they are.
+    fn attach_copies(&self, made: &[Made]) -> Result<()> {
+        let copies: HashMap<_, _> = made
+            .iter()
+            .filter_map(|m| m.from.map(|from| (from, m.id)))
+            .collect();
+        for m in made {
+            let Some(c) = m.connector else {
+                continue;
+            };
+            let fix = |end: End| match end {
+                End::Attached { object, anchor, at } => match copies.get(&object) {
+                    Some(&copy) => End::Attached {
+                        object: copy,
+                        anchor,
+                        at,
+                    },
+                    None if m.from.is_some() => End::Free(at),
+                    None => end,
+                },
+                end => end,
+            };
+            let (start, end) = (fix(c.start), fix(c.end));
+            if (start, end) != (c.start, c.end) {
+                let meta = self.tree.get_meta(m.node)?;
+                write_end(&meta, key::START, &start)?;
+                write_end(&meta, key::END, &end)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Before `deleted` (objects or groups) go, connectors attached to them that stay
+    /// remember where their ends are, to stay there.
+    fn remember_connector_ends(&self, deleted: &[ObjectId]) -> Result<()> {
+        let gone: HashSet<_> = deleted
+            .iter()
+            .flat_map(|&id| self.leaves(id))
+            .map(|o| o.id)
+            .collect();
+        for object in &self.objects {
+            let ObjectKind::Connector(c) = &object.data.kind else {
+                continue;
+            };
+            if gone.contains(&object.id) {
+                continue;
+            }
+            let Some((s, e)) = self.connector_ends(object.id) else {
+                continue;
+            };
+            let meta = self.tree.get_meta(self.nodes[&object.id])?;
+            for (prefix, end, point) in [(key::START, c.start, s.point), (key::END, c.end, e.point)]
+            {
+                if end.object().is_some_and(|o| gone.contains(&o)) {
+                    write_end(&meta, prefix, &with_position(end, point))?;
                 }
             }
         }
-        Ok(id)
+        Ok(())
     }
 
     fn move_each(&self, moves: &[(ObjectId, Vec2)]) -> Result<()> {
@@ -466,7 +621,15 @@ impl Document {
             for object in self.leaves(id) {
                 if moved.insert(object.id) {
                     let meta = self.tree.get_meta(self.nodes[&object.id])?;
-                    write_bounds(&meta, object.data.bounds + delta)?;
+                    let mut data = object.data.clone();
+                    data.translate(delta);
+                    // Free ends move; attached ones follow their objects (their last known
+                    // position moves along, which is right when the objects move too).
+                    if let ObjectKind::Connector(c) = &data.kind {
+                        write_end(&meta, key::START, &c.start)?;
+                        write_end(&meta, key::END, &c.end)?;
+                    }
+                    write_bounds(&meta, data.bounds)?;
                 }
             }
         }
@@ -563,7 +726,33 @@ impl Document {
         self.groups.clear();
         self.nodes.clear();
         self.roots = self.read_children(TreeParentId::Root, None);
+        self.resolve_connectors();
         self.revision += 1;
+    }
+
+    /// Works out where connectors run now, and gives them bounds to match.
+    fn resolve_connectors(&mut self) {
+        self.connectors.clear();
+        let lookup = |id| self.get(id).map(|o| &o.data);
+        let resolved: Vec<_> = self
+            .objects
+            .iter()
+            .enumerate()
+            .filter_map(|(i, o)| match &o.data.kind {
+                ObjectKind::Connector(c) => {
+                    let (s, e) = connector::resolve(c, lookup);
+                    let caps = (c.start_cap, c.end_cap);
+                    let width = o.data.style.stroke_width;
+                    let path = pb_geom::connector::layout(c.route, s, e, caps, width);
+                    Some((i, o.id, s, e, path))
+                }
+                _ => None,
+            })
+            .collect();
+        for (i, id, s, e, path) in resolved {
+            self.objects[i].data.bounds = path.bounds();
+            self.connectors.insert(id, (s, e, path));
+        }
     }
 
     /// Caches the subtree under `parent` and returns the ids of its direct children.
@@ -648,6 +837,16 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
             meta.insert(key::ASSET, image.asset.to_string())?;
             write_crop(meta, image.crop)?;
         }
+        ObjectKind::Connector(c) => {
+            let all = crate::ConnectorChange {
+                start: Some(c.start),
+                end: Some(c.end),
+                route: Some(c.route),
+                start_cap: Some(c.start_cap),
+                end_cap: Some(c.end_cap),
+            };
+            write_connector(meta, c, &all)?;
+        }
         ObjectKind::Shape(_) => {}
     }
     write_bounds(meta, data.bounds.abs())?;
@@ -678,6 +877,152 @@ fn write_style_change(meta: &LoroMap, change: &StyleChange, current: Style) -> R
         meta.insert(key::OPACITY, style.opacity)?;
     }
     Ok(())
+}
+
+/// An end at `point`: a free end moves there, an attached one remembers it.
+fn with_position(end: End, point: Point) -> End {
+    match end {
+        End::Free(_) => End::Free(point),
+        End::Attached { object, anchor, .. } => End::Attached {
+            object,
+            anchor,
+            at: point,
+        },
+    }
+}
+
+/// `p` placed the same way relative to `to` as it was relative to the rectangle `from`.
+fn map_point(p: Point, from: Rect, to: pb_geom::Frame) -> Point {
+    let rel = |v: f64, min: f64, size: f64| if size > 0.0 { (v - min) / size } else { 0.5 };
+    let r = to.rect;
+    let local = Point::new(
+        r.x0 + rel(p.x, from.x0, from.width()) * r.width(),
+        r.y0 + rel(p.y, from.y0, from.height()) * r.height(),
+    );
+    to.to_world(local)
+}
+
+fn route_name(route: Route) -> &'static str {
+    match route {
+        Route::Straight => "straight",
+        Route::Elbow => "elbow",
+        Route::Curved => "curved",
+    }
+}
+
+fn cap_name(cap: Cap) -> &'static str {
+    match cap {
+        Cap::None => "none",
+        Cap::Arrow => "arrow",
+    }
+}
+
+/// Writes the properties `change` sets, taking their values from `c`.
+fn write_connector(meta: &LoroMap, c: &Connector, change: &crate::ConnectorChange) -> Result<()> {
+    if change.start.is_some() {
+        write_end(meta, key::START, &c.start)?;
+    }
+    if change.end.is_some() {
+        write_end(meta, key::END, &c.end)?;
+    }
+    if change.route.is_some() {
+        meta.insert(key::ROUTE, route_name(c.route))?;
+    }
+    if change.start_cap.is_some() {
+        meta.insert(key::START_CAP, cap_name(c.start_cap))?;
+    }
+    if change.end_cap.is_some() {
+        meta.insert(key::END_CAP, cap_name(c.end_cap))?;
+    }
+    Ok(())
+}
+
+fn write_end(meta: &LoroMap, prefix: &str, end: &End) -> Result<()> {
+    let k = |suffix: &str| format!("{prefix}{suffix}");
+    let p = end.point();
+    meta.insert(&k(key::X_SUFFIX), p.x)?;
+    meta.insert(&k(key::Y_SUFFIX), p.y)?;
+    let anchor = match end {
+        End::Free(_) => {
+            meta.delete(&k(key::OBJECT_SUFFIX))?;
+            None
+        }
+        End::Attached { object, anchor, .. } => {
+            meta.insert(&k(key::OBJECT_SUFFIX), object.to_string())?;
+            match anchor {
+                Anchor::Auto => None,
+                Anchor::Fixed(f) => Some(*f),
+            }
+        }
+    };
+    match anchor {
+        Some(f) => {
+            meta.insert(&k(key::ANCHOR_X_SUFFIX), f.x)?;
+            meta.insert(&k(key::ANCHOR_Y_SUFFIX), f.y)?;
+        }
+        None => {
+            meta.delete(&k(key::ANCHOR_X_SUFFIX))?;
+            meta.delete(&k(key::ANCHOR_Y_SUFFIX))?;
+        }
+    }
+    Ok(())
+}
+
+fn get_num(meta: &LoroMap, k: &str) -> Option<f64> {
+    match meta.get(k) {
+        Some(ValueOrContainer::Value(LoroValue::Double(v))) => Some(v),
+        Some(ValueOrContainer::Value(LoroValue::I64(v))) => Some(v as f64),
+        _ => None,
+    }
+}
+
+fn get_str(meta: &LoroMap, k: &str) -> Option<String> {
+    match meta.get(k) {
+        Some(ValueOrContainer::Value(LoroValue::String(s))) => Some(s.to_string()),
+        _ => None,
+    }
+}
+
+fn read_end(meta: &LoroMap, prefix: &str) -> Option<End> {
+    let k = |suffix: &str| format!("{prefix}{suffix}");
+    let point = Point::new(
+        get_num(meta, &k(key::X_SUFFIX))?,
+        get_num(meta, &k(key::Y_SUFFIX))?,
+    );
+    let Some(object) = get_str(meta, &k(key::OBJECT_SUFFIX)) else {
+        return Some(End::Free(point));
+    };
+    let anchor = match (
+        get_num(meta, &k(key::ANCHOR_X_SUFFIX)),
+        get_num(meta, &k(key::ANCHOR_Y_SUFFIX)),
+    ) {
+        (Some(u), Some(v)) => Anchor::Fixed(Point::new(u, v)),
+        _ => Anchor::Auto,
+    };
+    Some(End::Attached {
+        object: ObjectId::parse(&object)?,
+        anchor,
+        at: point,
+    })
+}
+
+fn read_connector(meta: &LoroMap) -> Option<Connector> {
+    let route = match get_str(meta, key::ROUTE).as_deref() {
+        Some("elbow") => Route::Elbow,
+        Some("curved") => Route::Curved,
+        _ => Route::Straight,
+    };
+    let cap = |k| match get_str(meta, k).as_deref() {
+        Some("arrow") => Cap::Arrow,
+        _ => Cap::None,
+    };
+    Some(Connector {
+        start: read_end(meta, key::START)?,
+        end: read_end(meta, key::END)?,
+        route,
+        start_cap: cap(key::START_CAP),
+        end_cap: cap(key::END_CAP),
+    })
 }
 
 fn write_crop(meta: &LoroMap, crop: Rect) -> Result<()> {
@@ -725,6 +1070,9 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
                 _ => Arc::from(""),
             };
             ObjectKind::Sticky(Sticky { text })
+        }
+        ValueOrContainer::Value(LoroValue::String(s)) if &**s == "connector" => {
+            ObjectKind::Connector(read_connector(meta)?)
         }
         ValueOrContainer::Value(LoroValue::String(s)) if &**s == "image" => {
             let asset = match meta.get(key::ASSET)? {
@@ -1380,6 +1728,190 @@ mod tests {
         doc.apply(Command::Delete(doc.roots().to_vec())).unwrap();
         assert!(doc.used_assets().is_empty());
         assert!(doc.assets().contains(asset));
+    }
+
+    fn connector(start: End, end: End) -> ObjectData {
+        ObjectData {
+            kind: ObjectKind::Connector(Connector {
+                start,
+                end,
+                route: Route::Straight,
+                start_cap: Cap::None,
+                end_cap: Cap::Arrow,
+            }),
+            bounds: Rect::ZERO,
+            rotation: 0.0,
+            style: Style::default(),
+        }
+    }
+
+    fn auto(object: ObjectId) -> End {
+        End::Attached {
+            object,
+            anchor: Anchor::Auto,
+            at: Point::ZERO,
+        }
+    }
+
+    fn ends(doc: &Document, id: ObjectId) -> (Point, Point) {
+        let (s, e) = doc.connector_ends(id).unwrap();
+        (s.point, e.point)
+    }
+
+    fn close(a: Point, b: Point) -> bool {
+        (a - b).hypot() < 1e-6
+    }
+
+    #[test]
+    fn connector_follows_its_objects_and_roundtrips() {
+        let mut doc = Document::new();
+        let a = create(&mut doc, rect(0.0, 0.0, 100.0, 100.0));
+        let b = create(&mut doc, rect(300.0, 0.0, 100.0, 100.0));
+        let c = create(&mut doc, connector(auto(a), auto(b)));
+        let (s, e) = ends(&doc, c);
+        assert!(close(s, Point::new(100.0, 50.0)) && close(e, Point::new(300.0, 50.0)));
+        // Bounds come from the path, arrowhead included.
+        assert!(doc.get(c).unwrap().data.bounds.x1 >= 300.0 - 1e-9);
+        doc.apply(Command::Move {
+            ids: vec![b],
+            delta: Vec2::new(0.0, 200.0),
+        })
+        .unwrap();
+        let (_, e) = ends(&doc, c);
+        assert!(e.y > 200.0, "{e:?}");
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(loaded.get(c).unwrap().data, doc.get(c).unwrap().data);
+    }
+
+    #[test]
+    fn deleting_an_object_leaves_the_connector_where_it_was() {
+        let mut doc = Document::new();
+        let a = create(&mut doc, rect(0.0, 0.0, 100.0, 100.0));
+        let b = create(&mut doc, rect(300.0, 0.0, 100.0, 100.0));
+        let c = create(&mut doc, connector(auto(a), auto(b)));
+        doc.apply(Command::Move {
+            ids: vec![b],
+            delta: Vec2::new(0.0, 500.0),
+        })
+        .unwrap();
+        let before = ends(&doc, c);
+        doc.apply(Command::Delete(vec![b])).unwrap();
+        assert!(close(ends(&doc, c).1, before.1));
+        // Undo brings the object back, still attached.
+        doc.undo().unwrap();
+        assert!(doc.contains(b));
+        let ObjectKind::Connector(k) = doc.get(c).unwrap().data.kind else {
+            panic!("not a connector");
+        };
+        assert_eq!(k.end.object(), Some(b));
+    }
+
+    #[test]
+    fn copies_attach_to_copies_and_lone_copies_come_loose() {
+        let mut doc = Document::new();
+        let a = create(&mut doc, rect(0.0, 0.0, 100.0, 100.0));
+        let b = create(&mut doc, rect(300.0, 0.0, 100.0, 100.0));
+        let c = create(
+            &mut doc,
+            connector(auto(a), End::Free(Point::new(200.0, 300.0))),
+        );
+        let made = doc
+            .apply(Command::Create(vec![
+                doc.content(a).unwrap(),
+                doc.content(c).unwrap(),
+            ]))
+            .unwrap()
+            .created;
+        let ObjectKind::Connector(copy) = doc.get(made[1]).unwrap().data.kind else {
+            panic!("not a connector");
+        };
+        assert_eq!(copy.start.object(), Some(made[0]));
+        assert_eq!(copy.end, End::Free(Point::new(200.0, 300.0)));
+        // Copied alone, the attached end stays where it is, loose.
+        let lone = doc
+            .apply(Command::Create(vec![doc.content(c).unwrap()]))
+            .unwrap()
+            .created[0];
+        let ObjectKind::Connector(lone_c) = doc.get(lone).unwrap().data.kind else {
+            panic!("not a connector");
+        };
+        assert!(matches!(lone_c.start, End::Free(p) if close(p, ends(&doc, c).0)));
+        // A new connector (not a copy) keeps its attachments.
+        let fresh = create(&mut doc, connector(auto(a), auto(b)));
+        assert_eq!(
+            doc.get(fresh).unwrap().data.kind,
+            connector(auto(a), auto(b)).kind
+        );
+    }
+
+    #[test]
+    fn set_connector_changes_given_properties_and_ends() {
+        let mut doc = Document::new();
+        let a = create(&mut doc, rect(0.0, 0.0, 100.0, 100.0));
+        let c = create(
+            &mut doc,
+            connector(
+                End::Free(Point::new(500.0, 0.0)),
+                End::Free(Point::new(600.0, 0.0)),
+            ),
+        );
+        doc.apply(Command::SetConnector {
+            ids: vec![c],
+            change: crate::ConnectorChange {
+                route: Some(Route::Elbow),
+                end: Some(End::Attached {
+                    object: a,
+                    anchor: Anchor::Fixed(Point::new(0.5, 1.0)),
+                    at: Point::ZERO,
+                }),
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        let ObjectKind::Connector(k) = doc.get(c).unwrap().data.kind else {
+            panic!("not a connector");
+        };
+        assert_eq!(k.route, Route::Elbow);
+        assert_eq!(k.end_cap, Cap::Arrow);
+        assert!(close(ends(&doc, c).1, Point::new(50.0, 100.0)));
+        // Detaching removes the stored object and anchor.
+        doc.apply(Command::SetConnector {
+            ids: vec![c],
+            change: crate::ConnectorChange {
+                end: Some(End::Free(Point::new(1.0, 2.0))),
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        let ObjectKind::Connector(k) = loaded.get(c).unwrap().data.kind else {
+            panic!("not a connector");
+        };
+        assert_eq!(k.end, End::Free(Point::new(1.0, 2.0)));
+    }
+
+    #[test]
+    fn resizing_a_selection_moves_free_connector_ends() {
+        let mut doc = Document::new();
+        let c = create(
+            &mut doc,
+            connector(
+                End::Free(Point::new(0.0, 0.0)),
+                End::Free(Point::new(100.0, 0.0)),
+            ),
+        );
+        let bounds = doc.get(c).unwrap().data.bounds;
+        let wider = Rect::new(
+            bounds.x0,
+            bounds.y0,
+            bounds.x0 + bounds.width() * 2.0,
+            bounds.y1,
+        );
+        doc.apply(Command::SetGeometry(vec![(c, Frame::new(wider, 0.0))]))
+            .unwrap();
+        let (s, e) = ends(&doc, c);
+        assert!(close(s, Point::new(0.0, 0.0)), "{s:?}");
+        assert!((e.x - 200.0).abs() < 1.0, "{e:?}");
     }
 
     #[test]

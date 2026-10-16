@@ -1,4 +1,4 @@
-use pb_core::{Document, ObjectData, ObjectId, ObjectKind};
+use pb_core::{Document, Object, ObjectData, ObjectId, ObjectKind};
 use pb_geom::ink::polyline_distance;
 use pb_geom::kurbo::{Point, Rect};
 
@@ -10,8 +10,27 @@ pub fn object_at(doc: &Document, point: Point, tolerance: f64) -> Option<ObjectI
     doc.objects()
         .iter()
         .rev()
-        .find(|o| hits(&o.data, point, tolerance))
+        .find(|o| object_hits(doc, o, point, tolerance))
         .map(|o| doc.top_level(o.id))
+}
+
+/// Topmost object (not group) under `point` that connectors can attach to.
+pub fn attachable_at(doc: &Document, point: Point, tolerance: f64) -> Option<&Object> {
+    doc.objects()
+        .iter()
+        .rev()
+        .filter(|o| pb_core::connector::can_attach(&o.data.kind))
+        .find(|o| hits(&o.data, point, tolerance))
+}
+
+/// [`hits`], with connectors hit along their path.
+fn object_hits(doc: &Document, object: &Object, point: Point, tolerance: f64) -> bool {
+    match &object.data.kind {
+        ObjectKind::Connector(_) => doc.connector_path(object.id).is_some_and(|path| {
+            path.distance(point) <= tolerance + object.data.style.stroke_width / 2.0
+        }),
+        _ => hits(&object.data, point, tolerance),
+    }
 }
 
 /// Whether the object reaches into `area` (world): its frame for shapes, its line for ink.
@@ -24,6 +43,8 @@ fn touches(data: &ObjectData, area: Rect) -> bool {
         | ObjectKind::Text(_)
         | ObjectKind::Sticky(_)
         | ObjectKind::Image(_) => true,
+        // Needs the document's path; see `connector_touches`.
+        ObjectKind::Connector(_) => false,
         ObjectKind::Ink(ink) => {
             let frame = data.frame();
             let points: Vec<_> = ink
@@ -74,6 +95,8 @@ pub(crate) fn hits(data: &ObjectData, point: Point, tolerance: f64) -> bool {
         ObjectKind::Text(_) | ObjectKind::Sticky(_) => {
             data.bounds.inflate(pad, pad).contains(local)
         }
+        // Hit along the path, which needs the document; see `connector_hit`.
+        ObjectKind::Connector(_) => false,
         // Images ignore their outline width.
         ObjectKind::Image(_) => data.bounds.inflate(tolerance, tolerance).contains(local),
         // Ink is hit along its line, not anywhere in its bounds.
@@ -96,7 +119,13 @@ pub fn objects_in(doc: &Document, area: Rect) -> Vec<ObjectId> {
     let mut ids = Vec::new();
     for object in doc.objects() {
         let id = doc.top_level(object.id);
-        if touches(&object.data, area) && !ids.contains(&id) && !doc.is_locked(id) {
+        let touched = match &object.data.kind {
+            ObjectKind::Connector(_) => doc
+                .connector_path(object.id)
+                .is_some_and(|path| pb_geom::connector::touches(path, area)),
+            _ => touches(&object.data, area),
+        };
+        if touched && !ids.contains(&id) && !doc.is_locked(id) {
             ids.push(id);
         }
     }

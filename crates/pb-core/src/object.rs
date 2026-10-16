@@ -6,7 +6,7 @@ use kurbo::{Point, Rect, Vec2};
 use loro::TreeID;
 use pb_geom::{Frame, ShapeKind};
 
-use crate::AssetId;
+use crate::{AssetId, Connector};
 
 /// Stable identifier of a board object, unique across replicas.
 ///
@@ -61,6 +61,9 @@ pub enum ObjectKind {
     Sticky(Sticky),
     /// A picture, stretched over the object's bounds. It ignores colors and outline.
     Image(Image),
+    /// A line between two points or objects, in the outline color and width. Its bounds are
+    /// worked out from its ends; see [`crate::connector`].
+    Connector(Connector),
 }
 
 impl ObjectKind {
@@ -71,6 +74,7 @@ impl ObjectKind {
             Self::Text(_) => "text",
             Self::Sticky(_) => "sticky",
             Self::Image(_) => "image",
+            Self::Connector(_) => "connector",
             Self::Shape(shape) => match shape {
                 ShapeKind::Rectangle => "rect",
                 ShapeKind::RoundedRectangle => "roundRect",
@@ -101,7 +105,7 @@ impl ObjectKind {
         match self {
             Self::Text(text) => Some(&text.text),
             Self::Sticky(sticky) => Some(&sticky.text),
-            Self::Shape(_) | Self::Ink(_) | Self::Image(_) => None,
+            Self::Shape(_) | Self::Ink(_) | Self::Image(_) | Self::Connector(_) => None,
         }
     }
 }
@@ -346,6 +350,15 @@ impl ObjectData {
         self.bounds = frame.rect.abs();
         self.rotation = frame.rotation;
     }
+
+    /// Moves the object; a connector moves its free ends (attached ones follow objects).
+    pub fn translate(&mut self, delta: Vec2) {
+        self.bounds = self.bounds + delta;
+        if let ObjectKind::Connector(c) = &mut self.kind {
+            c.start.translate(delta);
+            c.end.translate(delta);
+        }
+    }
 }
 
 /// An object on the board, as cached by the document.
@@ -373,6 +386,11 @@ pub struct Group {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Content {
     Object(ObjectData),
+    /// A copy of an existing object, so connectors copied with it can attach to the copy.
+    Copied {
+        from: ObjectId,
+        data: ObjectData,
+    },
     Group(Vec<Content>),
 }
 
@@ -386,7 +404,7 @@ impl Content {
 
     fn collect_shapes(&self, out: &mut Vec<ObjectData>) {
         match self {
-            Self::Object(data) => out.push(data.clone()),
+            Self::Object(data) | Self::Copied { data, .. } => out.push(data.clone()),
             Self::Group(children) => children.iter().for_each(|c| c.collect_shapes(out)),
         }
     }
@@ -394,7 +412,7 @@ impl Content {
     /// Moves every shape inside by `delta`.
     pub fn translate(&mut self, delta: Vec2) {
         match self {
-            Self::Object(data) => data.bounds = data.bounds + delta,
+            Self::Object(data) | Self::Copied { data, .. } => data.translate(delta),
             Self::Group(children) => children.iter_mut().for_each(|c| c.translate(delta)),
         }
     }

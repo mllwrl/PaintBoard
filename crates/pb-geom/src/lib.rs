@@ -1,6 +1,7 @@
 //! Geometry: hit-testing, snapping, spatial index, connector routing.
 
 mod camera;
+pub mod connector;
 mod frame;
 mod grid;
 pub mod ink;
