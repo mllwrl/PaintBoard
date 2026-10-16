@@ -300,6 +300,8 @@ impl App {
                     color: style.text_color(),
                     size,
                     auto: style.font_size.is_none(),
+                    align: style.text_align,
+                    valign: style.text_valign,
                 })
             }
             _ => None,

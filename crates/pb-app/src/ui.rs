@@ -10,7 +10,8 @@ use egui::{
     Order, Painter, Pos2, Rect, Response, RichText, Sense, Shadow, Shape, Slider, Stroke, Vec2,
 };
 use pb_core::{
-    Cap, Connector, ConnectorChange, Rgba, Route, ShapeKind, Style, StyleChange, ZOrder,
+    Cap, Connector, ConnectorChange, HAlign, Rgba, Route, ShapeKind, Style, StyleChange, VAlign,
+    ZOrder,
 };
 use pb_geom::kurbo::{self, PathEl};
 use pb_platform::Instant;
@@ -116,6 +117,8 @@ pub struct ShapeText {
     pub size: f64,
     /// The size is fitted to the shape rather than set.
     pub auto: bool,
+    pub align: HAlign,
+    pub valign: VAlign,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -694,7 +697,7 @@ fn selection_toolbar(
                     }
                     if let Some(text) = selection.shape_text {
                         let label = RichText::new("Aa").color(to_color32(text.color)).strong();
-                        let button = ui.button(label).on_hover_text("Text color and size");
+                        let button = ui.button(label).on_hover_text("Text color, size and alignment");
                         toggle(popup, Popup::Text, button.clicked());
                     }
                     if let Some(busy) = selection.handwriting {
@@ -835,6 +838,33 @@ fn selection_toolbar(
                             font_size: Some(Some(size.round())),
                             ..StyleChange::default()
                         });
+                    });
+                    ui.horizontal(|ui| {
+                        for (align, name) in [
+                            (HAlign::Left, "Left"),
+                            (HAlign::Center, "Center"),
+                            (HAlign::Right, "Right"),
+                        ] {
+                            if ui.selectable_label(text.align == align, name).clicked() {
+                                actions.push(Action::SetStyle(StyleChange {
+                                    text_align: Some(align),
+                                    ..StyleChange::default()
+                                }));
+                            }
+                        }
+                        ui.separator();
+                        for (valign, name) in [
+                            (VAlign::Top, "Top"),
+                            (VAlign::Middle, "Middle"),
+                            (VAlign::Bottom, "Bottom"),
+                        ] {
+                            if ui.selectable_label(text.valign == valign, name).clicked() {
+                                actions.push(Action::SetStyle(StyleChange {
+                                    text_valign: Some(valign),
+                                    ..StyleChange::default()
+                                }));
+                            }
+                        }
                     });
                 }
                 Popup::Opacity => {

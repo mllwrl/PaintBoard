@@ -49,6 +49,8 @@ pub enum TextAlign {
     Start,
     /// Centered within the wrapping width.
     Center,
+    /// Against the right edge of the wrapping width (for left-to-right text).
+    End,
 }
 
 impl TextAlign {
@@ -56,6 +58,7 @@ impl TextAlign {
         match self {
             Self::Start => Alignment::Start,
             Self::Center => Alignment::Center,
+            Self::End => Alignment::End,
         }
     }
 }

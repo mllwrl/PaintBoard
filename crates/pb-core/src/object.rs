@@ -123,12 +123,78 @@ impl From<ShapeKind> for ObjectKind {
     }
 }
 
-/// Where text fitted into an object goes: wrapped at the area's width, centered in it, and
+/// Where text fitted into an object goes: wrapped at the area's width, aligned in it, and
 /// drawn at `max_size`, or smaller if it does not fit.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextBox {
     pub area: Rect,
     pub max_size: f64,
+    pub align: HAlign,
+    pub valign: VAlign,
+}
+
+impl TextBox {
+    /// Top of text `height` tall, aligned in the area.
+    pub fn top(&self, height: f64) -> f64 {
+        let area = self.area;
+        match self.valign {
+            VAlign::Top => area.y0,
+            VAlign::Middle => area.y0 + (area.height() - height) / 2.0,
+            VAlign::Bottom => area.y1 - height,
+        }
+    }
+}
+
+/// How lines of text sit across their box.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HAlign {
+    Left,
+    #[default]
+    Center,
+    Right,
+}
+
+/// Where text sits from top to bottom of its box.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VAlign {
+    Top,
+    #[default]
+    Middle,
+    Bottom,
+}
+
+impl HAlign {
+    pub const ALL: [Self; 3] = [Self::Left, Self::Center, Self::Right];
+
+    /// Stored form. Never change it: saved boards depend on it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Center => "center",
+            Self::Right => "right",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|a| a.as_str() == s)
+    }
+}
+
+impl VAlign {
+    pub const ALL: [Self; 3] = [Self::Top, Self::Middle, Self::Bottom];
+
+    /// Stored form. Never change it: saved boards depend on it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Top => "top",
+            Self::Middle => "middle",
+            Self::Bottom => "bottom",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|a| a.as_str() == s)
+    }
 }
 
 /// A geometric shape with text inside. The text's color and size are part of the object's
@@ -147,15 +213,17 @@ impl Shape {
     /// kind, so short texts in shapes of one size match; long ones shrink to fit.
     const MAX_FONT: f64 = 0.15;
 
-    /// Where the text of a `kind` shape with `bounds` goes, at `font_size` or as large as
-    /// fits.
-    pub fn text_box(kind: ShapeKind, bounds: Rect, font_size: Option<f64>) -> TextBox {
+    /// Where the text of a `kind` shape with `bounds` goes, sized and aligned as `style`
+    /// says.
+    pub fn text_box(kind: ShapeKind, bounds: Rect, style: &Style) -> TextBox {
         let side = bounds.width().min(bounds.height());
         let area = kind.text_area(bounds);
         let pad = (side * Self::PADDING).min(area.width().min(area.height()) / 4.0);
         TextBox {
             area: area.inset(-pad),
-            max_size: font_size.unwrap_or(side * Self::MAX_FONT),
+            max_size: style.font_size.unwrap_or(side * Self::MAX_FONT),
+            align: style.text_align,
+            valign: style.text_valign,
         }
     }
 }
@@ -197,6 +265,9 @@ pub struct Style {
     /// Font size of a shape's text, in world units; `None` makes it as large as fits. Text
     /// that does not fit shrinks either way. Other objects ignore it.
     pub font_size: Option<f64>,
+    /// Alignment of a shape's text; other objects ignore it.
+    pub text_align: HAlign,
+    pub text_valign: VAlign,
 }
 
 impl Style {
@@ -215,6 +286,8 @@ impl Default for Style {
             opacity: 1.0,
             text_color: None,
             font_size: None,
+            text_align: HAlign::Center,
+            text_valign: VAlign::Middle,
         }
     }
 }
@@ -230,6 +303,8 @@ pub struct StyleChange {
     pub text_color: Option<Rgba>,
     /// `Some(None)` switches back to fitting the text.
     pub font_size: Option<Option<f64>>,
+    pub text_align: Option<HAlign>,
+    pub text_valign: Option<VAlign>,
 }
 
 impl StyleChange {
@@ -248,6 +323,8 @@ impl StyleChange {
                 .font_size
                 .unwrap_or(style.font_size)
                 .map(|size| size.max(Self::MIN_FONT_SIZE)),
+            text_align: self.text_align.unwrap_or(style.text_align),
+            text_valign: self.text_valign.unwrap_or(style.text_valign),
         }
     }
 
@@ -257,6 +334,8 @@ impl StyleChange {
         if !matches!(kind, ObjectKind::Shape(_)) {
             self.text_color = None;
             self.font_size = None;
+            self.text_align = None;
+            self.text_valign = None;
         }
         self
     }
@@ -307,6 +386,8 @@ impl Sticky {
         TextBox {
             area: Self::text_area(bounds),
             max_size: Self::max_font_size(bounds),
+            align: HAlign::Center,
+            valign: VAlign::Middle,
         }
     }
 }
@@ -444,11 +525,7 @@ impl ObjectData {
     pub fn text_box(&self) -> Option<TextBox> {
         match &self.kind {
             ObjectKind::Sticky(_) => Some(Sticky::text_box(self.bounds)),
-            ObjectKind::Shape(shape) => Some(Shape::text_box(
-                shape.kind,
-                self.bounds,
-                self.style.font_size,
-            )),
+            ObjectKind::Shape(shape) => Some(Shape::text_box(shape.kind, self.bounds, &self.style)),
             ObjectKind::Text(_) | ObjectKind::Ink(_) | ObjectKind::Image(_) => None,
             ObjectKind::Connector(_) => None,
         }
@@ -543,13 +620,38 @@ mod tests {
     #[test]
     fn shape_font_size_is_set_or_follows_the_size() {
         let bounds = Rect::new(0.0, 0.0, 200.0, 100.0);
-        let fitted = Shape::text_box(ShapeKind::Rectangle, bounds, None);
-        let set = Shape::text_box(ShapeKind::Rectangle, bounds, Some(40.0));
+        let fitted = Shape::text_box(ShapeKind::Rectangle, bounds, &Style::default());
+        let style = Style {
+            font_size: Some(40.0),
+            ..Style::default()
+        };
+        let set = Shape::text_box(ShapeKind::Rectangle, bounds, &style);
         assert_eq!(fitted.area, set.area);
         assert_eq!(set.max_size, 40.0);
         // Equal shapes of different kinds get the same largest size.
-        let diamond = Shape::text_box(ShapeKind::Diamond, bounds, None);
+        let diamond = Shape::text_box(ShapeKind::Diamond, bounds, &Style::default());
         assert_eq!(diamond.max_size, fitted.max_size);
         assert!(diamond.area.width() < fitted.area.width());
+    }
+
+    #[test]
+    fn text_sits_where_it_is_aligned() {
+        let mut text_box = Shape::text_box(
+            ShapeKind::Rectangle,
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            &Style::default(),
+        );
+        let area = text_box.area;
+        assert_eq!(text_box.top(20.0), area.y0 + (area.height() - 20.0) / 2.0);
+        text_box.valign = VAlign::Top;
+        assert_eq!(text_box.top(20.0), area.y0);
+        text_box.valign = VAlign::Bottom;
+        assert_eq!(text_box.top(20.0), area.y1 - 20.0);
+        for a in HAlign::ALL {
+            assert_eq!(HAlign::parse(a.as_str()), Some(a));
+        }
+        for a in VAlign::ALL {
+            assert_eq!(VAlign::parse(a.as_str()), Some(a));
+        }
     }
 }

@@ -1,5 +1,5 @@
 use pb_core::connector::ConnectorPath;
-use pb_core::{Assets, Image, Label, ObjectData, ObjectKind, Rgba, Style, TextBox};
+use pb_core::{Assets, HAlign, Image, Label, ObjectData, ObjectKind, Rgba, Style, TextBox};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -28,6 +28,15 @@ const FIT_CACHE_LIMIT: usize = 4096;
 pub fn fitted_font_size(engine: &mut TextEngine, text: &str, text_box: TextBox) -> f64 {
     let area = text_box.area;
     engine.fit_size(text, area.width(), area.height(), text_box.max_size)
+}
+
+/// How lines aligned with `align` are laid out.
+pub fn text_align(align: HAlign) -> TextAlign {
+    match align {
+        HAlign::Left => TextAlign::Start,
+        HAlign::Center => TextAlign::Center,
+        HAlign::Right => TextAlign::End,
+    }
 }
 
 /// Lays out and draws board text with the app font.
@@ -80,10 +89,11 @@ impl TextRenderer {
         }
         let size = self.fitted_font_size(text, text_box);
         let area = text_box.area;
+        let align = text_align(text_box.align);
         let layout = self
             .engine
-            .layout_aligned(text, size, Some(area.width()), TextAlign::Center);
-        let top = area.y0 + (area.height() - layout.height) / 2.0;
+            .layout_aligned(text, size, Some(area.width()), align);
+        let top = text_box.top(layout.height);
         self.draw(
             scene,
             transform,

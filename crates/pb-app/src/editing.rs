@@ -11,7 +11,7 @@ use pb_core::{
 use pb_geom::kurbo::{Point, Rect, Size, Vec2};
 use pb_geom::{Frame, ShapeKind};
 use pb_platform::clipboard;
-use pb_render::{TextEditOverlay, fitted_font_size};
+use pb_render::{TextEditOverlay, fitted_font_size, text_align};
 use pb_text::{Motion, TextAlign, TextEditor, TextEngine, TextRect};
 use winit::event::{ElementState, Ime, KeyEvent};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
@@ -68,7 +68,7 @@ impl Placement {
             Self::Fitted {
                 bounds,
                 shape: Some(kind),
-            } => Some(Shape::text_box(kind, bounds, style.font_size)),
+            } => Some(Shape::text_box(kind, bounds, style)),
             Self::Fitted {
                 bounds,
                 shape: None,
@@ -136,7 +136,7 @@ impl TextEdit {
     ) -> Self {
         let text_box = placement.text_box(&style).expect("fitted placement");
         let mut editor = TextEditor::new(engine, text, text_box.max_size);
-        editor.set_wrap(Some(text_box.area.width()), TextAlign::Center);
+        editor.set_wrap(Some(text_box.area.width()), text_align(text_box.align));
         let mut this = Self {
             target,
             editor,
@@ -273,9 +273,9 @@ impl TextEdit {
             Placement::Free { origin } => origin,
             Placement::Fitted { .. } => {
                 let text_box = self.placement.text_box(&self.style);
-                let area = text_box.expect("fitted placement").area;
+                let text_box = text_box.expect("fitted placement");
                 let height = self.editor.layout(engine).height;
-                Point::new(area.x0, area.y0 + (area.height() - height) / 2.0)
+                Point::new(text_box.area.x0, text_box.top(height))
             }
             // Drawn the same way, see `pb_render`.
             Placement::Label { center, .. } => {
@@ -714,7 +714,7 @@ mod tests {
         edit.editor
             .insert(&mut e, &"text that has to shrink ".repeat(6));
         edit.refit(&mut e);
-        let area = Shape::text_box(pb_geom::ShapeKind::Ellipse, bounds, None).area;
+        let area = Shape::text_box(pb_geom::ShapeKind::Ellipse, bounds, &Style::default()).area;
         let layout = edit.editor.layout(&mut e);
         assert!(layout.height <= area.height() && layout.content_width <= area.width());
         assert_eq!(edit.frame(&mut e).rect, bounds);
@@ -726,6 +726,37 @@ mod tests {
         edit.select_all(&mut e);
         edit.editor.backspace(&mut e, false);
         assert_eq!(edit.finish(&mut e), None);
+    }
+
+    #[test]
+    fn aligned_shape_text_puts_the_caret_in_its_corner() {
+        let mut e = engine();
+        let mut doc = Document::new();
+        let bounds = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let style = Style {
+            text_align: pb_core::HAlign::Right,
+            text_valign: pb_core::VAlign::Top,
+            ..Style::default()
+        };
+        let data = ObjectData {
+            kind: ObjectKind::Shape(Shape {
+                kind: pb_geom::ShapeKind::Rectangle,
+                text: "hi".into(),
+            }),
+            bounds,
+            rotation: 0.0,
+            style,
+        };
+        let id = doc
+            .apply(Command::Create(vec![data.into()]))
+            .unwrap()
+            .created[0];
+        let mut edit = TextEdit::existing(&mut e, &doc, id, None).unwrap();
+        edit.editor.motion(&mut e, Motion::TextEnd, false);
+        let area = Shape::text_box(pb_geom::ShapeKind::Rectangle, bounds, &style).area;
+        let (top, _) = edit.overlay(&mut e).caret.unwrap();
+        assert!((top.x - area.x1).abs() < 2.0, "{top:?} vs {area:?}");
+        assert!((top.y - area.y0).abs() < 1.0, "{top:?} vs {area:?}");
     }
 
     #[test]

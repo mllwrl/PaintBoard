@@ -15,8 +15,9 @@ use crate::connector::{self, Anchor, Cap, ConnectorPath, EndPoint, Label, Route}
 
 use crate::command::reorder;
 use crate::{
-    Applied, AssetId, Assets, Command, Connector, Content, End, Group, Image, Ink, Object,
-    ObjectData, ObjectId, ObjectKind, Rgba, Shape, Sticky, Style, StyleChange, Text, ZOrder,
+    Applied, AssetId, Assets, Command, Connector, Content, End, Group, HAlign, Image, Ink, Object,
+    ObjectData, ObjectId, ObjectKind, Rgba, Shape, Sticky, Style, StyleChange, Text, VAlign,
+    ZOrder,
 };
 
 /// Font size of text objects stored without one.
@@ -45,6 +46,9 @@ mod key {
     /// A shape's text color and font size, absent for the defaults (see `Style`).
     pub const TEXT_COLOR: &str = "textColor";
     pub const TEXT_SIZE: &str = "textSize";
+    /// A shape's text alignment, see `HAlign` and `VAlign`.
+    pub const TEXT_ALIGN: &str = "textAlign";
+    pub const TEXT_VALIGN: &str = "textVAlign";
     pub const LOCKED: &str = "locked";
     /// Points of an ink stroke, see `Ink::to_bytes`.
     pub const POINTS: &str = "points";
@@ -903,6 +907,8 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
         opacity: Some(style.opacity),
         text_color: style.text_color,
         font_size: style.font_size.map(Some),
+        text_align: Some(style.text_align),
+        text_valign: Some(style.text_valign),
     };
     write_style_change(meta, &all.for_kind(&data.kind), style)
 }
@@ -932,6 +938,12 @@ fn write_style_change(meta: &LoroMap, change: &StyleChange, current: Style) -> R
             Some(size) => meta.insert(key::TEXT_SIZE, size)?,
             None => meta.delete(key::TEXT_SIZE)?,
         }
+    }
+    if change.text_align.is_some() {
+        meta.insert(key::TEXT_ALIGN, style.text_align.as_str())?;
+    }
+    if change.text_valign.is_some() {
+        meta.insert(key::TEXT_VALIGN, style.text_valign.as_str())?;
     }
     Ok(())
 }
@@ -1203,6 +1215,12 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
             opacity: num(key::OPACITY).unwrap_or(defaults.opacity),
             text_color: color(key::TEXT_COLOR),
             font_size: num(key::TEXT_SIZE),
+            text_align: get_str(meta, key::TEXT_ALIGN)
+                .and_then(|s| HAlign::parse(&s))
+                .unwrap_or_default(),
+            text_valign: get_str(meta, key::TEXT_VALIGN)
+                .and_then(|s| VAlign::parse(&s))
+                .unwrap_or_default(),
         },
     })
 }
@@ -1820,6 +1838,8 @@ mod tests {
             change: StyleChange {
                 text_color: Some(red),
                 font_size: Some(Some(18.0)),
+                text_align: Some(HAlign::Left),
+                text_valign: Some(VAlign::Bottom),
                 ..StyleChange::default()
             },
         })
@@ -1827,6 +1847,8 @@ mod tests {
         let style = |doc: &Document, id| doc.get(id).unwrap().data.style;
         assert_eq!(style(&doc, shape).text_color, Some(red));
         assert_eq!(style(&doc, shape).font_size, Some(18.0));
+        assert_eq!(style(&doc, shape).text_align, HAlign::Left);
+        assert_eq!(style(&doc, shape).text_valign, VAlign::Bottom);
         assert_eq!(style(&doc, note), Style::default());
         let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
         assert_eq!(style(&loaded, shape), style(&doc, shape));
