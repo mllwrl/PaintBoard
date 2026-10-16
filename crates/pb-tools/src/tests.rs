@@ -23,9 +23,11 @@ fn doc_with(rects: &[Rect]) -> (Document, Vec<ObjectId>) {
     let ids = rects
         .iter()
         .map(|&bounds| {
-            doc.apply(Command::Create(vec![shape(ObjectKind::Rectangle, bounds)]))
-                .unwrap()
-                .created[0]
+            doc.apply(Command::Create(vec![
+                shape(ObjectKind::Rectangle, bounds).into(),
+            ]))
+            .unwrap()
+            .created[0]
         })
         .collect();
     (doc, ids)
@@ -44,7 +46,10 @@ fn drag(tools: &mut Tools, doc: &Document, from: Pointer, to: Pointer) -> Option
 
 fn created_bounds(cmd: Option<Command>) -> Rect {
     match cmd {
-        Some(Command::Create(items)) if items.len() == 1 => items[0].bounds,
+        Some(Command::Create(items)) => match &items[..] {
+            [Content::Object(data)] => data.bounds,
+            other => panic!("expected one object, got {other:?}"),
+        },
         other => panic!("expected Create, got {other:?}"),
     }
 }
@@ -221,11 +226,14 @@ fn tiny_drag_does_not_move() {
 fn nudge_and_delete_use_selection() {
     let (doc, ids) = doc_with(&[Rect::new(0.0, 0.0, 100.0, 100.0)]);
     let mut tools = Tools::default();
-    assert!(tools.delete_selected().is_none());
+    assert!(tools.delete_selected(&doc).is_none());
     click(&mut tools, &doc, at(50.0, 50.0));
-    assert_eq!(tools.delete_selected(), Some(Command::Delete(ids.clone())));
     assert_eq!(
-        tools.nudge_selected(Vec2::new(1.0, 0.0)),
+        tools.delete_selected(&doc),
+        Some(Command::Delete(ids.clone()))
+    );
+    assert_eq!(
+        tools.nudge_selected(&doc, Vec2::new(1.0, 0.0)),
         Some(Command::Move {
             ids,
             delta: Vec2::new(1.0, 0.0)
@@ -345,7 +353,10 @@ fn resizing_rotated_object_keeps_opposite_edge() {
     let mut doc = Document::new();
     let mut data = shape(ObjectKind::Rectangle, Rect::new(0.0, 0.0, 100.0, 20.0));
     data.rotation = FRAC_PI_2;
-    let id = doc.apply(Command::Create(vec![data])).unwrap().created[0];
+    let id = doc
+        .apply(Command::Create(vec![data.into()]))
+        .unwrap()
+        .created[0];
     let mut tools = Tools::default();
     tools.select_only([id]);
     // Rotated a quarter turn, the east handle sits at the bottom: (50, 60).
@@ -363,7 +374,7 @@ fn rotated_objects_hit_by_real_shape() {
     let mut doc = Document::new();
     let mut data = shape(ObjectKind::Rectangle, Rect::new(0.0, 0.0, 100.0, 20.0));
     data.rotation = FRAC_PI_2;
-    doc.apply(Command::Create(vec![data])).unwrap();
+    doc.apply(Command::Create(vec![data.into()])).unwrap();
     let mut tools = Tools::default();
     click(&mut tools, &doc, at(90.0, 10.0));
     assert!(tools.selection().is_empty());
@@ -388,4 +399,136 @@ fn alt_drag_duplicates_instead_of_moving() {
     let bounds = created_bounds(tools.pointer_up(&doc, alt(at(250.0, 50.0))));
     assert_eq!(bounds, Rect::new(200.0, 0.0, 300.0, 100.0));
     assert_eq!(tools.selection().ids(), [ids[0]]);
+}
+
+// Groups and locking
+
+fn grouped(doc: &mut Document, ids: &[ObjectId]) -> ObjectId {
+    doc.apply(Command::Group(ids.to_vec())).unwrap().created[0]
+}
+
+fn locked(doc: &mut Document, ids: &[ObjectId]) {
+    doc.apply(Command::SetLocked {
+        ids: ids.to_vec(),
+        locked: true,
+    })
+    .unwrap();
+}
+
+#[test]
+fn clicking_a_member_selects_and_drags_the_group() {
+    let (mut doc, ids) = doc_with(&[
+        Rect::new(0.0, 0.0, 100.0, 100.0),
+        Rect::new(200.0, 0.0, 300.0, 100.0),
+    ]);
+    let g = grouped(&mut doc, &ids);
+    let mut tools = Tools::default();
+    tools.pointer_down(&doc, at(250.0, 50.0));
+    assert_eq!(tools.selection().ids(), [g]);
+    tools.pointer_move(&doc, at(260.0, 50.0));
+    assert_eq!(tools.overrides(&doc).len(), 2);
+    let cmd = tools.pointer_up(&doc, at(260.0, 50.0));
+    assert_eq!(
+        cmd,
+        Some(Command::Move {
+            ids: vec![g],
+            delta: Vec2::new(10.0, 0.0)
+        })
+    );
+    // The selection frame wraps the whole group.
+    assert_eq!(
+        tools.selection().frame(&doc).unwrap().rect,
+        Rect::new(0.0, 0.0, 300.0, 100.0)
+    );
+}
+
+#[test]
+fn group_resizes_as_a_box() {
+    let (mut doc, ids) = doc_with(&[
+        Rect::new(0.0, 0.0, 100.0, 100.0),
+        Rect::new(100.0, 100.0, 200.0, 200.0),
+    ]);
+    grouped(&mut doc, &ids);
+    let mut tools = Tools::default();
+    click(&mut tools, &doc, at(50.0, 50.0));
+    let frames = frame_of_cmd(drag(&mut tools, &doc, at(200.0, 200.0), at(400.0, 400.0)));
+    assert_eq!(frames[1].rect, Rect::new(200.0, 200.0, 400.0, 400.0));
+}
+
+#[test]
+fn group_and_ungroup_commands() {
+    let (mut doc, ids) = doc_with(&[
+        Rect::new(0.0, 0.0, 10.0, 10.0),
+        Rect::new(20.0, 0.0, 30.0, 10.0),
+    ]);
+    let mut tools = Tools::default();
+    click(&mut tools, &doc, at(5.0, 5.0));
+    assert!(tools.group_selected(&doc).is_none());
+    tools.select_all(&doc);
+    let cmd = tools.group_selected(&doc).unwrap();
+    let g = doc.apply(cmd).unwrap().created[0];
+    tools.sync(&doc);
+    // Members selected before grouping now stand for their group.
+    assert_eq!(tools.selection().ids(), [g]);
+    assert_eq!(
+        tools.ungroup_selected(&doc),
+        Some(Command::Ungroup(vec![g]))
+    );
+    tools.select_only([ids[0]]);
+    assert!(tools.ungroup_selected(&doc).is_none());
+}
+
+#[test]
+fn locked_objects_select_but_do_not_move() {
+    let (mut doc, ids) = doc_with(&[
+        Rect::new(0.0, 0.0, 100.0, 100.0),
+        Rect::new(200.0, 0.0, 300.0, 100.0),
+    ]);
+    locked(&mut doc, &[ids[0]]);
+    let mut tools = Tools::default();
+    assert!(drag(&mut tools, &doc, at(50.0, 50.0), at(80.0, 80.0)).is_none());
+    assert_eq!(tools.selection().ids(), [ids[0]]);
+    assert!(tools.overrides(&doc).is_empty());
+    assert!(tools.delete_selected(&doc).is_none());
+    assert!(tools.nudge_selected(&doc, Vec2::new(1.0, 0.0)).is_none());
+    assert!(!tools.shows_handles(&doc));
+    // No resize handle on a locked object.
+    assert!(drag(&mut tools, &doc, at(100.0, 100.0), at(150.0, 150.0)).is_none());
+    assert_eq!(
+        tools.toggle_lock_selected(&doc),
+        Some(Command::SetLocked {
+            ids: vec![ids[0]],
+            locked: false
+        })
+    );
+    tools.select_all(&doc);
+    assert_eq!(tools.selection().ids(), [ids[1]]);
+}
+
+#[test]
+fn mixed_selection_moves_only_unlocked() {
+    let (mut doc, ids) = doc_with(&[
+        Rect::new(0.0, 0.0, 100.0, 100.0),
+        Rect::new(200.0, 0.0, 300.0, 100.0),
+    ]);
+    locked(&mut doc, &[ids[0]]);
+    let mut tools = Tools::default();
+    click(&mut tools, &doc, at(50.0, 50.0));
+    click(&mut tools, &doc, shift(at(250.0, 50.0)));
+    assert_eq!(tools.selection().ids().len(), 2);
+    let cmd = drag(&mut tools, &doc, at(250.0, 50.0), at(260.0, 50.0));
+    assert_eq!(
+        cmd,
+        Some(Command::Move {
+            ids: vec![ids[1]],
+            delta: Vec2::new(10.0, 0.0)
+        })
+    );
+    assert_eq!(
+        tools.toggle_lock_selected(&doc),
+        Some(Command::SetLocked {
+            ids: vec![ids[0], ids[1]],
+            locked: true
+        })
+    );
 }

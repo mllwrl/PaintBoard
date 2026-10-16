@@ -6,4 +6,4 @@ mod object;
 
 pub use command::{Applied, Command, ZOrder};
 pub use document::{Document, Error, Result};
-pub use object::{Object, ObjectData, ObjectId, ObjectKind, Rgba, Style};
+pub use object::{Content, Group, Object, ObjectData, ObjectId, ObjectKind, Rgba, Style};

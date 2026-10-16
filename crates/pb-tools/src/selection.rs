@@ -1,7 +1,8 @@
-use pb_core::{Document, ObjectData, ObjectId};
+use pb_core::{Document, Object, ObjectId};
 use pb_geom::Frame;
 
-/// Selected objects in the order they were selected. View state, never stored in the document.
+/// Selected top-level objects and groups in the order they were selected. View state, never
+/// stored in the document.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Selection {
     ids: Vec<ObjectId>,
@@ -41,35 +42,55 @@ impl Selection {
         self.ids.retain(|&x| x != id);
     }
 
-    /// Drops ids of objects that no longer exist (deleted, undone, removed remotely).
+    /// Drops ids that no longer exist (deleted, undone, removed remotely) and replaces
+    /// objects that got grouped by their group.
     pub fn retain_existing(&mut self, doc: &Document) {
-        self.ids.retain(|&id| doc.get(id).is_some());
+        let ids: Vec<_> = self
+            .ids
+            .iter()
+            .filter(|&&id| doc.contains(id))
+            .map(|&id| doc.top_level(id))
+            .collect();
+        self.set(ids);
+    }
+
+    /// Whether any selected object is locked.
+    pub fn has_locked(&self, doc: &Document) -> bool {
+        self.ids.iter().any(|&id| doc.is_locked(id))
     }
 
     /// The frame that resize and rotate handles attach to.
     pub fn frame(&self, doc: &Document) -> Option<Frame> {
-        frame_of(
-            self.ids
-                .iter()
-                .filter_map(|&id| doc.get(id))
-                .map(|o| &o.data),
-        )
+        selection_frame(doc, &self.ids, |o| o.data.frame())
     }
 }
 
-/// Selection frame of some objects: a single object's own (possibly rotated) frame, or the
-/// axis-aligned box around several.
-pub fn frame_of<'a>(mut objects: impl Iterator<Item = &'a ObjectData>) -> Option<Frame> {
-    let first = objects.next()?;
-    match objects.next() {
-        None => Some(first.frame()),
-        Some(second) => {
-            let aabb = [first, second]
-                .into_iter()
-                .chain(objects)
-                .map(|d| d.frame().aabb())
-                .reduce(|a, b| a.union(b))?;
-            Some(Frame::axis_aligned(aabb))
-        }
+/// Frame of a selectable unit: an object's own (possibly rotated) frame, or the
+/// axis-aligned box around a group. `frame` gives each object's current frame, so callers
+/// can follow a gesture in progress.
+pub fn unit_frame(doc: &Document, id: ObjectId, frame: impl Fn(&Object) -> Frame) -> Option<Frame> {
+    match doc.get(id) {
+        Some(object) => Some(frame(object)),
+        None => bounding_frame(doc.leaves(id).into_iter().map(frame)),
     }
+}
+
+/// Frame of a selection: a single unit's own frame, or the axis-aligned box around several.
+pub fn selection_frame(
+    doc: &Document,
+    ids: &[ObjectId],
+    frame: impl Fn(&Object) -> Frame,
+) -> Option<Frame> {
+    match ids {
+        [] => None,
+        [id] => unit_frame(doc, *id, frame),
+        _ => bounding_frame(ids.iter().flat_map(|&id| doc.leaves(id)).map(frame)),
+    }
+}
+
+fn bounding_frame(frames: impl Iterator<Item = Frame>) -> Option<Frame> {
+    frames
+        .map(|f| f.aabb())
+        .reduce(|a, b| a.union(b))
+        .map(Frame::axis_aligned)
 }

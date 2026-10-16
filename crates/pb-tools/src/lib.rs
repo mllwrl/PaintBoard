@@ -10,9 +10,9 @@ mod selection;
 
 pub use clipboard::{Clipboard, duplicate};
 pub use handles::{Handle, rotation_knob};
-pub use selection::{Selection, frame_of};
+pub use selection::{Selection, selection_frame, unit_frame};
 
-use pb_core::{Command, Document, Object, ObjectData, ObjectId, ObjectKind, Style};
+use pb_core::{Command, Content, Document, Object, ObjectData, ObjectId, ObjectKind, Style};
 use pb_geom::Frame;
 use pb_geom::kurbo::{Point, Rect, Vec2};
 
@@ -151,9 +151,11 @@ impl Tools {
         self.selection.set(ids);
     }
 
+    /// Selects everything that is not locked.
     pub fn select_all(&mut self, doc: &Document) {
         self.set_active(ToolKind::Select);
-        self.selection.set(doc.objects().iter().map(|o| o.id));
+        let ids = doc.roots().iter().filter(|&&id| !doc.is_locked(id));
+        self.selection.set(ids.copied());
     }
 
     /// Returns true if something was selected.
@@ -163,10 +165,10 @@ impl Tools {
         had
     }
 
-    /// Call after every document change: objects may have disappeared.
+    /// Call after every document change: objects may have disappeared or been grouped.
     pub fn sync(&mut self, doc: &Document) {
         self.selection.retain_existing(doc);
-        if self.hover.is_some_and(|id| doc.get(id).is_none()) {
+        if self.hover.is_some_and(|id| !doc.contains(id)) {
             self.hover = None;
         }
     }
@@ -183,14 +185,40 @@ impl Tools {
         }
     }
 
-    pub fn delete_selected(&self) -> Option<Command> {
-        (!self.selection.is_empty()).then(|| Command::Delete(self.selection.ids().to_vec()))
+    /// Deletes the selection, except locked objects.
+    pub fn delete_selected(&self, doc: &Document) -> Option<Command> {
+        let ids = self.unlocked(doc);
+        (!ids.is_empty()).then_some(Command::Delete(ids))
     }
 
-    pub fn nudge_selected(&self, delta: Vec2) -> Option<Command> {
-        (!self.selection.is_empty() && self.gesture.is_none()).then(|| Command::Move {
-            ids: self.selection.ids().to_vec(),
-            delta,
+    pub fn nudge_selected(&self, doc: &Document, delta: Vec2) -> Option<Command> {
+        let ids = self.unlocked(doc);
+        (!ids.is_empty() && self.gesture.is_none()).then_some(Command::Move { ids, delta })
+    }
+
+    /// Groups the selection (Ctrl+G). Needs two or more objects, none of them locked.
+    pub fn group_selected(&self, doc: &Document) -> Option<Command> {
+        let ids = self.selection.ids();
+        (ids.len() > 1 && !self.selection.has_locked(doc)).then(|| Command::Group(ids.to_vec()))
+    }
+
+    /// Dissolves the selected groups that are not locked (Ctrl+Shift+G).
+    pub fn ungroup_selected(&self, doc: &Document) -> Option<Command> {
+        let ids: Vec<_> = self
+            .unlocked(doc)
+            .into_iter()
+            .filter(|&id| doc.group(id).is_some())
+            .collect();
+        (!ids.is_empty()).then_some(Command::Ungroup(ids))
+    }
+
+    /// Locks the selection, or unlocks it if everything in it is locked (Ctrl+Shift+L).
+    pub fn toggle_lock_selected(&self, doc: &Document) -> Option<Command> {
+        let ids = self.selection.ids();
+        let locked = !ids.iter().all(|&id| doc.is_locked(id));
+        (!ids.is_empty()).then(|| Command::SetLocked {
+            ids: ids.to_vec(),
+            locked,
         })
     }
 
@@ -224,11 +252,16 @@ impl Tools {
         }
 
         let toggle = pointer.toggles_selection();
-        match hit::object_at(doc.objects(), p, HIT_SLOP / pointer.zoom) {
+        match hit::object_at(doc, p, HIT_SLOP / pointer.zoom) {
             Some(id) => {
                 let mut select_only_on_click = None;
                 if toggle && self.selection.contains(id) {
                     self.selection.remove(id);
+                    return true;
+                } else if doc.is_locked(id) && !toggle {
+                    // Locked objects can be selected (to unlock or copy them), not dragged.
+                    self.selection.set([id]);
+                    self.hover = None;
                     return true;
                 } else if toggle {
                     self.selection.add(id);
@@ -286,7 +319,7 @@ impl Tools {
             }) => {
                 *current = pointer.world;
                 let area = Rect::from_points(*start, *current);
-                let touched = hit::objects_in(doc.objects(), area);
+                let touched = hit::objects_in(doc, area);
                 let ids: Vec<_> = base.iter().copied().chain(touched).collect();
                 self.selection.set(ids);
                 true
@@ -305,10 +338,9 @@ impl Tools {
             } => {
                 // Like Miro, a shape tool is one-shot: go back to selecting afterwards.
                 self.active = ToolKind::Select;
-                Some(Command::Create(vec![shape(
-                    *kind,
-                    shape_rect(*start, *current, true),
-                )]))
+                Some(Command::Create(vec![
+                    shape(*kind, shape_rect(*start, *current, true)).into(),
+                ]))
             }
             Gesture::Move {
                 dragging: true,
@@ -320,10 +352,13 @@ impl Tools {
                 current,
                 dragging: true,
                 ..
-            } => Some(Command::Move {
-                ids: self.selection.ids().to_vec(),
-                delta: current.world - *start,
-            }),
+            } => {
+                let ids = self.unlocked(doc);
+                (!ids.is_empty()).then(|| Command::Move {
+                    ids,
+                    delta: current.world - *start,
+                })
+            }
             Gesture::Move {
                 select_only_on_click,
                 ..
@@ -357,7 +392,9 @@ impl Tools {
                 ..
             }) => {
                 let delta = current.world - *start;
-                self.selected(doc)
+                self.unlocked(doc)
+                    .into_iter()
+                    .flat_map(|id| doc.leaves(id))
                     .map(|o| {
                         let mut o = *o;
                         o.data.bounds = o.data.bounds + delta;
@@ -390,7 +427,11 @@ impl Tools {
                 dragging: true,
                 duplicate: true,
                 ..
-            }) => self.moved_copies(doc),
+            }) => self
+                .moved_copies(doc)
+                .iter()
+                .flat_map(Content::shapes)
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -409,9 +450,11 @@ impl Tools {
         self.hover.filter(|&id| !self.selection.contains(id))
     }
 
-    /// Resize and rotation handles are shown only when nothing else is going on.
-    pub fn shows_handles(&self) -> bool {
+    /// Resize and rotation handles are shown only when nothing else is going on, and never
+    /// on locked objects.
+    pub fn shows_handles(&self, doc: &Document) -> bool {
         self.active == ToolKind::Select
+            && !self.selection.has_locked(doc)
             && !matches!(
                 self.gesture,
                 Some(Gesture::Move { dragging: true, .. })
@@ -445,12 +488,27 @@ impl Tools {
         }
     }
 
+    /// All objects making up the selection, groups expanded.
     fn selected<'a>(&'a self, doc: &'a Document) -> impl Iterator<Item = &'a Object> + 'a {
-        self.selection.ids().iter().filter_map(|&id| doc.get(id))
+        self.selection.ids().iter().flat_map(|&id| doc.leaves(id))
+    }
+
+    /// The selected objects and groups that are not locked.
+    fn unlocked(&self, doc: &Document) -> Vec<ObjectId> {
+        let ids = self.selection.ids().iter().copied();
+        ids.filter(|&id| !doc.is_locked(id)).collect()
+    }
+
+    /// A single object (not a group) is selected: handles follow its own rotation.
+    fn single_object(&self, doc: &Document) -> bool {
+        matches!(self.selection.ids(), [id] if doc.get(*id).is_some())
     }
 
     /// The selection-frame grip under the pointer, with the frame it belongs to.
     fn grip_at(&self, doc: &Document, pointer: Pointer) -> Option<(Frame, Grip)> {
+        if self.selection.has_locked(doc) {
+            return None;
+        }
         let frame = self.selection.frame(doc)?;
         let radius = HANDLE_HIT_RADIUS / pointer.zoom;
         if (rotation_knob(frame, pointer.zoom) - pointer.world).hypot() <= radius {
@@ -466,7 +524,7 @@ impl Tools {
         let grip = self.grip_at(doc, pointer);
         let hover = match grip {
             Some(_) => None,
-            None => hit::object_at(doc.objects(), pointer.world, HIT_SLOP / pointer.zoom),
+            None => hit::object_at(doc, pointer.world, HIT_SLOP / pointer.zoom),
         };
         let grip_kind = grip.map(|(_, g)| g);
         let changed = hover != self.hover || grip_kind != self.hover_grip;
@@ -476,18 +534,12 @@ impl Tools {
         changed
     }
 
-    fn moved_copies(&self, doc: &Document) -> Vec<ObjectData> {
+    fn moved_copies(&self, doc: &Document) -> Vec<Content> {
         let Some(Gesture::Move { start, current, .. }) = &self.gesture else {
             return Vec::new();
         };
-        let delta = current.world - *start;
-        self.selected(doc)
-            .map(|o| {
-                let mut data = o.data;
-                data.bounds = data.bounds + delta;
-                data
-            })
-            .collect()
+        let items = clipboard::in_z_order(doc, &self.selection);
+        clipboard::offset(&items, current.world - *start)
     }
 
     /// New frames of the selected objects for the resize or rotate gesture in progress.
@@ -502,14 +554,15 @@ impl Tools {
                 // Resize happens in the frame's own (unrotated) space.
                 let delta = from.vec_to_local(current.world - *start);
                 let to = handles::resize(from.rect, *handle, delta, current.shift);
-                if self.selection.ids().len() == 1 {
+                if self.single_object(doc) {
                     let center = from.to_world(to.center());
                     let rect = Rect::from_center_size(center, to.size()).abs();
                     self.selected(doc)
                         .map(|o| (o.id, Frame::new(rect, from.rotation)))
                         .collect()
                 } else {
-                    // A multi-selection frame is axis-aligned; children keep their rotation.
+                    // A group or multi-selection frame is axis-aligned; children keep their
+                    // rotation.
                     self.selected(doc)
                         .map(|o| {
                             let rect = handles::map_rect(o.data.bounds, from.rect, to);
@@ -528,7 +581,7 @@ impl Tools {
                 let mut delta = angle_of(current.world) - angle_of(*start);
                 if current.shift {
                     // Snap the resulting angle of a single object, or the turn of a group.
-                    let base = if self.selection.ids().len() == 1 {
+                    let base = if self.single_object(doc) {
                         from.rotation
                     } else {
                         0.0

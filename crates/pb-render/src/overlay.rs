@@ -1,16 +1,19 @@
 use pb_geom::{Camera, Frame};
 use vello::Scene;
-use vello::kurbo::{Affine, BezPath, Circle, Line, Point, Rect, Stroke};
+use vello::kurbo::{Affine, Arc, BezPath, Circle, Line, Point, Rect, RoundedRect, Stroke, Vec2};
 use vello::peniko::{Color, Fill};
 
 /// Interaction feedback drawn above the board, in screen space so it keeps a constant size.
 #[derive(Clone, Debug, Default)]
 pub struct Overlay {
-    /// Frame of each selected object (world). Outlined individually when more than one.
+    /// Frames outlined faintly inside the selection (world): each selected object, or the
+    /// members of a selected group.
     pub selected: Vec<Frame>,
     /// Frame the handles attach to (world).
     pub selection: Option<Frame>,
     pub show_handles: bool,
+    /// The selection contains locked objects: shows a padlock next to it.
+    pub locked: bool,
     /// Rotation knob position (world), shown with the handles.
     pub rotate_knob: Option<Point>,
     /// Object under the pointer (world).
@@ -43,7 +46,7 @@ pub fn draw_overlay(
     if let Some(hover) = &overlay.hover {
         scene.stroke(&thick, id, colors.accent, None, &outline(hover));
     }
-    if overlay.selected.len() > 1 {
+    if !overlay.selected.is_empty() {
         let faint = colors.accent.multiply_alpha(0.5);
         for frame in &overlay.selected {
             scene.stroke(&thin, id, faint, None, &outline(frame));
@@ -83,6 +86,14 @@ pub fn draw_overlay(
                 scene.stroke(&handle_stroke, id, colors.accent, None, &handle);
             }
         }
+        if overlay.locked {
+            // Just outside the top-right corner, whatever the rotation.
+            let top_right = corners
+                .into_iter()
+                .fold(corners[0], |a, b| if b.x - b.y > a.x - a.y { b } else { a });
+            let center = top_right + Vec2::new(LOCK_GAP + LOCK_SIZE / 2.0, -LOCK_GAP) * scale;
+            draw_padlock(scene, center, scale, colors);
+        }
     }
     if let Some(marquee) = overlay.marquee {
         let r = frame_path(Frame::axis_aligned(marquee).corners().map(to_px), true);
@@ -90,6 +101,32 @@ pub fn draw_overlay(
         scene.fill(Fill::NonZero, id, fill, None, &r);
         scene.stroke(&thin, id, colors.accent, None, &r);
     }
+}
+
+/// Padlock icon size and distance from the selection, in logical pixels.
+const LOCK_SIZE: f64 = 10.0;
+const LOCK_GAP: f64 = 6.0;
+
+/// A small padlock centered on `center` (physical pixels).
+fn draw_padlock(scene: &mut Scene, center: Point, scale: f64, colors: &OverlayColors) {
+    let s = LOCK_SIZE * scale;
+    let body = RoundedRect::new(
+        center.x - s / 2.0,
+        center.y - s * 0.1,
+        center.x + s / 2.0,
+        center.y + s * 0.6,
+        1.5 * scale,
+    );
+    let shackle = Arc::new(
+        (center.x, center.y - s * 0.1),
+        (s * 0.28, s * 0.4),
+        std::f64::consts::PI,
+        std::f64::consts::PI,
+        0.0,
+    );
+    let id = Affine::IDENTITY;
+    scene.stroke(&Stroke::new(1.6 * scale), id, colors.accent, None, &shackle);
+    scene.fill(Fill::NonZero, id, colors.accent, None, &body);
 }
 
 /// Closed outline through screen-space corners. Axis-aligned outlines are snapped to pixel

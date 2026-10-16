@@ -1,24 +1,39 @@
 use kurbo::Vec2;
 use pb_geom::Frame;
 
-use crate::{ObjectData, ObjectId};
+use crate::{Content, ObjectId};
 
 /// A user-level edit. Each applied command is one undo step and, later, one unit of sync.
+///
+/// Ids may name objects or groups unless noted; a group stands for everything inside it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
-    /// Adds objects on top of all others, in the given order.
-    Create(Vec<ObjectData>),
+    /// Adds content on top of all others, in the given order.
+    Create(Vec<Content>),
+    /// Groups left empty are deleted too.
     Delete(Vec<ObjectId>),
     Move {
         ids: Vec<ObjectId>,
         delta: Vec2,
     },
+    /// Moves each object by its own offset (align, distribute).
+    MoveEach(Vec<(ObjectId, Vec2)>),
     /// Sets position, size and rotation of several objects at once (resize, rotate).
+    /// Takes objects only, not groups.
     SetGeometry(Vec<(ObjectId, Frame)>),
-    /// Changes the stacking order of objects.
+    /// Changes the stacking order of objects among their siblings.
     Reorder {
         ids: Vec<ObjectId>,
         to: ZOrder,
+    },
+    /// Wraps objects in a new group that takes the place of the topmost of them.
+    Group(Vec<ObjectId>),
+    /// Dissolves groups; their children take the group's place. Other ids are ignored.
+    Ungroup(Vec<ObjectId>),
+    /// Locked objects cannot be moved, resized or deleted from the canvas.
+    SetLocked {
+        ids: Vec<ObjectId>,
+        locked: bool,
     },
 }
 
@@ -34,7 +49,10 @@ pub enum ZOrder {
 /// What a command produced, for callers that need to follow up (e.g. select new objects).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Applied {
+    /// Top-level ids of created content or of a new group.
     pub created: Vec<ObjectId>,
+    /// Former children of dissolved groups.
+    pub ungrouped: Vec<ObjectId>,
 }
 
 /// The stacking order after moving `selected` objects, back to front.

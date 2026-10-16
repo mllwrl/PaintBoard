@@ -1,6 +1,6 @@
 use std::fmt;
 
-use kurbo::Rect;
+use kurbo::{Rect, Vec2};
 use loro::TreeID;
 use pb_geom::Frame;
 
@@ -120,8 +120,60 @@ impl ObjectData {
     }
 }
 
+/// A shape on the board, as cached by the document.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Object {
     pub id: ObjectId,
     pub data: ObjectData,
+    /// The group directly containing this object.
+    pub parent: Option<ObjectId>,
+    /// Set on the object itself; see [`crate::Document::is_locked`] for the effective state.
+    pub locked: bool,
+}
+
+/// Objects and nested groups that move, select and stack as one unit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Group {
+    pub id: ObjectId,
+    pub parent: Option<ObjectId>,
+    /// Direct children in z-order, back to front. Never empty.
+    pub children: Vec<ObjectId>,
+    pub locked: bool,
+}
+
+/// New board content: a shape, or a group of further content (paste keeps groups).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Content {
+    Object(ObjectData),
+    Group(Vec<Content>),
+}
+
+impl Content {
+    /// The shapes inside, back to front.
+    pub fn shapes(&self) -> Vec<ObjectData> {
+        let mut out = Vec::new();
+        self.collect_shapes(&mut out);
+        out
+    }
+
+    fn collect_shapes(&self, out: &mut Vec<ObjectData>) {
+        match self {
+            Self::Object(data) => out.push(*data),
+            Self::Group(children) => children.iter().for_each(|c| c.collect_shapes(out)),
+        }
+    }
+
+    /// Moves every shape inside by `delta`.
+    pub fn translate(&mut self, delta: Vec2) {
+        match self {
+            Self::Object(data) => data.bounds = data.bounds + delta,
+            Self::Group(children) => children.iter_mut().for_each(|c| c.translate(delta)),
+        }
+    }
+}
+
+impl From<ObjectData> for Content {
+    fn from(data: ObjectData) -> Self {
+        Self::Object(data)
+    }
 }

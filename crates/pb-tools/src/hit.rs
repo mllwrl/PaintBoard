@@ -1,11 +1,12 @@
-use pb_core::{Object, ObjectId, ObjectKind};
+use pb_core::{Document, ObjectId, ObjectKind};
 use pb_geom::kurbo::{Point, Rect};
 
-/// Topmost object under `point`. `tolerance` (world units) makes thin shapes easier to hit.
+/// Topmost top-level object or group under `point`. `tolerance` (world units) makes thin
+/// shapes easier to hit.
 ///
 /// TODO: query an R-tree instead of scanning every object.
-pub fn object_at(objects: &[Object], point: Point, tolerance: f64) -> Option<ObjectId> {
-    objects
+pub fn object_at(doc: &Document, point: Point, tolerance: f64) -> Option<ObjectId> {
+    doc.objects()
         .iter()
         .rev()
         .find(|o| match o.data.kind {
@@ -14,20 +15,24 @@ pub fn object_at(objects: &[Object], point: Point, tolerance: f64) -> Option<Obj
                 o.data.frame().contains(point, pad)
             }
         })
-        .map(|o| o.id)
+        .map(|o| doc.top_level(o.id))
 }
 
-/// Objects touched by `area`, in z-order.
-pub fn objects_in(objects: &[Object], area: Rect) -> impl Iterator<Item = ObjectId> + '_ {
-    objects
-        .iter()
-        .filter(move |o| o.data.frame().overlaps(area))
-        .map(|o| o.id)
+/// Unlocked top-level objects and groups touched by `area`, in z-order.
+pub fn objects_in(doc: &Document, area: Rect) -> Vec<ObjectId> {
+    let mut ids = Vec::new();
+    for object in doc.objects() {
+        let id = doc.top_level(object.id);
+        if object.data.frame().overlaps(area) && !ids.contains(&id) && !doc.is_locked(id) {
+            ids.push(id);
+        }
+    }
+    ids
 }
 
 #[cfg(test)]
 mod tests {
-    use pb_core::{Command, Document, ObjectData, Style};
+    use pb_core::{Command, ObjectData, Style};
 
     use super::*;
 
@@ -36,14 +41,15 @@ mod tests {
         let ids = rects
             .iter()
             .map(|&bounds| {
-                doc.apply(Command::Create(vec![ObjectData {
+                let data = ObjectData {
                     kind: ObjectKind::Rectangle,
                     bounds,
                     rotation: 0.0,
                     style: Style::default(),
-                }]))
-                .unwrap()
-                .created[0]
+                };
+                doc.apply(Command::Create(vec![data.into()]))
+                    .unwrap()
+                    .created[0]
             })
             .collect();
         (doc, ids)
@@ -55,26 +61,17 @@ mod tests {
             Rect::new(0.0, 0.0, 100.0, 100.0),
             Rect::new(50.0, 50.0, 150.0, 150.0),
         ]);
-        assert_eq!(
-            object_at(doc.objects(), Point::new(75.0, 75.0), 0.0),
-            Some(ids[1])
-        );
-        assert_eq!(
-            object_at(doc.objects(), Point::new(10.0, 10.0), 0.0),
-            Some(ids[0])
-        );
-        assert_eq!(object_at(doc.objects(), Point::new(500.0, 0.0), 0.0), None);
+        assert_eq!(object_at(&doc, Point::new(75.0, 75.0), 0.0), Some(ids[1]));
+        assert_eq!(object_at(&doc, Point::new(10.0, 10.0), 0.0), Some(ids[0]));
+        assert_eq!(object_at(&doc, Point::new(500.0, 0.0), 0.0), None);
     }
 
     #[test]
     fn tolerance_extends_hit_area() {
         let (doc, ids) = doc_with(&[Rect::new(0.0, 0.0, 10.0, 10.0)]);
         // Default stroke is 2 wide, so the painted edge already reaches 11.
-        assert_eq!(object_at(doc.objects(), Point::new(13.0, 5.0), 0.0), None);
-        assert_eq!(
-            object_at(doc.objects(), Point::new(13.0, 5.0), 3.0),
-            Some(ids[0])
-        );
+        assert_eq!(object_at(&doc, Point::new(13.0, 5.0), 0.0), None);
+        assert_eq!(object_at(&doc, Point::new(13.0, 5.0), 3.0), Some(ids[0]));
     }
 
     #[test]
@@ -83,7 +80,30 @@ mod tests {
             Rect::new(0.0, 0.0, 10.0, 10.0),
             Rect::new(100.0, 100.0, 110.0, 110.0),
         ]);
-        let hit: Vec<_> = objects_in(doc.objects(), Rect::new(5.0, 5.0, 50.0, 50.0)).collect();
+        let hit = objects_in(&doc, Rect::new(5.0, 5.0, 50.0, 50.0));
         assert_eq!(hit, [ids[0]]);
+    }
+
+    #[test]
+    fn hits_resolve_to_groups_and_skip_locked() {
+        let (mut doc, ids) = doc_with(&[
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+            Rect::new(20.0, 0.0, 30.0, 10.0),
+            Rect::new(40.0, 0.0, 50.0, 10.0),
+        ]);
+        let g = doc
+            .apply(Command::Group(vec![ids[0], ids[1]]))
+            .unwrap()
+            .created[0];
+        doc.apply(Command::SetLocked {
+            ids: vec![ids[2]],
+            locked: true,
+        })
+        .unwrap();
+        assert_eq!(object_at(&doc, Point::new(25.0, 5.0), 0.0), Some(g));
+        // Locked objects can still be clicked, but not swept up by a marquee.
+        assert_eq!(object_at(&doc, Point::new(45.0, 5.0), 0.0), Some(ids[2]));
+        let hit = objects_in(&doc, Rect::new(-5.0, -5.0, 100.0, 100.0));
+        assert_eq!(hit, [g]);
     }
 }

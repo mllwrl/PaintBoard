@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use pb_core::{Command, Document, Object, ZOrder};
@@ -5,7 +6,9 @@ use pb_geom::Camera;
 use pb_geom::kurbo::{Point, Size, Vec2};
 use pb_render::vello::Scene;
 use pb_render::{Gpu, GridStyle, Overlay, Theme, View, build_scene};
-use pb_tools::{Clipboard, CursorHint, Pointer, ToolKind, Tools, frame_of, rotation_knob};
+use pb_tools::{
+    Clipboard, CursorHint, Pointer, ToolKind, Tools, rotation_knob, selection_frame, unit_frame,
+};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
@@ -122,8 +125,11 @@ impl App {
 
     fn apply(&mut self, command: Command) {
         match self.document.apply(command) {
-            // New objects get selected, like in Miro.
+            // New objects get selected, like in Miro, and so do the parts of an ungrouped group.
             Ok(applied) if !applied.created.is_empty() => self.tools.select_only(applied.created),
+            Ok(applied) if !applied.ungrouped.is_empty() => {
+                self.tools.select_only(applied.ungrouped)
+            }
             Ok(_) => {}
             Err(err) => log::error!("command failed: {err}"),
         }
@@ -181,6 +187,13 @@ impl App {
         }
     }
 
+    /// Applies a command built from the current selection, if there is one.
+    fn apply_with(&mut self, build: impl FnOnce(&Tools, &Document) -> Option<Command>) {
+        if let Some(command) = build(&self.tools, &self.document) {
+            self.apply(command);
+        }
+    }
+
     fn reorder(&mut self, to: ZOrder) {
         let ids = self.tools.selection().ids().to_vec();
         if !ids.is_empty() {
@@ -195,7 +208,10 @@ impl App {
         } else {
             1.0
         };
-        if let Some(command) = self.tools.nudge_selected(Vec2::new(dx, dy) * step) {
+        if let Some(command) = self
+            .tools
+            .nudge_selected(&self.document, Vec2::new(dx, dy) * step)
+        {
             self.apply(command);
         }
     }
@@ -233,7 +249,7 @@ impl App {
             }
             KeyCode::KeyX if ctrl => {
                 if self.clipboard.copy(&self.document, self.tools.selection())
-                    && let Some(command) = self.tools.delete_selected()
+                    && let Some(command) = self.tools.delete_selected(&self.document)
                 {
                     self.apply(command);
                 }
@@ -247,6 +263,13 @@ impl App {
                 if let Some(command) = self.clipboard.paste(at) {
                     self.apply(command);
                 }
+            }
+            KeyCode::KeyG if ctrl && modifiers.shift_key() => {
+                self.apply_with(Tools::ungroup_selected);
+            }
+            KeyCode::KeyG if ctrl => self.apply_with(Tools::group_selected),
+            KeyCode::KeyL if ctrl && modifiers.shift_key() => {
+                self.apply_with(Tools::toggle_lock_selected);
             }
             KeyCode::KeyD if ctrl => {
                 if let Some(command) = pb_tools::duplicate(&self.document, self.tools.selection()) {
@@ -264,7 +287,7 @@ impl App {
                 ZOrder::Backward
             }),
             KeyCode::Delete | KeyCode::Backspace => {
-                if let Some(command) = self.tools.delete_selected() {
+                if let Some(command) = self.tools.delete_selected(&self.document) {
                     self.apply(command);
                 }
             }
@@ -292,7 +315,7 @@ impl App {
                 self.navigation.zoom_reset(&mut self.camera, viewport);
             }
             KeyCode::Home => self.camera.look_at(Point::ZERO, 1.0, viewport),
-            KeyCode::KeyG if !event.repeat => self.grid = self.grid.next(),
+            KeyCode::KeyG if !ctrl && !event.repeat => self.grid = self.grid.next(),
             _ => return false,
         }
         true
@@ -416,29 +439,30 @@ impl ApplicationHandler<UserEvent> for App {
 
 /// Selection feedback, following objects mid-gesture.
 fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) -> Overlay {
-    let data_of = |id| {
-        overrides
+    let overrides: HashMap<_, _> = overrides.iter().map(|o| (o.id, o.data)).collect();
+    let frame = |o: &Object| overrides.get(&o.id).unwrap_or(&o.data).frame();
+    let ids = tools.selection().ids();
+    let selection = selection_frame(document, ids, frame);
+    let selected = match ids {
+        [id] if document.group(*id).is_some() => {
+            document.leaves(*id).into_iter().map(frame).collect()
+        }
+        [_] => Vec::new(),
+        _ => ids
             .iter()
-            .find(|o| o.id == id)
-            .or_else(|| document.get(id))
-            .map(|o| &o.data)
+            .filter_map(|&id| unit_frame(document, id, frame))
+            .collect(),
     };
-    let selected: Vec<_> = tools
-        .selection()
-        .ids()
-        .iter()
-        .filter_map(|&id| data_of(id))
-        .collect();
-    let selection = frame_of(selected.iter().copied());
-    let show_handles = tools.shows_handles();
+    let show_handles = tools.shows_handles(document);
     Overlay {
-        selected: selected.iter().map(|d| d.frame()).collect(),
+        selected,
         selection,
         show_handles,
+        locked: tools.selection().has_locked(document),
         rotate_knob: selection
             .filter(|_| show_handles)
             .map(|f| rotation_knob(f, zoom)),
-        hover: tools.hover().and_then(data_of).map(|d| d.frame()),
+        hover: tools.hover().and_then(|id| unit_frame(document, id, frame)),
         marquee: tools.marquee(),
     }
 }

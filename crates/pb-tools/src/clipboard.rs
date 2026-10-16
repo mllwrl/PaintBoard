@@ -1,4 +1,4 @@
-use pb_core::{Command, Document, ObjectData};
+use pb_core::{Command, Content, Document};
 use pb_geom::kurbo::{Point, Vec2};
 
 use crate::Selection;
@@ -12,7 +12,7 @@ const PASTE_OFFSET: f64 = 20.0;
 /// form, so content can travel between boards and app instances.
 #[derive(Default)]
 pub struct Clipboard {
-    items: Vec<ObjectData>,
+    items: Vec<Content>,
     /// Pastes since the last copy, so repeated pastes cascade instead of stacking.
     pastes: u32,
 }
@@ -38,6 +38,7 @@ impl Clipboard {
         let bounds = self
             .items
             .iter()
+            .flat_map(Content::shapes)
             .map(|d| d.frame().aabb())
             .reduce(|a, b| a.union(b))?;
         let delta = match at {
@@ -57,39 +58,42 @@ pub fn duplicate(doc: &Document, selection: &Selection) -> Option<Command> {
     (!items.is_empty()).then(|| Command::Create(offset(&items, Vec2::splat(PASTE_OFFSET))))
 }
 
-/// Selected objects back to front, so copies stack the same way as the originals.
-fn in_z_order(doc: &Document, selection: &Selection) -> Vec<ObjectData> {
-    doc.objects()
+/// Selected objects and groups back to front, so copies stack the same way as the
+/// originals.
+pub(crate) fn in_z_order(doc: &Document, selection: &Selection) -> Vec<Content> {
+    doc.roots()
         .iter()
-        .filter(|o| selection.contains(o.id))
-        .map(|o| o.data)
+        .filter(|&&id| selection.contains(id))
+        .filter_map(|&id| doc.content(id))
         .collect()
 }
 
-fn offset(items: &[ObjectData], delta: Vec2) -> Vec<ObjectData> {
+pub(crate) fn offset(items: &[Content], delta: Vec2) -> Vec<Content> {
     items
         .iter()
-        .map(|d| ObjectData {
-            bounds: d.bounds + delta,
-            ..*d
+        .map(|item| {
+            let mut item = item.clone();
+            item.translate(delta);
+            item
         })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use pb_core::{ObjectKind, Style};
+    use pb_core::{ObjectData, ObjectKind, Style};
     use pb_geom::kurbo::Rect;
 
     use super::*;
 
-    fn rect(x: f64) -> ObjectData {
+    fn rect(x: f64) -> Content {
         ObjectData {
             kind: ObjectKind::Rectangle,
             bounds: Rect::new(x, 0.0, x + 10.0, 10.0),
             rotation: 0.0,
             style: Style::default(),
         }
+        .into()
     }
 
     fn setup() -> (Document, Selection) {
@@ -106,7 +110,11 @@ mod tests {
 
     fn created(cmd: Option<Command>) -> Vec<Rect> {
         match cmd {
-            Some(Command::Create(items)) => items.iter().map(|d| d.bounds).collect(),
+            Some(Command::Create(items)) => items
+                .iter()
+                .flat_map(Content::shapes)
+                .map(|d| d.bounds)
+                .collect(),
             other => panic!("expected Create, got {other:?}"),
         }
     }
@@ -141,5 +149,23 @@ mod tests {
         assert_eq!(copies.len(), 2);
         assert_eq!(copies[0], Rect::new(20.0, 20.0, 30.0, 30.0));
         assert!(duplicate(&doc, &Selection::default()).is_none());
+    }
+
+    #[test]
+    fn copies_keep_groups() {
+        let (mut doc, _) = setup();
+        let ids = doc.roots().to_vec();
+        let g = doc
+            .apply(Command::Group(vec![ids[0], ids[1]]))
+            .unwrap()
+            .created[0];
+        let mut selection = Selection::default();
+        selection.set([g]);
+        match duplicate(&doc, &selection) {
+            Some(Command::Create(items)) => {
+                assert!(matches!(&items[..], [Content::Group(children)] if children.len() == 2));
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
     }
 }
