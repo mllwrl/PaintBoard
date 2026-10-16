@@ -16,7 +16,7 @@ use crate::connector::{self, Anchor, Cap, ConnectorPath, EndPoint, Label, Route}
 use crate::command::reorder;
 use crate::{
     Applied, AssetId, Assets, Command, Connector, Content, End, Group, Image, Ink, Object,
-    ObjectData, ObjectId, ObjectKind, Rgba, Sticky, Style, StyleChange, Text, ZOrder,
+    ObjectData, ObjectId, ObjectKind, Rgba, Shape, Sticky, Style, StyleChange, Text, ZOrder,
 };
 
 /// Font size of text objects stored without one.
@@ -883,7 +883,11 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
             write_connector(meta, c, &all)?;
             write_label(meta, &c.label)?;
         }
-        ObjectKind::Shape(_) => {}
+        ObjectKind::Shape(shape) => {
+            if !shape.text.is_empty() {
+                meta.insert(key::TEXT, &*shape.text)?;
+            }
+        }
     }
     write_bounds(meta, data.bounds.abs())?;
     meta.insert(key::ROTATION, normalize_angle(data.rotation))?;
@@ -1152,7 +1156,14 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
             ObjectKind::Image(Image { asset, crop })
         }
         ValueOrContainer::Value(LoroValue::String(s)) => {
-            ObjectKind::Shape(ObjectKind::parse_shape(&s)?)
+            let text = match meta.get(key::TEXT) {
+                Some(ValueOrContainer::Value(LoroValue::String(t))) => Arc::from(&**t),
+                _ => Arc::from(""),
+            };
+            ObjectKind::Shape(Shape {
+                kind: ObjectKind::parse_shape(&s)?,
+                text,
+            })
         }
         _ => return None,
     };
@@ -1595,7 +1606,7 @@ mod tests {
             let mut data = rect(0.0, 0.0, 10.0, 10.0);
             data.kind = shape.into();
             let id = create(&mut doc, data);
-            assert_eq!(doc.get(id).unwrap().data.kind, ObjectKind::Shape(shape));
+            assert_eq!(doc.get(id).unwrap().data.kind, shape.into());
         }
         let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
         assert_eq!(loaded.objects(), doc.objects());
@@ -1705,7 +1716,10 @@ mod tests {
             size: 12.0,
         });
         let id = create(&mut doc, data);
-        let square = create(&mut doc, rect(0.0, 0.0, 1.0, 1.0));
+        let mut stroke = rect(0.0, 0.0, 1.0, 1.0);
+        let points = [(Point::new(0.0, 0.0), 1.0), (Point::new(1.0, 1.0), 1.0)];
+        stroke.kind = ObjectKind::Ink(Ink::from_world(&points).unwrap().0);
+        let stroke = create(&mut doc, stroke);
         let bounds = Rect::new(0.0, 0.0, 40.0, 15.0);
         doc.apply(Command::SetText {
             id,
@@ -1720,7 +1734,7 @@ mod tests {
         assert_eq!(stored.bounds, bounds);
         assert!(
             doc.apply(Command::SetText {
-                id: square,
+                id: stroke,
                 text: "x".into(),
                 bounds,
             })
@@ -1749,6 +1763,29 @@ mod tests {
         let stored = &doc.get(id).unwrap().data;
         assert_eq!(stored.kind.text(), Some("идея"));
         assert_eq!(stored.bounds, data.bounds);
+    }
+
+    #[test]
+    fn shape_text_roundtrips_and_is_set() {
+        let mut doc = Document::new();
+        let data = rect(0.0, 0.0, 100.0, 60.0);
+        let id = create(&mut doc, data.clone());
+        assert_eq!(doc.get(id).unwrap().data.kind.text(), Some(""));
+        doc.apply(Command::SetText {
+            id,
+            text: "Start".into(),
+            bounds: data.bounds,
+        })
+        .unwrap();
+        let expected = ObjectKind::Shape(Shape {
+            kind: ShapeKind::Rectangle,
+            text: "Start".into(),
+        });
+        assert_eq!(doc.get(id).unwrap().data.kind, expected);
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(loaded.get(id).unwrap().data.kind, expected);
+        doc.undo().unwrap();
+        assert_eq!(doc.get(id).unwrap().data.kind.text(), Some(""));
     }
 
     #[test]

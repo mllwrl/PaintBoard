@@ -1,5 +1,5 @@
 use pb_core::connector::ConnectorPath;
-use pb_core::{Assets, Image, Label, ObjectData, ObjectKind, Rgba, Sticky, Style};
+use pb_core::{Assets, Image, Label, ObjectData, ObjectKind, Rgba, Style, TextBox};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -24,15 +24,10 @@ const PLACEHOLDER_LINE: Color = Color::from_rgb8(0xA0, 0xA0, 0x9A);
 /// Fitted sizes kept by [`TextRenderer`]; the cache is dropped when it grows past this.
 const FIT_CACHE_LIMIT: usize = 4096;
 
-/// Font size of a sticky note's text: as large as fits in its text area.
-pub fn sticky_font_size(engine: &mut TextEngine, text: &str, bounds: Rect) -> f64 {
-    let area = Sticky::text_area(bounds);
-    engine.fit_size(
-        text,
-        area.width(),
-        area.height(),
-        Sticky::max_font_size(bounds),
-    )
+/// Font size of text fitted into a sticky note or shape: as large as fits in its box.
+pub fn fitted_font_size(engine: &mut TextEngine, text: &str, text_box: TextBox) -> f64 {
+    let area = text_box.area;
+    engine.fit_size(text, area.width(), area.height(), text_box.max_size)
 }
 
 /// Lays out and draws board text with the app font.
@@ -41,8 +36,8 @@ pub fn sticky_font_size(engine: &mut TextEngine, text: &str, bounds: Rect) -> f6
 pub struct TextRenderer {
     engine: TextEngine,
     font: FontData,
-    /// Sticky note font sizes by text and note size, as fitting takes several layouts.
-    fitted: HashMap<(Arc<str>, u64, u64), f64>,
+    /// Font sizes of fitted text by text and box, as fitting takes several layouts.
+    fitted: HashMap<(Arc<str>, [u64; 3]), f64>,
 }
 
 impl TextRenderer {
@@ -54,11 +49,11 @@ impl TextRenderer {
         }
     }
 
-    fn sticky_font_size(&mut self, text: &Arc<str>, bounds: Rect) -> f64 {
+    fn fitted_font_size(&mut self, text: &Arc<str>, text_box: TextBox) -> f64 {
+        let area = text_box.area;
         let key = (
             text.clone(),
-            bounds.width().to_bits(),
-            bounds.height().to_bits(),
+            [area.width(), area.height(), text_box.max_size].map(f64::to_bits),
         );
         if let Some(&size) = self.fitted.get(&key) {
             return size;
@@ -66,9 +61,37 @@ impl TextRenderer {
         if self.fitted.len() >= FIT_CACHE_LIMIT {
             self.fitted.clear();
         }
-        let size = sticky_font_size(&mut self.engine, text, bounds);
+        let size = fitted_font_size(&mut self.engine, text, text_box);
         self.fitted.insert(key, size);
         size
+    }
+
+    /// Draws `text` fitted into `text_box`, centered in it.
+    fn draw_fitted(
+        &mut self,
+        scene: &mut Scene,
+        transform: Affine,
+        text: &Arc<str>,
+        text_box: TextBox,
+        brush: Color,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let size = self.fitted_font_size(text, text_box);
+        let area = text_box.area;
+        let layout = self
+            .engine
+            .layout_aligned(text, size, Some(area.width()), TextAlign::Center);
+        let top = area.y0 + (area.height() - layout.height) / 2.0;
+        self.draw(
+            scene,
+            transform,
+            (area.x0, top),
+            size,
+            &layout.glyphs,
+            brush,
+        );
     }
 
     /// Draws `text` laid out at `size`, its top-left corner at `origin` in `transform`.
@@ -145,7 +168,7 @@ pub(crate) fn draw_object(
     }
     match &data.kind {
         ObjectKind::Shape(shape) => {
-            let path = shape.outline(data.bounds);
+            let path = shape.kind.outline(data.bounds);
             scene.fill(Fill::NonZero, transform, color(style.fill), None, &path);
             if style.stroke_width > 0.0 {
                 scene.stroke(
@@ -155,6 +178,9 @@ pub(crate) fn draw_object(
                     None,
                     &path,
                 );
+            }
+            if let Some(text_box) = data.kind.text_box(data.bounds) {
+                text.draw_fitted(scene, transform, &shape.text, text_box, color(style.stroke));
             }
         }
         ObjectKind::Text(content) => {
@@ -186,24 +212,13 @@ pub(crate) fn draw_object(
                 side * SHADOW_BLUR,
             );
             scene.fill(Fill::NonZero, transform, color(style.fill), None, &b);
-            if !sticky.text.is_empty() {
-                let size = text.sticky_font_size(&sticky.text, b);
-                let area = Sticky::text_area(b);
-                let layout = text.engine.layout_aligned(
-                    &sticky.text,
-                    size,
-                    Some(area.width()),
-                    TextAlign::Center,
-                );
-                let top = area.y0 + (area.height() - layout.height) / 2.0;
-                let brush = color(style.stroke);
-                text.draw(
+            if let Some(text_box) = data.kind.text_box(b) {
+                text.draw_fitted(
                     scene,
                     transform,
-                    (area.x0, top),
-                    size,
-                    &layout.glyphs,
-                    brush,
+                    &sticky.text,
+                    text_box,
+                    color(style.stroke),
                 );
             }
         }

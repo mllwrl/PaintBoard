@@ -9,7 +9,7 @@ mod overlay;
 pub use gpu::{FrameTarget, Gpu};
 pub use grid::{GridColors, GridStyle, draw_grid};
 pub use images::ImageCache;
-pub use objects::{TextRenderer, sticky_font_size};
+pub use objects::{TextRenderer, fitted_font_size};
 pub use overlay::{Overlay, OverlayColors, TextEditOverlay};
 pub use vello;
 

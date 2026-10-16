@@ -1,16 +1,17 @@
-//! Typing on the canvas: one text object, sticky note or connector label being edited at a
-//! time.
+//! Typing on the canvas: one text object, sticky note, shape or connector label being
+//! edited at a time.
 //!
 //! Edits stay local until editing ends, then become a single command, so one undo reverts
 //! the whole edit and autosave and sync see finished text only.
 
 use pb_core::{
-    Command, Document, Label, ObjectData, ObjectId, ObjectKind, Rgba, Sticky, Style, Text,
+    Command, Document, Label, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Sticky, Style, Text,
+    TextBox,
 };
-use pb_geom::Frame;
 use pb_geom::kurbo::{Point, Rect, Size, Vec2};
+use pb_geom::{Frame, ShapeKind};
 use pb_platform::clipboard;
-use pb_render::{TextEditOverlay, sticky_font_size};
+use pb_render::{TextEditOverlay, fitted_font_size};
 use pb_text::{Motion, TextAlign, TextEditor, TextEngine, TextRect};
 use winit::event::{ElementState, Ime, KeyEvent};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
@@ -50,10 +51,31 @@ enum Placement {
     /// A text object: the box grows with the text from its top-left corner (world, before
     /// rotation).
     Free { origin: Point },
-    /// A sticky note: the text is fitted and centered in the note's fixed bounds.
-    Sticky { bounds: Rect },
+    /// A sticky note, or a shape of the given kind: the text is fitted and centered in the
+    /// object's fixed bounds.
+    Fitted {
+        bounds: Rect,
+        shape: Option<ShapeKind>,
+    },
     /// A connector's label: centered on `center`, `at` along the line.
     Label { center: Point, at: f64 },
+}
+
+impl Placement {
+    /// Where fitted text goes; `None` unless it is fitted.
+    fn text_box(self) -> Option<TextBox> {
+        match self {
+            Self::Fitted {
+                bounds,
+                shape: Some(kind),
+            } => Some(Shape::text_box(kind, bounds)),
+            Self::Fitted {
+                bounds,
+                shape: None,
+            } => Some(Sticky::text_box(bounds)),
+            Self::Free { .. } | Self::Label { .. } => None,
+        }
+    }
 }
 
 pub struct TextEdit {
@@ -95,23 +117,29 @@ impl TextEdit {
 
     /// A new sticky note with `bounds` (world) and `style`, empty until typed into.
     pub fn new_sticky(engine: &mut TextEngine, bounds: Rect, style: Style) -> Self {
-        Self::sticky(engine, Target::New, "", bounds, 0.0, style)
+        let placement = Placement::Fitted {
+            bounds,
+            shape: None,
+        };
+        Self::fitted(engine, Target::New, "", placement, 0.0, style)
     }
 
-    fn sticky(
+    /// Text fitted into a sticky note or shape; `placement` is [`Placement::Fitted`].
+    fn fitted(
         engine: &mut TextEngine,
         target: Target,
         text: &str,
-        bounds: Rect,
+        placement: Placement,
         rotation: f64,
         style: Style,
     ) -> Self {
-        let mut editor = TextEditor::new(engine, text, Sticky::max_font_size(bounds));
-        editor.set_wrap(Some(Sticky::text_area(bounds).width()), TextAlign::Center);
+        let text_box = placement.text_box().expect("fitted placement");
+        let mut editor = TextEditor::new(engine, text, text_box.max_size);
+        editor.set_wrap(Some(text_box.area.width()), TextAlign::Center);
         let mut this = Self {
             target,
             editor,
-            placement: Placement::Sticky { bounds },
+            placement,
             rotation,
             style,
             original: text.to_owned(),
@@ -122,7 +150,7 @@ impl TextEdit {
         this
     }
 
-    /// Edits an existing text object, sticky note or connector label; `None` for other
+    /// Edits an existing text object, sticky note, shape or connector label; `None` for other
     /// objects. A connector without a label gets one where its line is nearest to `near`
     /// (a double click), or in its middle.
     pub fn existing(
@@ -146,11 +174,25 @@ impl TextEdit {
                 selecting: false,
                 connector: None,
             }),
-            ObjectKind::Sticky(sticky) => Some(Self::sticky(
+            ObjectKind::Sticky(sticky) => Some(Self::fitted(
                 engine,
                 target,
                 &sticky.text,
-                data.bounds,
+                Placement::Fitted {
+                    bounds: data.bounds,
+                    shape: None,
+                },
+                data.rotation,
+                data.style,
+            )),
+            ObjectKind::Shape(shape) => Some(Self::fitted(
+                engine,
+                target,
+                &shape.text,
+                Placement::Fitted {
+                    bounds: data.bounds,
+                    shape: Some(shape.kind),
+                },
                 data.rotation,
                 data.style,
             )),
@@ -176,14 +218,14 @@ impl TextEdit {
                     connector: Some(data.clone()),
                 })
             }
-            ObjectKind::Shape(_) | ObjectKind::Ink(_) | ObjectKind::Image(_) => None,
+            ObjectKind::Ink(_) | ObjectKind::Image(_) => None,
         }
     }
 
-    /// Sizes a sticky note's text to fit, after the text changed.
+    /// Sizes fitted text to fit, after it changed.
     fn refit(&mut self, engine: &mut TextEngine) {
-        if let Placement::Sticky { bounds } = self.placement {
-            let size = sticky_font_size(engine, &self.editor.display_text(), bounds);
+        if let Some(text_box) = self.placement.text_box() {
+            let size = fitted_font_size(engine, &self.editor.display_text(), text_box);
             self.editor.set_size(size);
         }
     }
@@ -191,7 +233,11 @@ impl TextEdit {
     /// A new, empty sticky note next to this one, with the same size and style; `None` when
     /// this is not a sticky note.
     pub fn next_sticky(&mut self, engine: &mut TextEngine, below: bool) -> Option<Self> {
-        let Placement::Sticky { bounds } = self.placement else {
+        let Placement::Fitted {
+            bounds,
+            shape: None,
+        } = self.placement
+        else {
             return None;
         };
         let step = if below {
@@ -210,7 +256,7 @@ impl TextEdit {
                 let width = layout.width.max(self.editor.size() * MIN_WIDTH);
                 Rect::from_origin_size(origin, (width, layout.height))
             }
-            Placement::Sticky { bounds } => bounds,
+            Placement::Fitted { bounds, .. } => bounds,
             Placement::Label { center, .. } => {
                 let layout = self.editor.layout(engine);
                 let width = layout.width.max(self.editor.size() * MIN_WIDTH);
@@ -224,8 +270,8 @@ impl TextEdit {
     fn text_origin(&mut self, engine: &mut TextEngine) -> Point {
         match self.placement {
             Placement::Free { origin } => origin,
-            Placement::Sticky { bounds } => {
-                let area = Sticky::text_area(bounds);
+            Placement::Fitted { .. } => {
+                let area = self.placement.text_box().expect("fitted placement").area;
                 let height = self.editor.layout(engine).height;
                 Point::new(area.x0, area.y0 + (area.height() - height) / 2.0)
             }
@@ -320,7 +366,7 @@ impl TextEdit {
             }
         }
         let word = ctrl;
-        let sticky = matches!(self.placement, Placement::Sticky { .. });
+        let sticky = matches!(self.placement, Placement::Fitted { shape: None, .. });
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => return KeyOutcome::Finish,
             Key::Named(NamedKey::Tab) if sticky && !ctrl && !ed.is_composing() => {
@@ -419,7 +465,10 @@ impl TextEdit {
                     text,
                     size: self.editor.size(),
                 }),
-                Placement::Sticky { .. } | Placement::Label { .. } => {
+                Placement::Fitted {
+                    shape: Some(kind), ..
+                } => ObjectKind::Shape(Shape { kind, text }),
+                Placement::Fitted { shape: None, .. } | Placement::Label { .. } => {
                     ObjectKind::Sticky(Sticky { text })
                 }
             },
@@ -463,7 +512,7 @@ impl TextEdit {
     }
 
     /// The command that keeps the edit, if anything changed. A text object left empty is
-    /// removed; a sticky note stays, even a new one; a label left blank goes.
+    /// removed; a sticky note or shape stays, even a new note; a label left blank goes.
     pub fn finish(mut self, engine: &mut TextEngine) -> Option<Command> {
         self.editor.clear_preedit(engine);
         self.refit(engine);
@@ -640,6 +689,41 @@ mod tests {
             }
             other => panic!("expected SetText, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn shape_text_is_fitted_into_the_shape() {
+        let mut e = engine();
+        let mut doc = Document::new();
+        let bounds = Rect::new(0.0, 0.0, 200.0, 100.0);
+        let data = ObjectData {
+            kind: pb_geom::ShapeKind::Ellipse.into(),
+            bounds,
+            rotation: 0.0,
+            style: Style::default(),
+        };
+        let id = doc
+            .apply(Command::Create(vec![data.into()]))
+            .unwrap()
+            .created[0];
+        let mut edit = TextEdit::existing(&mut e, &doc, id, None).unwrap();
+        // Tab is for sticky notes only.
+        assert!(edit.next_sticky(&mut e, false).is_none());
+        edit.editor
+            .insert(&mut e, &"text that has to shrink ".repeat(6));
+        edit.refit(&mut e);
+        let area = Shape::text_box(pb_geom::ShapeKind::Ellipse, bounds).area;
+        let layout = edit.editor.layout(&mut e);
+        assert!(layout.height <= area.height() && layout.content_width <= area.width());
+        assert_eq!(edit.frame(&mut e).rect, bounds);
+        let shown = edit.data(&mut e);
+        assert!(
+            matches!(&shown.kind, ObjectKind::Shape(s) if s.kind == pb_geom::ShapeKind::Ellipse)
+        );
+        // Emptying it keeps the shape.
+        edit.select_all(&mut e);
+        edit.editor.backspace(&mut e, false);
+        assert_eq!(edit.finish(&mut e), None);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::f64::consts::{FRAC_PI_2, PI, TAU};
+use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, PI, SQRT_2, TAU};
 
 use kurbo::{Affine, BezPath, Ellipse, ParamCurveNearest, Point, Rect, RoundedRect, Shape, Vec2};
 
@@ -126,6 +126,47 @@ impl ShapeKind {
         }
     }
 
+    /// The largest convenient rectangle inside the shape filling `rect`, where its text
+    /// goes. Centered on the shape's body, so a triangle's text sits low and an arrow's on
+    /// its shaft.
+    pub fn text_area(self, rect: Rect) -> Rect {
+        let rect = rect.abs();
+        let (w, h) = (rect.width(), rect.height());
+        let c = rect.center();
+        // Width and height as fractions of the bounds, around the center.
+        let centered = |fw: f64, fh: f64| Rect::from_center_size(c, (w * fw, h * fh));
+        match self {
+            Self::Rectangle => rect,
+            Self::RoundedRectangle => {
+                let r = w.min(h) * ROUNDING * (1.0 - FRAC_1_SQRT_2);
+                rect.inset(-r)
+            }
+            Self::Ellipse => centered(FRAC_1_SQRT_2, FRAC_1_SQRT_2),
+            Self::Diamond => centered(0.5, 0.5),
+            // The widest box under the apex: half the width, the lower half.
+            Self::Triangle => Rect::new(rect.x0 + w / 4.0, c.y, rect.x1 - w / 4.0, rect.y1),
+            Self::Star => {
+                // A square in the inner pentagon: around the star's center, which is below
+                // the middle of its bounds.
+                let side = STAR_INNER * (PI / 5.0).cos() * SQRT_2;
+                let (sw, sh) = (2.0 * (PI / 10.0).cos(), 1.0 + (PI / 5.0).cos());
+                let center = Point::new(c.x, rect.y0 + h / sh);
+                Rect::from_center_size(center, (w * side / sw, h * side / sh))
+            }
+            Self::Arrow => {
+                let head = (w * 0.5).min(h * 0.8);
+                let (s0, s1) = shaft(rect);
+                Rect::new(rect.x0, s0, rect.x1 - head / 2.0, s1)
+            }
+            Self::DoubleArrow => {
+                let head = (w * 0.35).min(h * 0.8);
+                let (s0, s1) = shaft(rect);
+                Rect::new(rect.x0 + head / 2.0, s0, rect.x1 - head / 2.0, s1)
+            }
+            Self::Cloud => centered(0.6, 0.55),
+        }
+    }
+
     /// Whether `point` (in the same space as `rect`) is on the shape or within `pad` of
     /// its outline.
     pub fn hit(self, rect: Rect, point: Point, pad: f64) -> bool {
@@ -221,6 +262,24 @@ mod tests {
         // Just outside the ellipse's left end, but within the padding.
         assert!(ShapeKind::Ellipse.hit(R, Point::new(8.0, 50.0), 3.0));
         assert!(!ShapeKind::Ellipse.hit(R, Point::new(8.0, 50.0), 1.0));
+    }
+
+    #[test]
+    fn text_areas_lie_inside_their_shapes() {
+        for kind in ShapeKind::ALL {
+            let area = kind.text_area(R);
+            assert!(area.width() > 0.0 && area.height() > 0.0, "{kind:?}");
+            // Corners pulled in a hair, as some of them touch the outline.
+            let inner = area.inset(-1e-6);
+            for corner in [
+                Point::new(inner.x0, inner.y0),
+                Point::new(inner.x1, inner.y0),
+                Point::new(inner.x1, inner.y1),
+                Point::new(inner.x0, inner.y1),
+            ] {
+                assert!(kind.outline(R).contains(corner), "{kind:?}: {area:?}");
+            }
+        }
     }
 
     #[test]

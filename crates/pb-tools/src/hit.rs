@@ -97,7 +97,7 @@ pub(crate) fn hits(data: &ObjectData, point: Point, tolerance: f64) -> bool {
     let pad = tolerance + data.style.stroke_width / 2.0;
     let local = data.frame().to_local(point);
     match &data.kind {
-        ObjectKind::Shape(shape) => shape.hit(data.bounds, local, pad),
+        ObjectKind::Shape(shape) => shape.kind.hit(data.bounds, local, pad),
         ObjectKind::Text(_) | ObjectKind::Sticky(_) => {
             data.bounds.inflate(pad, pad).contains(local)
         }

@@ -138,7 +138,7 @@ pub fn can_attach(kind: &ObjectKind) -> bool {
 /// An object's outline in its unrotated coordinates.
 fn outline(data: &ObjectData) -> BezPath {
     match &data.kind {
-        ObjectKind::Shape(shape) => shape.outline(data.bounds),
+        ObjectKind::Shape(shape) => shape.kind.outline(data.bounds),
         _ => data.bounds.to_path(0.1),
     }
 }

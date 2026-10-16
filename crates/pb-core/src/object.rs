@@ -51,7 +51,9 @@ impl fmt::Display for ObjectId {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ObjectKind {
-    Shape(ShapeKind),
+    /// A geometric shape of the fill color with an outline, and text in the outline color
+    /// fitted inside it.
+    Shape(Shape),
     /// Freehand drawing; drawn with the outline color and width.
     Ink(Ink),
     /// Text in the outline color, wrapped at the object's width and centered in it.
@@ -75,17 +77,7 @@ impl ObjectKind {
             Self::Sticky(_) => "sticky",
             Self::Image(_) => "image",
             Self::Connector(_) => "connector",
-            Self::Shape(shape) => match shape {
-                ShapeKind::Rectangle => "rect",
-                ShapeKind::RoundedRectangle => "roundRect",
-                ShapeKind::Ellipse => "ellipse",
-                ShapeKind::Diamond => "diamond",
-                ShapeKind::Triangle => "triangle",
-                ShapeKind::Star => "star",
-                ShapeKind::Arrow => "arrow",
-                ShapeKind::DoubleArrow => "doubleArrow",
-                ShapeKind::Cloud => "cloud",
-            },
+            Self::Shape(shape) => shape_name(shape.kind),
         }
     }
 
@@ -93,26 +85,96 @@ impl ObjectKind {
     pub(crate) fn parse_shape(s: &str) -> Option<ShapeKind> {
         ShapeKind::ALL
             .into_iter()
-            .find(|&shape| Self::Shape(shape).as_str() == s)
+            .find(|&shape| shape_name(shape) == s)
     }
 
     pub fn is_ink(&self) -> bool {
         matches!(self, Self::Ink(_))
     }
 
-    /// The text of a text object or a sticky note.
+    /// The text of a text object, sticky note or shape.
     pub fn text(&self) -> Option<&str> {
         match self {
             Self::Text(text) => Some(&text.text),
             Self::Sticky(sticky) => Some(&sticky.text),
-            Self::Shape(_) | Self::Ink(_) | Self::Image(_) | Self::Connector(_) => None,
+            Self::Shape(shape) => Some(&shape.text),
+            Self::Ink(_) | Self::Image(_) | Self::Connector(_) => None,
+        }
+    }
+
+    /// Where the text of a sticky note or shape with `bounds` goes; `None` for objects
+    /// whose text is not fitted into them.
+    pub fn text_box(&self, bounds: Rect) -> Option<TextBox> {
+        match self {
+            Self::Sticky(_) => Some(Sticky::text_box(bounds)),
+            Self::Shape(shape) => Some(Shape::text_box(shape.kind, bounds)),
+            Self::Text(_) | Self::Ink(_) | Self::Image(_) | Self::Connector(_) => None,
         }
     }
 }
 
+fn shape_name(kind: ShapeKind) -> &'static str {
+    match kind {
+        ShapeKind::Rectangle => "rect",
+        ShapeKind::RoundedRectangle => "roundRect",
+        ShapeKind::Ellipse => "ellipse",
+        ShapeKind::Diamond => "diamond",
+        ShapeKind::Triangle => "triangle",
+        ShapeKind::Star => "star",
+        ShapeKind::Arrow => "arrow",
+        ShapeKind::DoubleArrow => "doubleArrow",
+        ShapeKind::Cloud => "cloud",
+    }
+}
+
 impl From<ShapeKind> for ObjectKind {
-    fn from(shape: ShapeKind) -> Self {
-        Self::Shape(shape)
+    fn from(kind: ShapeKind) -> Self {
+        Self::Shape(kind.into())
+    }
+}
+
+/// Where text fitted into an object goes: wrapped at the area's width, centered in it, and
+/// drawn as large as fits, up to `max_size`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextBox {
+    pub area: Rect,
+    pub max_size: f64,
+}
+
+/// A geometric shape with text inside. Like a sticky note's, the text's font size is not
+/// stored: it is drawn as large as fits.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Shape {
+    pub kind: ShapeKind,
+    pub text: Arc<str>,
+}
+
+impl Shape {
+    /// Space between the shape's text area and its text, relative to the shape's smaller
+    /// side.
+    const PADDING: f64 = 0.04;
+    /// Largest font size, relative to the shape's smaller side. It does not depend on the
+    /// kind, so short texts in shapes of one size match; long ones shrink to fit.
+    const MAX_FONT: f64 = 0.15;
+
+    /// Where the text of a `kind` shape with `bounds` goes.
+    pub fn text_box(kind: ShapeKind, bounds: Rect) -> TextBox {
+        let side = bounds.width().min(bounds.height());
+        let area = kind.text_area(bounds);
+        let pad = (side * Self::PADDING).min(area.width().min(area.height()) / 4.0);
+        TextBox {
+            area: area.inset(-pad),
+            max_size: side * Self::MAX_FONT,
+        }
+    }
+}
+
+impl From<ShapeKind> for Shape {
+    fn from(kind: ShapeKind) -> Self {
+        Self {
+            kind,
+            text: Arc::from(""),
+        }
     }
 }
 
@@ -211,6 +273,14 @@ impl Sticky {
     /// The font size used when even a single short line fits.
     pub fn max_font_size(bounds: Rect) -> f64 {
         bounds.width().min(bounds.height()) * Self::MAX_FONT
+    }
+
+    /// Where the text of a note with `bounds` goes.
+    pub fn text_box(bounds: Rect) -> TextBox {
+        TextBox {
+            area: Self::text_area(bounds),
+            max_size: Self::max_font_size(bounds),
+        }
     }
 }
 
