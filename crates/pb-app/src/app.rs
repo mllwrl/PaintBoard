@@ -29,8 +29,8 @@ use crate::navigation::Navigation;
 use crate::pictures::{self, Picture};
 use crate::session::Session;
 use crate::ui::{
-    Action, LinkInfo, Minimap, Model, STICKY_COLORS, SearchInfo, SelectionInfo, ShapeText,
-    TableInfo, TextFormat, Ui,
+    Action, ContextMenuInfo, LinkInfo, Minimap, Model, STICKY_COLORS, SearchInfo, SelectionInfo,
+    ShapeText, TableInfo, TextFormat, Ui,
 };
 
 pub enum UserEvent {
@@ -116,6 +116,11 @@ pub struct App {
     picking_link: Option<ObjectId>,
     /// Searching the board, while the search bar is open.
     search: Option<Search>,
+    /// The right-click menu, where it was opened: on screen (logical pixels) and on the
+    /// board.
+    context_menu: Option<(Point, Point)>,
+    /// The keyboard shortcuts window is open.
+    show_shortcuts: bool,
     /// The search field should take the keyboard on the next frame.
     focus_search: bool,
     /// Time and screen position of the last left press, to detect double clicks.
@@ -157,6 +162,8 @@ impl App {
             picking_link: None,
             search: None,
             focus_search: false,
+            context_menu: None,
+            show_shortcuts: false,
             last_press: None,
             recognition: None,
             next_request: 0,
@@ -290,6 +297,10 @@ impl App {
             tags: self.tag_counts(),
             fill_colors: self.fill_colors(),
             filter: &self.filter,
+            context_menu: self
+                .context_menu
+                .map(|(screen, _)| self.context_menu_info(screen)),
+            show_shortcuts: self.show_shortcuts,
             search: self.search.as_ref().map(|s| SearchInfo {
                 count: s.hits.len(),
                 current: s.current,
@@ -725,6 +736,36 @@ impl App {
                     self.apply(command);
                 }
             }
+            Action::Copy => {
+                self.copy_selection();
+            }
+            Action::Cut => {
+                if self.copy_selection()
+                    && let Some(command) = self.tools.delete_selected(&self.document)
+                {
+                    self.apply(command);
+                }
+            }
+            Action::Paste => {
+                let at = self.context_menu.map(|(_, world)| world);
+                self.paste_at(at);
+            }
+            Action::SelectAll => self.tools.select_all(&self.document),
+            Action::EditText => {
+                self.edit_selected_text();
+            }
+            Action::AddStickyHere => {
+                if let Some((_, world)) = self.context_menu {
+                    self.add_sticky_at(world);
+                }
+            }
+            Action::AddTextHere => {
+                if let Some((_, world)) = self.context_menu {
+                    self.add_text_at(world);
+                }
+            }
+            Action::CloseContextMenu => self.context_menu = None,
+            Action::ToggleShortcuts => self.show_shortcuts = !self.show_shortcuts,
             Action::OpenSearch => self.open_search(),
             Action::Search(query) => self.search_for(query),
             Action::SearchStep(forward) => self.search_step(forward),
@@ -977,6 +1018,11 @@ impl App {
             .navigation
             .hovered_cursor()
             .map(|c| self.camera.screen_to_world(c));
+        self.paste_at(at);
+    }
+
+    /// Pastes centered on `at` (world), or where the copy came from.
+    fn paste_at(&mut self, at: Option<Point>) {
         if let Some(image) = clipboard::image() {
             match Picture::from_clipboard(image) {
                 Ok(picture) => self.insert_pictures(vec![picture], at),
@@ -1018,6 +1064,78 @@ impl App {
         if let Some(mut edit) = TextEdit::table_cell(engine, &self.document, id, cell) {
             edit.select_all(engine);
             self.start_editing(edit);
+        }
+    }
+
+    /// Starts typing a new text object at `at` (world).
+    fn add_text_at(&mut self, at: Point) {
+        self.finish_editing();
+        self.tools.set_active(ToolKind::Select);
+        let size = NEW_TEXT_SIZE / self.camera.zoom();
+        let color = Style::default().stroke;
+        let edit = TextEdit::new_text(self.text.engine(), at, size, color);
+        self.start_editing(edit);
+    }
+
+    /// Starts typing on a new sticky note centered on `at` (world).
+    fn add_sticky_at(&mut self, at: Point) {
+        self.finish_editing();
+        self.tools.set_active(ToolKind::Select);
+        let side = Sticky::SIZE / self.camera.zoom();
+        let bounds = pb_geom::kurbo::Rect::from_center_size(at, (side, side));
+        let style = Style {
+            fill: self.sticky_color,
+            stroke_width: 0.0,
+            ..Style::default()
+        };
+        let edit = TextEdit::new_sticky(self.text.engine(), bounds, style);
+        self.start_editing(edit);
+    }
+
+    /// Opens the right-click menu at the pointer. Like elsewhere, the object under it gets
+    /// selected unless it already is; on empty board the selection is dropped.
+    fn open_context_menu(&mut self) {
+        let (Some(pointer), Some(screen)) = (self.pointer(), self.navigation.cursor()) else {
+            return;
+        };
+        self.finish_editing();
+        self.tools.cancel();
+        self.tools.set_active(ToolKind::Select);
+        match self.tools.object_at(&self.document, pointer) {
+            Some(id) if !self.tools.selection().contains(id) => self.tools.select_only([id]),
+            Some(_) => {}
+            None => {
+                self.tools.clear_selection();
+            }
+        }
+        self.context_menu = Some((screen, pointer.world));
+    }
+
+    /// What the right-click menu offers.
+    fn context_menu_info(&self, screen: Point) -> ContextMenuInfo {
+        let ids = self.tools.selection().ids();
+        let single = match ids {
+            [id] => self.document.get(*id),
+            _ => None,
+        };
+        ContextMenuInfo {
+            pos: (screen.x as f32, screen.y as f32),
+            selection: !ids.is_empty(),
+            several: ids.len() > 1,
+            has_group: ids.iter().any(|&id| self.document.group(id).is_some()),
+            locked: self.tools.selection().has_locked(&self.document),
+            has_text: single.is_some_and(|o| {
+                matches!(
+                    o.data.kind,
+                    ObjectKind::Text(_)
+                        | ObjectKind::Sticky(_)
+                        | ObjectKind::Shape(_)
+                        | ObjectKind::Frame(_)
+                        | ObjectKind::Connector(_)
+                        | ObjectKind::Table(_)
+                )
+            }),
+            single_object: single.is_some(),
         }
     }
 
@@ -1276,24 +1394,11 @@ impl App {
         }
         if self.tools.active() == ToolKind::Text {
             // Like the shape tools, the text tool is one-shot.
-            self.tools.set_active(ToolKind::Select);
-            let size = NEW_TEXT_SIZE / pointer.zoom;
-            let color = Style::default().stroke;
-            let edit = TextEdit::new_text(self.text.engine(), pointer.world, size, color);
-            self.start_editing(edit);
+            self.add_text_at(pointer.world);
             return true;
         }
         if self.tools.active() == ToolKind::Sticky {
-            self.tools.set_active(ToolKind::Select);
-            let side = Sticky::SIZE / pointer.zoom;
-            let bounds = pb_geom::kurbo::Rect::from_center_size(pointer.world, (side, side));
-            let style = Style {
-                fill: self.sticky_color,
-                stroke_width: 0.0,
-                ..Style::default()
-            };
-            let edit = TextEdit::new_sticky(self.text.engine(), bounds, style);
-            self.start_editing(edit);
+            self.add_sticky_at(pointer.world);
             return true;
         }
         if self.tools.active() == ToolKind::Select
@@ -1795,6 +1900,10 @@ impl App {
             KeyCode::KeyN if !ctrl => self.tools.set_active(ToolKind::Sticky),
             KeyCode::KeyL if !ctrl => self.tools.set_active(ToolKind::Connector),
             KeyCode::KeyF if ctrl => self.open_search(),
+            KeyCode::F1 => self.show_shortcuts = !self.show_shortcuts,
+            KeyCode::Slash if modifiers.shift_key() && !ctrl => {
+                self.show_shortcuts = !self.show_shortcuts;
+            }
             KeyCode::KeyF if !ctrl => self.tools.set_active(ToolKind::Frame),
             KeyCode::KeyK if !ctrl => self.tools.set_active(ToolKind::Kanban),
             KeyCode::Enter | KeyCode::NumpadEnter if !ctrl => return self.edit_selected_text(),
@@ -1858,7 +1967,10 @@ impl App {
             KeyCode::ArrowDown => self.nudge(0.0, 1.0),
             // Esc backs out one level: picking a link target, gesture, tool, cells, selection.
             KeyCode::Escape => {
-                if self.picking_link.take().is_none()
+                let closed = self.context_menu.take().is_some()
+                    || std::mem::replace(&mut self.show_shortcuts, false);
+                if !closed
+                    && self.picking_link.take().is_none()
                     && !self.tools.cancel()
                     && !self.tools.clear_cells()
                 {
@@ -2166,6 +2278,16 @@ impl App {
                 } else {
                     let consumed = self.navigation.mouse_button(button, state);
                     let left = button == MouseButton::Left;
+                    // A press on the board closes the right-click menu; a right click
+                    // opens it.
+                    let menu_was_open =
+                        state == ElementState::Pressed && self.context_menu.take().is_some();
+                    let right_click = !consumed
+                        && button == MouseButton::Right
+                        && state == ElementState::Released;
+                    if right_click {
+                        self.open_context_menu();
+                    }
                     if left {
                         self.canvas_drag = state == ElementState::Pressed && !consumed;
                     }
@@ -2185,7 +2307,10 @@ impl App {
                             (Some(p), Some(s)) => self.text_press(p, s),
                             _ => false,
                         };
-                    text || (!consumed && left && self.handle_left_button(state))
+                    menu_was_open
+                        || right_click
+                        || text
+                        || (!consumed && left && self.handle_left_button(state))
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {

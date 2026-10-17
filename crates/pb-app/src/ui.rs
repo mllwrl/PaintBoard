@@ -79,6 +79,19 @@ pub enum Action {
     RemoveTableLines(bool),
     /// Merges the selected table cells (`true`), or splits the merged ones among them.
     MergeCells(bool),
+    Copy,
+    Cut,
+    /// Pastes where the right-click menu was opened, or under the pointer.
+    Paste,
+    SelectAll,
+    /// Starts editing the selected object's text.
+    EditText,
+    /// Starts a sticky note, or a text, where the right-click menu was opened.
+    AddStickyHere,
+    AddTextHere,
+    CloseContextMenu,
+    /// Opens or closes the keyboard shortcuts window.
+    ToggleShortcuts,
     /// Opens the search bar (Ctrl+F).
     OpenSearch,
     /// Searches the board for this text.
@@ -155,6 +168,25 @@ pub struct Model<'a> {
     pub filter: &'a pb_core::Filter,
     /// The search bar, when it is open.
     pub search: Option<SearchInfo>,
+    /// The right-click menu, when it is open.
+    pub context_menu: Option<ContextMenuInfo>,
+    pub show_shortcuts: bool,
+}
+
+/// What the right-click menu offers.
+#[derive(Clone, Copy, Debug)]
+pub struct ContextMenuInfo {
+    /// Where it opens, in logical pixels.
+    pub pos: (f32, f32),
+    /// It was opened on the selection, not on empty board.
+    pub selection: bool,
+    pub several: bool,
+    pub has_group: bool,
+    pub locked: bool,
+    /// A single object whose text can be edited is selected.
+    pub has_text: bool,
+    /// A single object (not a group) is selected.
+    pub single_object: bool,
 }
 
 /// What the search bar shows.
@@ -422,6 +454,12 @@ impl Ui {
                 Some(info) => search_bar(ctx, info, search_text, &mut actions),
                 None => search_text.clear(),
             }
+            if let Some(info) = model.context_menu {
+                context_menu(ctx, info, &mut actions);
+            }
+            if model.show_shortcuts {
+                shortcuts_window(ctx, &mut actions);
+            }
         });
         self.state
             .handle_platform_output(window, output.platform_output);
@@ -568,6 +606,13 @@ fn board_menu(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         .clicked()
                     {
                         actions.push(Action::OpenSearch);
+                    }
+                    if ui
+                        .button("?")
+                        .on_hover_text("Keyboard shortcuts (F1)")
+                        .clicked()
+                    {
+                        actions.push(Action::ToggleShortcuts);
                     }
                 });
             });
@@ -1353,6 +1398,187 @@ fn selection_toolbar(
             .is_some_and(|p| !popup_area.rect.contains(p))
     {
         *popup = None;
+    }
+}
+
+/// The right-click menu: what can be done with the selection, or on empty board.
+fn context_menu(ctx: &Context, info: ContextMenuInfo, actions: &mut Vec<Action>) {
+    let area = Area::new(Id::unique("context menu"))
+        .fixed_pos(Pos2::new(info.pos.0, info.pos.1))
+        .order(Order::Foreground)
+        .constrain(true)
+        .show(ctx, |ui| {
+            panel().show(ui, |ui| {
+                ui.set_min_width(180.0);
+                let mut item =
+                    |ui: &mut egui::Ui, label: &str, keys: &str, action: Action, on: bool| {
+                        let button = Button::new(label).shortcut_text(keys).frame(false);
+                        if ui.add_enabled(on, button).clicked() {
+                            actions.push(action);
+                            actions.push(Action::CloseContextMenu);
+                        }
+                    };
+                if !info.selection {
+                    item(ui, "Paste here", "Ctrl+V", Action::Paste, true);
+                    item(ui, "Add sticky note here", "", Action::AddStickyHere, true);
+                    item(ui, "Add text here", "", Action::AddTextHere, true);
+                    ui.separator();
+                    item(ui, "Select all", "Ctrl+A", Action::SelectAll, true);
+                    return;
+                }
+                let free = !info.locked;
+                if info.has_text {
+                    item(ui, "Edit text", "Enter", Action::EditText, free);
+                    ui.separator();
+                }
+                item(ui, "Cut", "Ctrl+X", Action::Cut, free);
+                item(ui, "Copy", "Ctrl+C", Action::Copy, true);
+                item(ui, "Paste", "Ctrl+V", Action::Paste, true);
+                item(ui, "Duplicate", "Ctrl+D", Action::Duplicate, true);
+                item(ui, "Delete", "Delete", Action::Delete, free);
+                ui.separator();
+                item(
+                    ui,
+                    "Bring to front",
+                    "Ctrl+Shift+]",
+                    Action::Reorder(ZOrder::Front),
+                    free,
+                );
+                item(
+                    ui,
+                    "Send to back",
+                    "Ctrl+Shift+[",
+                    Action::Reorder(ZOrder::Back),
+                    free,
+                );
+                ui.separator();
+                if info.several {
+                    item(ui, "Group", "Ctrl+G", Action::Group, free);
+                }
+                if info.has_group {
+                    item(ui, "Ungroup", "Ctrl+Shift+G", Action::Ungroup, free);
+                }
+                let lock = if info.locked { "Unlock" } else { "Lock" };
+                item(ui, lock, "Ctrl+Shift+L", Action::ToggleLock, true);
+                if info.single_object {
+                    item(ui, "Copy link to object", "", Action::CopyAnchor, true);
+                }
+            });
+        });
+    let pressed_elsewhere = ctx.input(|i| i.pointer.any_pressed())
+        && ctx
+            .pointer_interact_pos()
+            .is_some_and(|p| !area.response.rect.contains(p));
+    if pressed_elsewhere {
+        actions.push(Action::CloseContextMenu);
+    }
+}
+
+/// Keyboard shortcuts, by topic.
+const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Tools",
+        &[
+            ("V", "Select"),
+            ("R / O / S", "Rectangle / ellipse / next shape"),
+            ("T", "Text"),
+            ("N", "Sticky note"),
+            ("L", "Connector"),
+            ("F", "Frame"),
+            ("K", "Kanban board"),
+            ("P / M / E", "Pen / marker / eraser"),
+        ],
+    ),
+    (
+        "Editing",
+        &[
+            ("Enter, double click", "Edit text"),
+            ("Tab / Shift+Tab", "Next sticky note, cell or card"),
+            ("Ctrl+B / I / U", "Bold / italic / underline"),
+            ("Ctrl+Shift+X", "Strikethrough"),
+            ("Esc", "Stop editing"),
+        ],
+    ),
+    (
+        "Selection",
+        &[
+            ("Ctrl+A", "Select all"),
+            ("Ctrl+C / X / V", "Copy / cut / paste"),
+            ("Ctrl+D, Alt+drag", "Duplicate"),
+            ("Delete", "Delete"),
+            ("Arrows, Shift+arrows", "Nudge"),
+            (
+                "Ctrl+] / Ctrl+[",
+                "Forward / backward (with Shift: front / back)",
+            ),
+            ("Ctrl+G / Ctrl+Shift+G", "Group / ungroup"),
+            ("Ctrl+Shift+L", "Lock / unlock"),
+            (
+                "Shift / Ctrl + click",
+                "Add to or remove from the selection",
+            ),
+        ],
+    ),
+    (
+        "Board",
+        &[
+            ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+            ("Ctrl+F", "Find"),
+            ("Ctrl+N / O / S", "New / open / save"),
+            ("Ctrl+Shift+S", "Save as"),
+            ("Space+drag, middle drag", "Pan"),
+            ("Ctrl+wheel, Ctrl+= / -", "Zoom"),
+            ("Ctrl+0", "Zoom to 100%"),
+            ("Home", "Back to the start"),
+            ("G / Shift+G", "Grid style / snap to grid"),
+            ("F1, ?", "This list"),
+        ],
+    ),
+];
+
+/// The list of keyboard shortcuts, above the other panels.
+fn shortcuts_window(ctx: &Context, actions: &mut Vec<Action>) {
+    let mut open = true;
+    let max_height = ctx.content_rect().height() * 0.75;
+    let shown = egui::Window::new("Keyboard shortcuts")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .order(Order::Foreground)
+        .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(max_height)
+                .show(ui, |ui| {
+                    for (topic, keys) in SHORTCUTS {
+                        ui.strong(*topic);
+                        egui::Grid::new(*topic)
+                            .num_columns(2)
+                            .spacing([16.0, 4.0])
+                            .min_col_width(150.0)
+                            .show(ui, |ui| {
+                                for (key, what) in *keys {
+                                    ui.label(RichText::new(*key).monospace());
+                                    ui.label(*what);
+                                    ui.end_row();
+                                }
+                            });
+                        ui.add_space(8.0);
+                    }
+                });
+        });
+    // Toolbars are foreground areas too; keep this window over them.
+    if let Some(shown) = shown {
+        let layer = shown.response.layer_id;
+        let on_top = ctx.memory(|m| m.areas().top_layer_id(Order::Foreground)) == Some(layer);
+        if !on_top {
+            ctx.move_to_top(layer);
+            // The new order shows on the next frame.
+            ctx.request_repaint();
+        }
+    }
+    if !open {
+        actions.push(Action::ToggleShortcuts);
     }
 }
 
