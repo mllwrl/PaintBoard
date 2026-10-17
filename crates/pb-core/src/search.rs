@@ -32,7 +32,7 @@ pub fn search(doc: &Document, query: &str) -> Vec<Hit> {
         .map(|t| t.id.clone())
         .collect();
     let mut hits = Vec::new();
-    for object in doc.objects() {
+    for object in doc.objects().iter().filter(|o| doc.is_shown(o.id)) {
         let data = &object.data;
         let before = hits.len();
         let mut hit = |area: Frame| {

@@ -78,7 +78,7 @@ pub(crate) fn erased(doc: &Document, from: Point, to: Point, radius: f64) -> Vec
     let swept = Rect::from_points(from, to).inflate(radius, radius);
     doc.objects_in(swept)
         .into_iter()
-        .filter(|o| o.data.kind.is_ink() && !doc.is_locked(o.id) && doc.in_focus(o.id))
+        .filter(|o| o.data.kind.is_ink() && !doc.is_locked(o.id) && doc.reachable(o.id))
         .filter(|o| {
             samples
                 .iter()

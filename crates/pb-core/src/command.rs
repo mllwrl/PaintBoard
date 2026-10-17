@@ -189,6 +189,11 @@ pub enum Command {
         ids: Vec<ObjectId>,
         locked: bool,
     },
+    /// Hidden objects are not drawn and cannot be picked, unless hidden ones are shown.
+    SetHidden {
+        ids: Vec<ObjectId>,
+        hidden: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

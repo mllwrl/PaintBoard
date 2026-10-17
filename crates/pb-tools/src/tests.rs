@@ -1092,6 +1092,25 @@ fn focus_keeps_objects_outside_out_of_reach() {
     assert_eq!(tools.selection().ids(), &[ids[0]]);
 }
 
+#[test]
+fn hidden_objects_are_out_of_reach_until_shown() {
+    let (mut doc, ids) = doc_with(&[Rect::new(0.0, 0.0, 100.0, 100.0)]);
+    let mut tools = Tools::default();
+    tools.select_only([ids[0]]);
+    let cmd = tools.toggle_hidden_selected(&doc).unwrap();
+    doc.apply(cmd).unwrap();
+    tools.clear_selection();
+    click(&mut tools, &doc, at(50.0, 50.0));
+    assert!(tools.selection().is_empty());
+    doc.set_show_hidden(true);
+    click(&mut tools, &doc, at(50.0, 50.0));
+    assert_eq!(tools.selection().ids(), &[ids[0]]);
+    // All of it hidden: the same toggle shows it again.
+    let cmd = tools.toggle_hidden_selected(&doc).unwrap();
+    doc.apply(cmd).unwrap();
+    assert!(!doc.is_hidden(ids[0]));
+}
+
 // Tables
 
 #[test]

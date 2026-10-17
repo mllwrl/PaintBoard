@@ -250,6 +250,7 @@ impl App {
                     data,
                     parent: self.document.parent(id),
                     locked: false,
+                    hidden: false,
                 }),
                 editing::Target::New => previews.push(data),
             }
@@ -410,6 +411,7 @@ impl App {
                 .context_menu
                 .map(|(screen, _)| self.context_menu_info(screen)),
             show_shortcuts: self.show_shortcuts,
+            hidden: (self.document.hidden_count(), self.document.shows_hidden()),
             diagram: self.diagram.clone(),
             show_templates: self.show_templates,
             focus: self.focus_saved.is_some(),
@@ -485,7 +487,8 @@ impl App {
         let shown = objects
             .iter()
             .filter(|o| o.data.kind.is_frame())
-            .chain(objects.iter().filter(|o| !o.data.kind.is_frame()));
+            .chain(objects.iter().filter(|o| !o.data.kind.is_frame()))
+            .filter(|o| self.document.is_shown(o.id));
         let mut content = None;
         let mut marks = Vec::new();
         for o in shown {
@@ -834,6 +837,7 @@ impl App {
             can_crop: matches!(ids, [id] if Crop::new(&self.document, *id).is_some()),
             several: ids.len() > 1,
             locked: selection.has_locked(&self.document),
+            hidden: ids.iter().all(|&id| self.document.is_hidden(id)),
         })
     }
 
@@ -1174,6 +1178,12 @@ impl App {
             Action::Group => self.apply_with(Tools::group_selected),
             Action::Ungroup => self.apply_with(Tools::ungroup_selected),
             Action::ToggleLock => self.apply_with(Tools::toggle_lock_selected),
+            Action::ToggleHidden => self.toggle_hidden(),
+            Action::ShowHidden => {
+                let show = !self.document.shows_hidden();
+                self.document.set_show_hidden(show);
+                self.drop_unreachable();
+            }
             Action::Duplicate => {
                 self.apply_with(|tools, doc| pb_tools::duplicate(doc, tools.selection()));
             }
@@ -2002,6 +2012,27 @@ impl App {
         self.glide_to(&target);
     }
 
+    /// Hides the selection, or shows it again (Ctrl+Shift+H).
+    fn toggle_hidden(&mut self) {
+        self.finish_editing();
+        self.apply_with(Tools::toggle_hidden_selected);
+        self.drop_unreachable();
+    }
+
+    /// Takes what can no longer be picked (hidden) out of the selection.
+    fn drop_unreachable(&mut self) {
+        let document = &self.document;
+        let ids = self.tools.selection().ids();
+        if ids.iter().any(|&id| !document.reachable(id)) {
+            let kept: Vec<_> = ids
+                .iter()
+                .copied()
+                .filter(|&id| document.reachable(id))
+                .collect();
+            self.tools.select_only(kept);
+        }
+    }
+
     /// Leaves focus mode, gliding back to where the board was.
     fn stop_focus(&mut self) {
         self.document.set_focus(None);
@@ -2203,6 +2234,7 @@ impl App {
             }),
             single_object: single.is_some(),
             focus: self.focus_saved.is_some(),
+            hidden: !ids.is_empty() && ids.iter().all(|&id| self.document.is_hidden(id)),
         }
     }
 
@@ -2430,7 +2462,7 @@ impl App {
         self.document
             .objects_in(visible)
             .into_iter()
-            .filter(|o| self.document.in_focus(o.id))
+            .filter(|o| self.document.reachable(o.id))
             .filter_map(|o| {
                 let link = o.data.link.clone()?;
                 let corner = o.data.frame().corners()[1];
@@ -3209,6 +3241,7 @@ impl App {
             KeyCode::KeyL if ctrl && modifiers.shift_key() => {
                 self.apply_with(Tools::toggle_lock_selected);
             }
+            KeyCode::KeyH if ctrl && modifiers.shift_key() => self.toggle_hidden(),
             KeyCode::KeyD if ctrl => {
                 if let Some(command) = pb_tools::duplicate(&self.document, self.tools.selection()) {
                     self.apply(command);

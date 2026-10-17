@@ -82,6 +82,9 @@ const FILTERED_OPACITY: f64 = 0.15;
 /// Opacity of objects outside the focus area, relative to their own.
 const UNFOCUSED_OPACITY: f64 = 0.06;
 
+/// Opacity of hidden objects while hidden ones are shown, relative to their own.
+const HIDDEN_OPACITY: f64 = 0.3;
+
 /// Ids of the objects that may show in `visible` at `zoom`, back to front: those the
 /// spatial index finds there (with room for frame titles and sticky shadows), the ones
 /// mid-gesture, and connectors attached to those (their stored path is out of date).
@@ -142,7 +145,7 @@ pub fn build_scene(
     };
     let shown: Vec<(Option<ObjectId>, &ObjectData)> = shown_objects(doc, visible, zoom, &overrides)
         .into_iter()
-        .filter(|id| !view.hidden.contains(id))
+        .filter(|id| !view.hidden.contains(id) && doc.is_shown(*id))
         .filter_map(|id| current(id).map(|data| (Some(id), data)))
         .collect();
     // Obstacles for elbow connectors, where they are now.
@@ -170,6 +173,9 @@ pub fn build_scene(
         let focused = id.is_none_or(|id| doc.in_focus(id));
         if !focused {
             opacity *= UNFOCUSED_OPACITY;
+        }
+        if id.is_some_and(|id| doc.is_hidden(id)) {
+            opacity *= HIDDEN_OPACITY;
         }
         let faded;
         let data = if opacity == 1.0 {

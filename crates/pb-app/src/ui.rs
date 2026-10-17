@@ -52,6 +52,10 @@ pub enum Action {
     Group,
     Ungroup,
     ToggleLock,
+    /// Hides the selection, or shows it again if all of it is hidden.
+    ToggleHidden,
+    /// Shows hidden objects faded, or leaves them out again.
+    ShowHidden,
     Duplicate,
     Delete,
     Reorder(ZOrder),
@@ -229,6 +233,8 @@ pub struct Model<'a> {
     /// The right-click menu, when it is open.
     pub context_menu: Option<ContextMenuInfo>,
     pub show_shortcuts: bool,
+    /// How many objects are hidden, and whether they are shown faded.
+    pub hidden: (usize, bool),
     /// The diagram-from-text window, when it is open, with the last error.
     pub diagram: Option<Option<String>>,
     /// The template gallery is open.
@@ -292,6 +298,8 @@ pub struct ContextMenuInfo {
     pub single_object: bool,
     /// Focus mode is on.
     pub focus: bool,
+    /// Everything selected is hidden.
+    pub hidden: bool,
 }
 
 /// A voting session, for the person using the app.
@@ -404,6 +412,8 @@ pub struct SelectionInfo {
     pub can_crop: bool,
     pub several: bool,
     pub locked: bool,
+    /// Everything selected is hidden (they are being shown faded).
+    pub hidden: bool,
 }
 
 /// The link of the selected object.
@@ -1229,6 +1239,15 @@ fn view_controls(ctx: &Context, model: &Model, actions: &mut Vec<Action>) -> Rec
                     {
                         actions.push(Action::ToggleMinimap);
                     }
+                    let (hidden, shown) = model.hidden;
+                    if (hidden > 0 || shown)
+                        && ui
+                            .selectable_label(shown, format!("Hidden ({hidden})"))
+                            .on_hover_text("Show hidden objects faded, to pick and show them")
+                            .clicked()
+                    {
+                        actions.push(Action::ShowHidden);
+                    }
                     ui.separator();
                     if ui.button("−").on_hover_text("Zoom out (Ctrl+−)").clicked() {
                         actions.push(Action::ZoomOut);
@@ -1529,6 +1548,10 @@ fn selection_toolbar(
                     }
                     if ui.button("Lock").on_hover_text("Ctrl+Shift+L").clicked() {
                         actions.push(Action::ToggleLock);
+                    }
+                    let hide = if selection.hidden { "Show" } else { "Hide" };
+                    if ui.button(hide).on_hover_text("Ctrl+Shift+H").clicked() {
+                        actions.push(Action::ToggleHidden);
                     }
                     ui.separator();
                     if ui.button("Front").on_hover_text("Ctrl+Shift+]").clicked() {
@@ -1875,6 +1898,8 @@ fn context_menu(ctx: &Context, info: ContextMenuInfo, actions: &mut Vec<Action>)
                 }
                 let lock = if info.locked { "Unlock" } else { "Lock" };
                 item(ui, lock, "Ctrl+Shift+L", Action::ToggleLock, true);
+                let hide = if info.hidden { "Show" } else { "Hide" };
+                item(ui, hide, "Ctrl+Shift+H", Action::ToggleHidden, true);
                 if info.single_object {
                     item(ui, "Copy link to object", "", Action::CopyAnchor, true);
                 }
@@ -2418,6 +2443,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ),
             ("Ctrl+G / Ctrl+Shift+G", "Group / ungroup"),
             ("Ctrl+Shift+L", "Lock / unlock"),
+            ("Ctrl+Shift+H", "Hide / show"),
             (
                 "Shift / Ctrl + click",
                 "Add to or remove from the selection",

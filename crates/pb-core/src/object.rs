@@ -954,6 +954,8 @@ pub struct Object {
     pub parent: Option<ObjectId>,
     /// Set on the object itself; see [`crate::Document::is_locked`] for the effective state.
     pub locked: bool,
+    /// Set on the object itself; see [`crate::Document::is_hidden`] for the effective state.
+    pub hidden: bool,
 }
 
 /// Objects and nested groups that move, select and stack as one unit.
@@ -964,6 +966,7 @@ pub struct Group {
     /// Direct children in z-order, back to front. Never empty.
     pub children: Vec<ObjectId>,
     pub locked: bool,
+    pub hidden: bool,
 }
 
 /// New board content: a shape, or a group of further content (paste keeps groups).

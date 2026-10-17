@@ -566,7 +566,7 @@ impl Tools {
         let ids = doc
             .roots()
             .iter()
-            .filter(|&&id| !doc.is_locked(id) && doc.in_focus(id));
+            .filter(|&&id| !doc.is_locked(id) && doc.reachable(id));
         self.selection.set(ids.copied());
         self.cells = None;
         self.card = None;
@@ -646,6 +646,16 @@ impl Tools {
         (!ids.is_empty()).then(|| Command::SetLocked {
             ids: ids.to_vec(),
             locked,
+        })
+    }
+
+    /// Hides the selection, or shows it again if everything in it is hidden (Ctrl+Shift+H).
+    pub fn toggle_hidden_selected(&self, doc: &Document) -> Option<Command> {
+        let ids = self.selection.ids();
+        let hidden = !ids.iter().all(|&id| doc.is_hidden(id));
+        (!ids.is_empty()).then(|| Command::SetHidden {
+            ids: ids.to_vec(),
+            hidden,
         })
     }
 
@@ -1949,7 +1959,7 @@ impl Tools {
             .objects_in(pointer.visible)
             .into_iter()
             .map(|o| doc.top_level(o.id))
-            .filter(|id| !exclude.contains(id) && doc.in_focus(*id))
+            .filter(|id| !exclude.contains(id) && doc.reachable(*id))
             .collect();
         units.sort_by_key(|&id| doc.paint_order(id));
         units.dedup();

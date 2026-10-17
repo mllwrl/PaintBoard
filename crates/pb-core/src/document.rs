@@ -75,6 +75,7 @@ mod key {
     pub const TEXT_ALIGN: &str = "textAlign";
     pub const TEXT_VALIGN: &str = "textVAlign";
     pub const LOCKED: &str = "locked";
+    pub const HIDDEN: &str = "hidden";
     /// Points of an ink stroke, see `Ink::to_bytes`.
     pub const POINTS: &str = "points";
     pub const TEXT: &str = "text";
@@ -217,6 +218,8 @@ pub struct Document {
     /// The area focus mode keeps in reach (world), if it is on. Not stored: it is how this
     /// window looks at the board.
     focus: Option<Rect>,
+    /// Hidden objects are shown faded instead of left out. Not stored, like `focus`.
+    show_hidden: bool,
 }
 
 /// An object in the spatial index: its world bounds (outline included) and its place in
@@ -253,16 +256,16 @@ enum NodeData {
     Group {
         id: ObjectId,
         locked: bool,
+        hidden: bool,
     },
     Object {
         id: ObjectId,
         data: Box<ObjectData>,
         locked: bool,
+        hidden: bool,
     },
     /// An object of a kind this version does not know, or not readable: skipped.
-    Unknown {
-        id: ObjectId,
-    },
+    Unknown { id: ObjectId },
 }
 
 /// Changes reported by the CRDT since the last refresh.
@@ -372,6 +375,7 @@ impl Document {
             threads: Vec::new(),
             voting: None,
             focus: None,
+            show_hidden: false,
         };
         document.refresh();
         document
@@ -515,6 +519,39 @@ impl Document {
             None => self.groups.get(&id).is_some_and(|g| g.locked),
         };
         own || self.parent(id).is_some_and(|p| self.is_locked(p))
+    }
+
+    /// Whether `id` or any group around it is hidden.
+    pub fn is_hidden(&self, id: ObjectId) -> bool {
+        let own = match self.get(id) {
+            Some(object) => object.hidden,
+            None => self.groups.get(&id).is_some_and(|g| g.hidden),
+        };
+        own || self.parent(id).is_some_and(|p| self.is_hidden(p))
+    }
+
+    /// Shows hidden objects (faded, so they can be picked and shown again), or not.
+    pub fn set_show_hidden(&mut self, show: bool) {
+        self.show_hidden = show;
+    }
+
+    pub fn shows_hidden(&self) -> bool {
+        self.show_hidden
+    }
+
+    /// Whether `id` is drawn: not hidden, or hidden ones are shown.
+    pub fn is_shown(&self, id: ObjectId) -> bool {
+        self.show_hidden || !self.is_hidden(id)
+    }
+
+    /// Whether `id` can be picked, selected or erased: shown and in focus.
+    pub fn reachable(&self, id: ObjectId) -> bool {
+        self.is_shown(id) && self.in_focus(id)
+    }
+
+    /// How many top-level objects and groups are hidden.
+    pub fn hidden_count(&self) -> usize {
+        self.roots.iter().filter(|&&id| self.is_hidden(id)).count()
     }
 
     /// A copy of `id` and everything inside it, e.g. for the clipboard.
@@ -1021,6 +1058,14 @@ impl Document {
                         .insert(key::LOCKED, locked)?;
                 }
             }
+            Command::SetHidden { ids, hidden } => {
+                self.check_exist(&ids)?;
+                for id in ids {
+                    self.tree
+                        .get_meta(self.nodes[&id])?
+                        .insert(key::HIDDEN, hidden)?;
+                }
+            }
         }
         self.doc.commit();
         self.refresh();
@@ -1441,7 +1486,7 @@ impl Document {
             if self.nodes.contains_key(&id) {
                 continue;
             }
-            if let NodeData::Group { locked, .. } = read {
+            if let NodeData::Group { locked, hidden, .. } = read {
                 self.nodes.insert(id, node);
                 let children = self.read_children(TreeParentId::Node(node), Some(id));
                 // A group emptied by a concurrent edit has nothing to show or select.
@@ -1455,11 +1500,18 @@ impl Document {
                         parent: group,
                         children,
                         locked,
+                        hidden,
                     },
                 );
             } else {
                 // Objects of kinds this version does not know are skipped, not dropped.
-                let NodeData::Object { data, locked, .. } = read else {
+                let NodeData::Object {
+                    data,
+                    locked,
+                    hidden,
+                    ..
+                } = read
+                else {
                     continue;
                 };
                 self.nodes.insert(id, node);
@@ -1469,6 +1521,7 @@ impl Document {
                     data: *data,
                     parent: group,
                     locked,
+                    hidden,
                 });
             }
             ids.push(id);
@@ -1487,18 +1540,22 @@ impl Document {
             _ => None,
         }
         .unwrap_or_else(|| ObjectId::from_node(node));
-        let locked = matches!(
-            meta.get(key::LOCKED),
-            Some(ValueOrContainer::Value(LoroValue::Bool(true)))
-        );
+        let flag = |key| {
+            matches!(
+                meta.get(key),
+                Some(ValueOrContainer::Value(LoroValue::Bool(true)))
+            )
+        };
+        let (locked, hidden) = (flag(key::LOCKED), flag(key::HIDDEN));
         let read = if is_group(&meta) {
-            NodeData::Group { id, locked }
+            NodeData::Group { id, locked, hidden }
         } else {
             match read_data(&meta) {
                 Some(data) => NodeData::Object {
                     id,
                     data: Box::new(data),
                     locked,
+                    hidden,
                 },
                 None => NodeData::Unknown { id },
             }
@@ -2937,6 +2994,29 @@ mod tests {
         assert!(!doc.is_locked(a));
         doc.undo().unwrap();
         assert!(doc.is_locked(b));
+    }
+
+    #[test]
+    fn hidden_is_inherited_and_shown_on_request() {
+        let mut doc = Document::new();
+        let [a, b, c, _] = four(&mut doc);
+        let g = group(&mut doc, &[a, b]);
+        doc.apply(Command::SetHidden {
+            ids: vec![g, c],
+            hidden: true,
+        })
+        .unwrap();
+        assert!(doc.is_hidden(a) && doc.is_hidden(c) && !doc.get(a).unwrap().hidden);
+        assert_eq!(doc.hidden_count(), 2);
+        assert!(!doc.reachable(a));
+        doc.set_show_hidden(true);
+        assert!(doc.reachable(a) && doc.is_hidden(a));
+        doc.undo().unwrap();
+        assert!(!doc.is_hidden(a) && !doc.is_hidden(c));
+        // It is stored with the board.
+        doc.redo().unwrap();
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert!(loaded.is_hidden(c) && !loaded.shows_hidden());
     }
 
     #[test]
