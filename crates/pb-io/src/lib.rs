@@ -3,3 +3,4 @@
 
 pub mod image;
 pub mod mermaid;
+pub mod preview;

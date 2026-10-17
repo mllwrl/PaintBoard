@@ -42,6 +42,15 @@ pub enum UserEvent {
         request: u64,
         result: Result<String, String>,
     },
+    /// A web page card's page was fetched and read on a background thread.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    Previewed {
+        id: ObjectId,
+        url: String,
+        /// The card's title before the fetch: kept unless it is still the address.
+        replace_title: bool,
+        result: Result<pb_io::preview::Preview, String>,
+    },
 }
 
 /// What recognized handwriting is for.
@@ -728,6 +737,13 @@ impl App {
                 }
                 _ => None,
             },
+            is_embed: matches!(
+                ids,
+                [id] if matches!(
+                    self.document.get(*id).map(|o| &o.data.kind),
+                    Some(ObjectKind::Embed(_))
+                )
+            ),
             can_crop: matches!(ids, [id] if Crop::new(&self.document, *id).is_some()),
             several: ids.len() > 1,
             locked: selection.has_locked(&self.document),
@@ -937,6 +953,11 @@ impl App {
                         author: self.me.clone(),
                         on: !mine,
                     });
+                }
+            }
+            Action::FetchPreview => {
+                if let [id] = self.tools.selection().ids() {
+                    self.fetch_preview(*id, true);
                 }
             }
             Action::ToggleTag(id) => self.toggle_tag(id),
@@ -1216,6 +1237,81 @@ impl App {
         self.finish_editing();
         self.tools.set_active(ToolKind::Select);
         self.apply(Command::Create(vec![data.into()]));
+        if let [id] = self.tools.selection().ids() {
+            self.fetch_preview(*id, false);
+        }
+    }
+
+    /// Fetches the page of web page card `id` in the background to fill in its title,
+    /// description and site; its title is replaced only if it is still the address, or
+    /// with `force`.
+    fn fetch_preview(&mut self, id: ObjectId, force: bool) {
+        let Some(ObjectKind::Embed(embed)) = self.document.get(id).map(|o| &o.data.kind) else {
+            return;
+        };
+        let url = embed.url.to_string();
+        let replace_title = force || embed.title == pb_core::Embed::new(&url).title;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let proxy = self.proxy.clone();
+            std::thread::spawn(move || {
+                let result =
+                    pb_platform::web::fetch_page(&url).map(|html| pb_io::preview::parse(&html));
+                let _ = proxy.send_event(UserEvent::Previewed {
+                    id,
+                    url,
+                    replace_title,
+                    result,
+                });
+            });
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = (url, replace_title);
+    }
+
+    /// Fills in a web page card from its fetched page, if the card is still there and
+    /// still for that page.
+    fn finish_preview(
+        &mut self,
+        id: ObjectId,
+        url: &str,
+        replace_title: bool,
+        result: Result<pb_io::preview::Preview, String>,
+    ) {
+        let preview = match result {
+            Ok(preview) => preview,
+            Err(err) => {
+                log::warn!("no preview for {url}: {err}");
+                return;
+            }
+        };
+        let Some(ObjectKind::Embed(embed)) = self.document.get(id).map(|o| &o.data.kind) else {
+            return;
+        };
+        if &*embed.url != url {
+            return;
+        }
+        let pick = |new: &str, old: &std::sync::Arc<str>| -> std::sync::Arc<str> {
+            if new.is_empty() {
+                old.clone()
+            } else {
+                new.into()
+            }
+        };
+        let filled = pb_core::Embed {
+            title: if replace_title {
+                pick(&preview.title, &embed.title)
+            } else {
+                embed.title.clone()
+            },
+            description: pick(&preview.description, &embed.description),
+            site: pick(&preview.site, &embed.site),
+            url: embed.url.clone(),
+        };
+        if filled != *embed {
+            self.apply(Command::SetEmbed { id, embed: filled });
+            self.request_redraw();
+        }
     }
 
     /// Copies the selection inside the app. The system clipboard is emptied, so an older
@@ -2779,6 +2875,12 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             UserEvent::GpuReady(gpu) => self.on_gpu_ready(*gpu),
             UserEvent::Recognized { request, result } => self.finish_recognition(request, result),
+            UserEvent::Previewed {
+                id,
+                url,
+                replace_title,
+                result,
+            } => self.finish_preview(id, &url, replace_title, result),
         }
     }
 

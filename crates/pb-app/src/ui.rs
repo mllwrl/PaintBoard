@@ -127,6 +127,8 @@ pub enum Action {
     CopyAnchor,
     /// Opens the selected object's link.
     FollowLink,
+    /// Fetches the selected web page card's page again to fill it in.
+    FetchPreview,
     /// Puts your reaction on the selected object, or takes it off.
     React(pb_core::Reaction),
     /// Puts a tag on the selection, or takes it off if everything selected has it.
@@ -326,6 +328,8 @@ pub struct SelectionInfo {
     pub link: Option<LinkInfo>,
     /// A single object is selected: the reactions you put on it.
     pub my_reactions: Option<Vec<pb_core::Reaction>>,
+    /// A single web page card is selected.
+    pub is_embed: bool,
     /// A single unlocked image is selected.
     pub can_crop: bool,
     pub several: bool,
@@ -1363,6 +1367,14 @@ fn selection_toolbar(
                             }
                         }
                         ui.separator();
+                    }
+                    if selection.is_embed
+                        && ui
+                            .button("Update preview")
+                            .on_hover_text("Fetch the page's title and description again")
+                            .clicked()
+                    {
+                        actions.push(Action::FetchPreview);
                     }
                     if selection.can_crop
                         && ui

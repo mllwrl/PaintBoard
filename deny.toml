@@ -42,6 +42,9 @@ exceptions = [
     { allow = ["MPL-2.0"], crate = "im" },
     { allow = ["MPL-2.0"], crate = "sized-chunks" },
     { allow = ["MPL-2.0"], crate = "bitmaps" },
+    # Mozilla's root certificate list as data, under a permissive data license (keep the
+    # notice). Compiled in by ureq's native-tls feature; certificates come from the system.
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs" },
 ]
 # Our own crates are unpublished and unlicensed until the project license is chosen.
 private = { ignore = true }
