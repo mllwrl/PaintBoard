@@ -92,6 +92,10 @@ pub enum Action {
     CloseContextMenu,
     /// Opens or closes the keyboard shortcuts window.
     ToggleShortcuts,
+    /// Opens or closes the template gallery.
+    ToggleTemplates,
+    /// Adds template `i` of `templates::TEMPLATES` in the middle of the view.
+    InsertTemplate(usize),
     /// Opens the window for making a diagram from text.
     OpenDiagram,
     /// Makes a diagram from this Mermaid text.
@@ -201,6 +205,8 @@ pub struct Model<'a> {
     pub show_shortcuts: bool,
     /// The diagram-from-text window, when it is open, with the last error.
     pub diagram: Option<Option<String>>,
+    /// The template gallery is open.
+    pub show_templates: bool,
     /// The comment thread shown.
     pub thread: Option<ThreadView>,
     /// The board's threads: id, a line about it, and whether it is resolved.
@@ -535,6 +541,9 @@ impl Ui {
             if let Some(error) = &model.diagram {
                 diagram_window(ctx, error.as_deref(), diagram_text, &mut actions);
             }
+            if model.show_templates {
+                templates_window(ctx, &mut actions);
+            }
             match &model.thread {
                 Some(thread) => thread_panel(ctx, thread, comment_text, &mut actions),
                 None => comment_text.clear(),
@@ -680,6 +689,13 @@ fn board_menu(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         RichText::new("Filter ●").color(Color32::from_rgb(0x3B, 0x82, 0xF6))
                     };
                     ui.menu_button(label, |ui| filter_menu(ui, model, actions));
+                    if ui
+                        .button("Templates")
+                        .on_hover_text("Start from a ready-made layout")
+                        .clicked()
+                    {
+                        actions.push(Action::ToggleTemplates);
+                    }
                     let open = model.threads.iter().filter(|(_, _, r)| !r).count();
                     let label = if open > 0 {
                         format!("Comments ({open})")
@@ -1876,6 +1892,65 @@ fn mention_job(ui: &egui::Ui, text: &str, accent: Color32) -> egui::text::Layout
     job.append(&text[at..], 0.0, normal);
     job.wrap.max_width = 290.0;
     job
+}
+
+/// The template gallery: a card per template.
+fn templates_window(ctx: &Context, actions: &mut Vec<Action>) {
+    let mut open = true;
+    let shown = egui::Window::new("Templates")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .order(Order::Foreground)
+        .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(ctx.content_rect().height() * 0.7)
+                .show(ui, |ui| {
+                    egui::Grid::new("templates")
+                        .spacing([10.0, 10.0])
+                        .show(ui, |ui| {
+                            for (i, template) in crate::templates::TEMPLATES.iter().enumerate() {
+                                let mut job = egui::text::LayoutJob::default();
+                                let body = egui::TextStyle::Body.resolve(ui.style());
+                                let small = egui::TextStyle::Small.resolve(ui.style());
+                                let ink = ui.visuals().strong_text_color();
+                                let weak = ui.visuals().weak_text_color();
+                                job.append(template.name, 0.0, egui::TextFormat::simple(body, ink));
+                                job.append(
+                                    &format!(
+                                        "
+{}",
+                                        template.description
+                                    ),
+                                    0.0,
+                                    egui::TextFormat::simple(small, weak),
+                                );
+                                job.wrap.max_width = 190.0;
+                                job.halign = egui::Align::LEFT;
+                                let card = Button::new(job).wrap();
+                                let response = ui.add_sized([210.0, 70.0], card);
+                                if response.clicked() {
+                                    actions.push(Action::InsertTemplate(i));
+                                }
+                                if i % 3 == 2 {
+                                    ui.end_row();
+                                }
+                            }
+                        });
+                });
+        });
+    if let Some(shown) = shown {
+        let layer = shown.response.layer_id;
+        let on_top = ctx.memory(|m| m.areas().top_layer_id(Order::Foreground)) == Some(layer);
+        if !on_top {
+            ctx.move_to_top(layer);
+            ctx.request_repaint();
+        }
+    }
+    if !open {
+        actions.push(Action::ToggleTemplates);
+    }
 }
 
 /// What the diagram window starts with.

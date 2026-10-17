@@ -138,6 +138,8 @@ pub struct App {
     context_menu: Option<(Point, Point)>,
     /// The keyboard shortcuts window is open.
     show_shortcuts: bool,
+    /// The template gallery is open.
+    show_templates: bool,
     /// The window for making a diagram from text is open, with what was wrong with the
     /// last try.
     diagram: Option<Option<String>>,
@@ -188,6 +190,7 @@ impl App {
             focus_search: false,
             context_menu: None,
             show_shortcuts: false,
+            show_templates: false,
             diagram: None,
             last_press: None,
             recognition: None,
@@ -350,6 +353,7 @@ impl App {
                 .map(|(screen, _)| self.context_menu_info(screen)),
             show_shortcuts: self.show_shortcuts,
             diagram: self.diagram.clone(),
+            show_templates: self.show_templates,
             thread: self.thread_view(),
             threads: self.thread_list(),
             show_resolved: self.show_resolved,
@@ -840,6 +844,11 @@ impl App {
             }
             Action::CloseContextMenu => self.context_menu = None,
             Action::ToggleShortcuts => self.show_shortcuts = !self.show_shortcuts,
+            Action::ToggleTemplates => self.show_templates = !self.show_templates,
+            Action::InsertTemplate(i) => {
+                self.show_templates = false;
+                self.insert_template(i);
+            }
             Action::OpenDiagram => {
                 self.finish_editing();
                 self.diagram = Some(None);
@@ -1710,6 +1719,45 @@ impl App {
             self.camera.fit(placed, viewport, FRAME_MARGIN);
         }
         Ok(())
+    }
+
+    /// Adds template `i` in the middle of the view as one undo step, selects it, and shows
+    /// all of it.
+    fn insert_template(&mut self, i: usize) {
+        let Some(template) = crate::templates::TEMPLATES.get(i) else {
+            return;
+        };
+        let objects = match template.make {
+            crate::templates::Make::Mermaid(source) => {
+                if let Err(err) = self.insert_diagram(source) {
+                    log::error!("template {}: {err}", template.name);
+                }
+                return;
+            }
+            crate::templates::Make::Objects(make) => make,
+        };
+        self.finish_editing();
+        self.tools.set_active(ToolKind::Select);
+        let viewport = self.viewport();
+        let center = self.camera.visible_world_rect(viewport).center();
+        let mut builder = crate::templates::Builder::new(&self.document, self.text.engine());
+        objects(&mut builder);
+        let items = builder.finish(center);
+        let area = items
+            .iter()
+            .flat_map(pb_core::Content::shapes)
+            .map(|d| d.bounds)
+            .reduce(|a, b| a.union(b));
+        self.apply(Command::Create(items));
+        if let Some(area) = area {
+            let room = self
+                .camera
+                .visible_world_rect(viewport)
+                .inset(-FRAME_MARGIN / self.camera.zoom());
+            if area.width() > room.width() || area.height() > room.height() {
+                self.camera.fit(area, viewport, FRAME_MARGIN);
+            }
+        }
     }
 
     /// Opens the right-click menu at the pointer. Like elsewhere, the object under it gets
@@ -2796,6 +2844,7 @@ impl App {
             KeyCode::Escape => {
                 let closed = self.context_menu.take().is_some()
                     || self.thread_panel.take().is_some()
+                    || std::mem::replace(&mut self.show_templates, false)
                     || std::mem::replace(&mut self.show_shortcuts, false);
                 if !closed
                     && self.picking_link.take().is_none()
