@@ -1696,6 +1696,8 @@ fn read_mindmap(meta: &LoroMap) -> Option<crate::MindMap> {
             places.push((id.to_owned(), parent.to_owned(), order));
         }
     });
+    // The map's own order varies; keep reads alike.
+    places.sort_by(|a, b| a.0.cmp(&b.0));
     let nodes: Vec<crate::Node> = places
         .into_iter()
         .map(|(id, parent, order)| {
@@ -1758,6 +1760,8 @@ fn read_kanban(meta: &LoroMap) -> Option<crate::Kanban> {
             places.push((id.to_owned(), column.to_owned(), order));
         }
     });
+    // The map's own order varies; keep reads alike.
+    places.sort_by(|a, b| a.0.cmp(&b.0));
     let cards = places
         .into_iter()
         .map(|(id, column, order)| {

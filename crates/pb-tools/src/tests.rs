@@ -1375,7 +1375,8 @@ fn mind_map_nodes_are_selected_toggled_and_removed() {
     let a = map.index("a").unwrap();
     let a_rect = map.node_rect(bounds, a).unwrap();
     click(&mut tools, &doc, at(a_rect.center().x, a_rect.center().y));
-    assert_eq!(tools.selected_node(&doc), Some((id, a)));
+    let stored_a = current(&doc).0.index("a").unwrap();
+    assert_eq!(tools.selected_node(&doc), Some((id, stored_a)));
     assert_eq!(tools.node_state(&doc), Some((true, false)));
     // A click on its toggle collapses it; the root stays put.
     let layout = map.layout();
