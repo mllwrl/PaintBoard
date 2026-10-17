@@ -116,6 +116,8 @@ pub enum Action {
     CopyAnchor,
     /// Opens the selected object's link.
     FollowLink,
+    /// Puts your reaction on the selected object, or takes it off.
+    React(pb_core::Reaction),
     /// Puts a tag on the selection, or takes it off if everything selected has it.
     ToggleTag(std::sync::Arc<str>),
     /// Adds a tag with this name to the board and puts it on the selection.
@@ -282,6 +284,8 @@ pub struct SelectionInfo {
     pub board_tags: Vec<pb_core::Tag>,
     /// A single unlocked object (not a group) is selected, which can link somewhere.
     pub link: Option<LinkInfo>,
+    /// A single object is selected: the reactions you put on it.
+    pub my_reactions: Option<Vec<pb_core::Reaction>>,
     /// A single unlocked image is selected.
     pub can_crop: bool,
     pub several: bool,
@@ -318,6 +322,7 @@ enum Popup {
     Opacity,
     Tags,
     Link,
+    React,
 }
 
 /// Font sizes offered for shape text, in logical pixels at 100% zoom.
@@ -1271,6 +1276,10 @@ fn selection_toolbar(
                         let link = ui.button("Link").on_hover_text("Link to a page or another object");
                         toggle(popup, Popup::Link, link.clicked());
                     }
+                    if selection.my_reactions.is_some() {
+                        let react = ui.button("React").on_hover_text("Add a reaction");
+                        toggle(popup, Popup::React, react.clicked());
+                    }
                     let tags = ui.button("Tags").on_hover_text("Tags on the selection");
                     toggle(popup, Popup::Tags, tags.clicked());
                     let opacity = format!("{:.0}%", style.opacity * 100.0);
@@ -1474,6 +1483,22 @@ fn selection_toolbar(
                             .clicked()
                         {
                             actions.push(Action::CopyAnchor);
+                        }
+                    });
+                }
+                Popup::React => {
+                    let Some(mine) = &selection.my_reactions else {
+                        return;
+                    };
+                    ui.horizontal(|ui| {
+                        for reaction in pb_core::Reaction::ALL {
+                            let on = mine.contains(&reaction);
+                            let button = icon_button(ui, on, reaction.name(), |p, r, _| {
+                                paint_reaction(p, r, reaction)
+                            });
+                            if button.clicked() {
+                                actions.push(Action::React(reaction));
+                            }
                         }
                     });
                 }
@@ -2179,6 +2204,47 @@ fn paint_kanban(painter: &Painter, rect: Rect, color: Color32) {
                 egui::StrokeKind::Middle,
             );
         }
+    }
+}
+
+/// A reaction's icon in its own color.
+fn paint_reaction(painter: &Painter, rect: Rect, reaction: pb_core::Reaction) {
+    let bounds = kurbo::Rect::new(
+        rect.left().into(),
+        rect.top().into(),
+        rect.right().into(),
+        rect.bottom().into(),
+    );
+    let color = to_color32(reaction.color());
+    let (fill, stroke) = reaction.icon(bounds);
+    let polylines = |path: kurbo::BezPath| {
+        let mut lines: Vec<(Vec<Pos2>, bool)> = Vec::new();
+        kurbo::flatten(path, 0.2, |el| match el {
+            PathEl::MoveTo(p) => lines.push((vec![Pos2::new(p.x as f32, p.y as f32)], false)),
+            PathEl::LineTo(p) => {
+                if let Some((line, _)) = lines.last_mut() {
+                    line.push(Pos2::new(p.x as f32, p.y as f32));
+                }
+            }
+            PathEl::ClosePath => {
+                if let Some((_, closed)) = lines.last_mut() {
+                    *closed = true;
+                }
+            }
+            _ => {}
+        });
+        lines
+    };
+    for (points, _) in polylines(fill) {
+        painter.add(Shape::convex_polygon(points, color, Stroke::NONE));
+    }
+    let width = rect.width() / 8.0;
+    for (points, closed) in polylines(stroke) {
+        painter.add(if closed {
+            Shape::closed_line(points, Stroke::new(width, color))
+        } else {
+            Shape::line(points, Stroke::new(width, color))
+        });
     }
 }
 

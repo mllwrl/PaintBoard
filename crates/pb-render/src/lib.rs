@@ -67,6 +67,8 @@ pub struct View<'a> {
     pub overlay: &'a Overlay,
     /// Objects it does not let through are faded.
     pub filter: &'a pb_core::Filter,
+    /// Who is looking: their own reactions stand out.
+    pub me: &'a str,
 }
 
 /// Opacity of objects a filter hides, relative to their own.
@@ -130,10 +132,10 @@ pub fn build_scene(
             .copied()
             .or_else(|| doc.get(id).map(|o| &o.data))
     };
-    let shown: Vec<&ObjectData> = shown_objects(doc, visible, zoom, &overrides)
+    let shown: Vec<(Option<ObjectId>, &ObjectData)> = shown_objects(doc, visible, zoom, &overrides)
         .into_iter()
         .filter(|id| !view.hidden.contains(id))
-        .filter_map(current)
+        .filter_map(|id| current(id).map(|data| (Some(id), data)))
         .collect();
     // Obstacles for elbow connectors, where they are now.
     let obstacles_in = |area: vello::kurbo::Rect| -> Vec<vello::kurbo::Rect> {
@@ -149,9 +151,10 @@ pub fn build_scene(
             .collect()
     };
     // Frames lie under everything else.
-    let frames = shown.iter().filter(|d| d.kind.is_frame());
-    let others = shown.iter().filter(|d| !d.kind.is_frame());
-    for data in frames.chain(others).copied().chain(view.previews) {
+    let frames = shown.iter().filter(|(_, d)| d.kind.is_frame());
+    let others = shown.iter().filter(|(_, d)| !d.kind.is_frame());
+    let previews = view.previews.iter().map(|d| (None, d));
+    for (id, data) in frames.chain(others).copied().chain(previews) {
         let faded;
         let data = if view.filter.matches(data) {
             data
@@ -189,6 +192,12 @@ pub fn build_scene(
         let tags: Vec<_> = data.tags.iter().filter_map(|t| doc.tag(t)).collect();
         if !tags.is_empty() {
             objects::draw_tags(scene, transform, data, &tags, text);
+        }
+        if let Some(id) = id {
+            let reactions = doc.reactions(id);
+            if !reactions.is_empty() {
+                objects::draw_reactions(scene, transform, data, reactions, view.me, text);
+            }
         }
     }
 

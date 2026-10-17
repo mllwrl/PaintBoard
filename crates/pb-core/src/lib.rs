@@ -7,6 +7,7 @@ mod document;
 pub mod kanban;
 pub mod mindmap;
 mod object;
+pub mod reaction;
 pub mod rich;
 pub mod search;
 pub mod table;
@@ -23,5 +24,6 @@ pub use object::{
     VAlign,
 };
 pub use pb_geom::ShapeKind;
+pub use reaction::Reaction;
 pub use rich::{Span, Spans, TextMarks};
 pub use table::{Cell, CellRange, Line, Merge, Table};

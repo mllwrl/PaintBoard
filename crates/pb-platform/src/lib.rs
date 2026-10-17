@@ -10,3 +10,26 @@ pub mod handwriting;
 
 /// A monotonic clock that also works in the browser, where `std::time::Instant` panics.
 pub use web_time::{Duration, Instant};
+
+/// The person using the app, as the system knows them: who reactions and comments are
+/// by. "Me" when the system does not say.
+pub fn user_name() -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        for var in ["USERNAME", "USER"] {
+            if let Ok(name) = std::env::var(var)
+                && !name.trim().is_empty()
+            {
+                return name.trim().to_owned();
+            }
+        }
+    }
+    "Me".to_owned()
+}
+
+/// Milliseconds since the Unix epoch, also in the browser.
+pub fn now_ms() -> i64 {
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}

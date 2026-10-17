@@ -112,6 +112,8 @@ pub struct App {
     show_minimap: bool,
     /// Objects it does not let through are faded. Not saved with the board.
     filter: pb_core::Filter,
+    /// Who reactions and comments are by.
+    me: std::sync::Arc<str>,
     /// The object whose link target is being picked on the board, by clicking it.
     picking_link: Option<ObjectId>,
     /// Searching the board, while the search bar is open.
@@ -162,6 +164,7 @@ impl App {
             sticky_color: STICKY_COLORS[0],
             show_minimap: true,
             filter: pb_core::Filter::default(),
+            me: pb_platform::user_name().into(),
             picking_link: None,
             search: None,
             focus_search: false,
@@ -265,6 +268,7 @@ impl App {
                 previews: &previews,
                 overlay: &overlay,
                 filter: &self.filter,
+                me: &self.me,
             },
             &mut self.text,
             &mut self.images,
@@ -665,6 +669,17 @@ impl App {
                 .map(|t| t.id.clone())
                 .collect(),
             board_tags: self.document.tags().to_vec(),
+            my_reactions: match ids {
+                [id] if self.document.get(*id).is_some() => Some(
+                    self.document
+                        .reactions(*id)
+                        .iter()
+                        .filter(|(_, who)| who.contains(&self.me))
+                        .map(|(r, _)| *r)
+                        .collect(),
+                ),
+                _ => None,
+            },
             link: match ids {
                 [id] if self.document.get(*id).is_some()
                     && !selection.has_locked(&self.document) =>
@@ -833,6 +848,22 @@ impl App {
                 };
                 if let Some(link) = link {
                     self.follow(&link);
+                }
+            }
+            Action::React(reaction) => {
+                if let [id] = self.tools.selection().ids() {
+                    let id = *id;
+                    let mine = self
+                        .document
+                        .reactions(id)
+                        .iter()
+                        .any(|(r, who)| *r == reaction && who.contains(&self.me));
+                    self.apply(Command::React {
+                        id,
+                        reaction,
+                        author: self.me.clone(),
+                        on: !mine,
+                    });
                 }
             }
             Action::ToggleTag(id) => self.toggle_tag(id),

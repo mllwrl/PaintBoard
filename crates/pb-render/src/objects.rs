@@ -745,6 +745,87 @@ pub(crate) fn draw_tags(
     }
 }
 
+/// Draws reactions as pills with an icon and a count, right-aligned: along the bottom
+/// inside a sticky note, under other objects. Those by `me` are tinted.
+pub(crate) fn draw_reactions(
+    scene: &mut Scene,
+    transform: Affine,
+    data: &ObjectData,
+    reactions: &[(pb_core::Reaction, Vec<Arc<str>>)],
+    me: &str,
+    text: &mut TextRenderer,
+) {
+    let b = data.bounds;
+    let (size, inside) = match data.kind {
+        ObjectKind::Sticky(_) => (b.width().min(b.height()) * STICKY_TAG_FONT, true),
+        _ => (TAG_FONT, false),
+    };
+    let height = size * 1.7;
+    let pad = size * 0.5;
+    let gap = size * 0.4;
+    let y = if inside {
+        b.y1 - size * 0.6 - height
+    } else {
+        b.y1 + gap * 1.5
+    };
+    let mut x = b.x1 - if inside { size * 0.6 } else { 0.0 };
+    let transform = transform * data.frame().transform();
+    let alpha = data.style.opacity.clamp(0.0, 1.0) as f32;
+    let ink = Color::from_rgb8(0x37, 0x41, 0x51).multiply_alpha(alpha);
+    for (reaction, authors) in reactions.iter().rev() {
+        let count: Arc<str> = authors.len().to_string().into();
+        let layout = text.engine.layout(&count, size, None);
+        let icon = size * 1.1;
+        let width = pad + icon + size * 0.3 + layout.width + pad;
+        let x0 = x - width;
+        let pill = RoundedRect::new(x0, y, x, y + height, height / 2.0);
+        let tint = color(reaction.color());
+        let mine = authors.iter().any(|a| &**a == me);
+        let (fill, edge) = if mine {
+            (
+                tint.multiply_alpha(0.15 * alpha),
+                tint.multiply_alpha(alpha),
+            )
+        } else {
+            (
+                CARD_FILL.multiply_alpha(alpha),
+                DOC_LINE.multiply_alpha(alpha),
+            )
+        };
+        scene.fill(Fill::NonZero, transform, fill, None, &pill);
+        scene.stroke(&Stroke::new(size * 0.08), transform, edge, None, &pill);
+        let icon_rect =
+            Rect::from_center_size((x0 + pad + icon / 2.0, y + height / 2.0), (icon, icon));
+        let (icon_fill, icon_stroke) = reaction.icon(icon_rect);
+        scene.fill(
+            Fill::NonZero,
+            transform,
+            tint.multiply_alpha(alpha),
+            None,
+            &icon_fill,
+        );
+        let line = Stroke::new(icon / 8.0)
+            .with_caps(Cap::Round)
+            .with_join(Join::Round);
+        scene.stroke(
+            &line,
+            transform,
+            tint.multiply_alpha(alpha),
+            None,
+            &icon_stroke,
+        );
+        let tx = x0 + pad + icon + size * 0.3;
+        draw_text(
+            scene,
+            transform,
+            (tx, y + (height - layout.height) / 2.0),
+            &layout,
+            ink,
+        );
+        x = x0 - gap;
+    }
+}
+
 fn paint_padding(data: &ObjectData) -> f64 {
     match data.kind {
         ObjectKind::Sticky(_) => {

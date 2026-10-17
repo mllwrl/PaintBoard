@@ -40,6 +40,8 @@ mod key {
     pub const OBJECTS: &str = "objects";
     /// Root map of the board's tags: `RRGGBBAA;name` (hex color) by tag id.
     pub const TAGS: &str = "tags";
+    /// Root map of reactions: `true` by `object|reaction|author`.
+    pub const REACTIONS: &str = "reactions";
     /// Ids of an object's tags, joined by `;`.
     pub const OBJECT_TAGS: &str = "tags";
     /// Where an object links to: `url:<address>` or `obj:<object id>`.
@@ -190,6 +192,8 @@ pub struct Document {
     line_ids: std::cell::Cell<u64>,
     /// The board's tags, by name; rebuilt with `objects`.
     tags: Vec<Tag>,
+    /// Reactions on objects, each with who put it there; rebuilt with `objects`.
+    reactions: HashMap<ObjectId, crate::reaction::Reactions>,
     /// Files used by images. They are not part of the CRDT and never removed while the board
     /// is open, so undoing the deletion of an image finds its file again.
     assets: Assets,
@@ -344,6 +348,7 @@ impl Document {
             _events: events,
             line_ids: std::cell::Cell::new(0),
             tags: Vec::new(),
+            reactions: HashMap::new(),
         };
         document.refresh();
         document
@@ -494,6 +499,12 @@ impl Document {
     /// The board's tags, sorted by name.
     pub fn tags(&self) -> &[Tag] {
         &self.tags
+    }
+
+    /// Reactions on object `id`, in [`crate::Reaction::ALL`] order, with who put them
+    /// there (sorted).
+    pub fn reactions(&self, id: ObjectId) -> &[(crate::Reaction, Vec<Arc<str>>)] {
+        self.reactions.get(&id).map_or(&[], Vec::as_slice)
     }
 
     pub fn tag(&self, id: &str) -> Option<&Tag> {
@@ -653,6 +664,23 @@ impl Document {
                         None if meta.get(key::LINK).is_some() => meta.delete(key::LINK)?,
                         None => {}
                     }
+                }
+            }
+            Command::React {
+                id,
+                reaction,
+                author,
+                on,
+            } => {
+                if self.get(id).is_none() {
+                    return Err(Error::UnknownObject(id));
+                }
+                let map = self.doc.get_map(key::REACTIONS);
+                let k = format!("{id}|{}|{author}", reaction.as_str());
+                if on {
+                    map.insert(&k, true)?;
+                } else if map.get(&k).is_some() {
+                    map.delete(&k)?;
                 }
             }
             Command::DefineTag(tag) => {
@@ -1107,6 +1135,7 @@ impl Document {
         }
         self.roots = self.read_children(TreeParentId::Root, None);
         self.tags = read_tags(&self.doc.get_map(key::TAGS));
+        self.reactions = read_reactions(&self.doc.get_map(key::REACTIONS));
         // Everything but connectors first: connectors route around it.
         let placed_objects = self
             .objects
@@ -1576,6 +1605,35 @@ fn read_object_tags(meta: &LoroMap) -> Tags {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Reactions from their root map, by object.
+fn read_reactions(map: &LoroMap) -> HashMap<ObjectId, crate::reaction::Reactions> {
+    let mut out: HashMap<ObjectId, crate::reaction::Reactions> = HashMap::new();
+    map.for_each(|k, _| {
+        let mut parts = k.splitn(3, '|');
+        let (Some(id), Some(reaction), Some(author)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return;
+        };
+        let (Some(id), Some(reaction)) = (ObjectId::parse(id), crate::Reaction::parse(reaction))
+        else {
+            return;
+        };
+        let list = out.entry(id).or_default();
+        match list.iter_mut().find(|(r, _)| *r == reaction) {
+            Some((_, authors)) => authors.push(author.into()),
+            None => list.push((reaction, vec![author.into()])),
+        }
+    });
+    // The map's own order varies; keep reads alike.
+    for list in out.values_mut() {
+        list.sort_by_key(|(r, _)| *r);
+        for (_, authors) in list.iter_mut() {
+            authors.sort();
+        }
+    }
+    out
 }
 
 /// The board's tags from their root map, sorted by name (then id, for a stable order).
@@ -3103,6 +3161,41 @@ mod tests {
         assert_eq!(current(&doc).nodes.len(), 1);
         doc.undo().unwrap();
         assert_eq!(current(&doc).nodes.len(), 2);
+    }
+
+    #[test]
+    fn reactions_are_counted_by_author() {
+        let mut doc = Document::new();
+        let a = create(&mut doc, rect(0.0, 0.0, 10.0, 10.0));
+        let react = |doc: &mut Document, r, who: &str, on| {
+            doc.apply(Command::React {
+                id: a,
+                reaction: r,
+                author: who.into(),
+                on,
+            })
+            .unwrap();
+        };
+        react(&mut doc, crate::Reaction::Heart, "ann", true);
+        react(&mut doc, crate::Reaction::Plus, "bob", true);
+        // Another replica reacts too; both count.
+        let mut other = Document::from_snapshot(&doc.snapshot()).unwrap();
+        react(&mut other, crate::Reaction::Heart, "cat", true);
+        doc.doc.import(&other.snapshot()).unwrap();
+        doc.refresh();
+        let r = doc.reactions(a);
+        assert_eq!(r[0].0, crate::Reaction::Plus);
+        assert_eq!(
+            r[1],
+            (crate::Reaction::Heart, vec!["ann".into(), "cat".into()])
+        );
+        react(&mut doc, crate::Reaction::Heart, "ann", false);
+        assert_eq!(doc.reactions(a)[1].1, vec![Arc::<str>::from("cat")]);
+        doc.undo().unwrap();
+        assert_eq!(doc.reactions(a)[1].1.len(), 2);
+        // Copies do not take them along.
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(loaded.reactions(a).len(), 2);
     }
 
     #[test]
