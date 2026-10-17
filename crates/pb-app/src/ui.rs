@@ -112,6 +112,8 @@ pub enum Action {
     /// Moves through the presentation by this many frames (`i64::MIN`/`MAX`: first/last).
     PresentStep(i64),
     StopPresenting,
+    /// Turns the laser pointer on or off while presenting.
+    ToggleLaser,
     /// Opens or closes the template gallery.
     ToggleTemplates,
     /// Adds template `i` of `templates::TEMPLATES` in the middle of the view.
@@ -231,6 +233,8 @@ pub struct Model<'a> {
     pub show_templates: bool,
     /// Presenting: the frame shown, how many there are, and its title.
     pub presentation: Option<(usize, usize, String)>,
+    /// The laser pointer is on (while presenting).
+    pub laser: bool,
     /// The countdown, while shown.
     pub timer: Option<TimerView>,
     /// The voting session, if there is one.
@@ -580,7 +584,7 @@ impl Ui {
             if let Some((index, count, title)) = &model.presentation {
                 // Nothing but the board and the controls.
                 *popup = None;
-                presentation_bar(ctx, *index, *count, title, &mut actions);
+                presentation_bar(ctx, *index, *count, title, model.laser, &mut actions);
                 return;
             }
             board_menu(ctx, model, &mut actions);
@@ -2166,6 +2170,7 @@ fn presentation_bar(
     index: usize,
     count: usize,
     title: &str,
+    laser: bool,
     actions: &mut Vec<Action>,
 ) {
     let screen = ctx.content_rect();
@@ -2197,6 +2202,13 @@ fn presentation_bar(
                         actions.push(Action::PresentStep(1));
                     }
                     ui.separator();
+                    if ui
+                        .selectable_label(laser, "Laser")
+                        .on_hover_text("Point with a red dot (L)")
+                        .clicked()
+                    {
+                        actions.push(Action::ToggleLaser);
+                    }
                     if ui.button("Exit").on_hover_text("Esc").clicked() {
                         actions.push(Action::StopPresenting);
                     }
@@ -2387,6 +2399,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("G / Shift+G", "Grid style / snap to grid"),
             ("F1, ?", "This list"),
             ("F5", "Present the frames"),
+            ("L (presenting)", "Laser pointer"),
         ],
     ),
 ];

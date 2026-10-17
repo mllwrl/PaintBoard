@@ -1,7 +1,7 @@
 use pb_geom::{Camera, Frame};
 use vello::Scene;
 use vello::kurbo::{
-    Affine, Arc, BezPath, Circle, Line, Point, Rect, RoundedRect, Shape, Stroke, Vec2,
+    Affine, Arc, BezPath, Cap, Circle, Line, Point, Rect, RoundedRect, Shape, Stroke, Vec2,
 };
 use vello::peniko::{Color, Fill};
 
@@ -49,6 +49,9 @@ pub struct Overlay {
     pub search_current: Option<Frame>,
     /// While presenting: the frame shown (world); everything around it is dimmed.
     pub spotlight: Option<Rect>,
+    /// The laser pointer's trail (world), oldest first, each point with how faded it is
+    /// (0 fresh, 1 gone); the last point is the pointer.
+    pub laser: Vec<(Point, f64)>,
     /// Comment thread pins: the point each one marks (world), whether its thread is
     /// resolved, and whether it is the one open.
     pub comment_pins: Vec<(Point, bool, bool)>,
@@ -266,6 +269,26 @@ pub fn draw_overlay(
             let line = Line::new(center - d, center + d);
             scene.stroke(&handle_stroke, id, colors.accent, None, &line);
         }
+    }
+    if let Some(&(head, _)) = overlay.laser.last() {
+        let red = Color::from_rgb8(0xEF, 0x23, 0x2B);
+        for pair in overlay.laser.windows(2) {
+            let ((a, fade), (b, _)) = (pair[0], pair[1]);
+            let life = (1.0 - fade).clamp(0.0, 1.0);
+            let line = Line::new(to_px(a), to_px(b));
+            let stroke = Stroke::new((1.0 + 4.0 * life) * scale).with_caps(Cap::Round);
+            scene.stroke(
+                &stroke,
+                id,
+                red.multiply_alpha(life as f32 * 0.8),
+                None,
+                &line,
+            );
+        }
+        let c = to_px(head);
+        let glow = Circle::new(c, 11.0 * scale);
+        scene.fill(Fill::NonZero, id, red.multiply_alpha(0.25), None, &glow);
+        scene.fill(Fill::NonZero, id, red, None, &Circle::new(c, 5.0 * scale));
     }
     for &(at, resolved, open) in &overlay.comment_pins {
         let tip = to_px(at);

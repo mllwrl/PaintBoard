@@ -296,9 +296,29 @@ impl App {
                 winit::dpi::LogicalSize::new((b.x - a.x).max(1.0), (b.y - a.y).max(1.0)),
             );
         }
+        if let Some(presentation) = &mut self.presentation {
+            // The laser's trail fades away.
+            let now = Instant::now();
+            presentation
+                .trail
+                .retain(|(_, at)| now.duration_since(*at) < LASER_TRAIL);
+            if !presentation.trail.is_empty() {
+                window.request_redraw();
+            }
+        }
         if let Some(presentation) = &self.presentation {
+            let now = Instant::now();
+            let laser = presentation
+                .trail
+                .iter()
+                .map(|&(p, at)| {
+                    let age = now.duration_since(at).as_secs_f64() / LASER_TRAIL.as_secs_f64();
+                    (p, age)
+                })
+                .collect();
             // Only the frame shown: no selection, pins or badges.
             overlay = Overlay {
+                laser,
                 spotlight: presentation
                     .frames
                     .get(presentation.index)
@@ -389,6 +409,7 @@ impl App {
             show_shortcuts: self.show_shortcuts,
             diagram: self.diagram.clone(),
             show_templates: self.show_templates,
+            laser: self.presentation.as_ref().is_some_and(|p| p.laser),
             presentation: self.presentation.as_ref().map(|p| {
                 let title = p
                     .frames
@@ -934,6 +955,7 @@ impl App {
             Action::Present => self.start_presentation(),
             Action::PresentStep(step) => self.present_step(step),
             Action::StopPresenting => self.stop_presentation(),
+            Action::ToggleLaser => self.toggle_laser(),
             Action::ToggleTemplates => self.show_templates = !self.show_templates,
             Action::InsertTemplate(i) => {
                 self.show_templates = false;
@@ -1894,6 +1916,8 @@ impl App {
             index: 0,
             frames,
             saved: self.camera,
+            laser: false,
+            trail: Vec::new(),
         });
         self.show_slide(0);
     }
@@ -1938,6 +1962,23 @@ impl App {
         if let Some(p) = self.presentation.take() {
             self.glide_to(&p.saved);
         }
+        if let Some(window) = &self.window {
+            window.set_cursor_visible(true);
+        }
+    }
+
+    /// Turns the laser pointer on or off while presenting.
+    fn toggle_laser(&mut self) {
+        let Some(p) = &mut self.presentation else {
+            return;
+        };
+        p.laser = !p.laser;
+        p.trail.clear();
+        let laser = p.laser;
+        if let Some(window) = &self.window {
+            window.set_cursor_visible(!laser);
+        }
+        self.request_redraw();
     }
 
     /// Starts the camera gliding from where it is to `target`.
@@ -1975,6 +2016,7 @@ impl App {
             KeyCode::Home => self.present_step(i64::MIN),
             KeyCode::End => self.present_step(i64::MAX),
             KeyCode::Escape | KeyCode::F5 => self.stop_presentation(),
+            KeyCode::KeyL => self.toggle_laser(),
             _ => return false,
         }
         true
@@ -3481,6 +3523,13 @@ impl App {
                 let panned = self
                     .navigation
                     .cursor_moved(&mut self.camera, Point::new(pos.x, pos.y));
+                if let Some(p) = &mut self.presentation
+                    && p.laser
+                    && !over_ui
+                {
+                    let world = self.camera.screen_to_world(Point::new(pos.x, pos.y));
+                    p.trail.push((world, Instant::now()));
+                }
                 let pointer = self.pointer();
                 let text_drag = match (&mut self.editing, pointer) {
                     (Some(edit), Some(p)) => edit.drag(self.text.engine(), p.world),
@@ -3668,7 +3717,14 @@ struct Presentation {
     frames: Vec<ObjectId>,
     /// Where the board was before, to go back to.
     saved: Camera,
+    /// The pointer is a laser dot.
+    laser: bool,
+    /// Where the laser has been lately (world), oldest first.
+    trail: Vec<(Point, Instant)>,
 }
+
+/// How long the laser's trail lasts.
+const LASER_TRAIL: pb_platform::Duration = pb_platform::Duration::from_millis(700);
 
 /// The camera gliding from one view to another: centers (world) and zooms.
 struct Glide {
@@ -3837,6 +3893,7 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
         link_badges: Vec::new(),
         comment_pins: Vec::new(),
         spotlight: None,
+        laser: Vec::new(),
         search_hits: Vec::new(),
         search_current: None,
         lines,
