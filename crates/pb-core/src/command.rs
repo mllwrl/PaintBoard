@@ -4,8 +4,8 @@ use kurbo::{Rect, Vec2};
 use pb_geom::Frame;
 
 use crate::{
-    Card, Cell, Column, Comment, ConnectorChange, Content, Embed, Label, Line, Link, Merge, Node,
-    ObjectId, Reaction, Spans, StyleChange, Tag, ThreadAnchor,
+    Card, Cell, Column, Comment, ConnectorChange, Content, Embed, Label, Layer, Line, Link, Merge,
+    Node, ObjectId, Reaction, Spans, StyleChange, Tag, ThreadAnchor,
 };
 
 /// A user-level edit. Each applied command is one undo step and, later, one unit of sync.
@@ -196,6 +196,15 @@ pub enum Command {
     },
     /// Protects the board from changes, or lifts that. Not undoable.
     SetReadOnly(bool),
+    /// Adds a layer, or renames, reorders, hides or locks the layer with its id.
+    DefineLayer(Layer),
+    /// Removes a layer with everything on it. The base layer stays.
+    RemoveLayer(Arc<str>),
+    /// Moves top-level objects and groups to a layer.
+    SetLayer {
+        ids: Vec<ObjectId>,
+        layer: Arc<str>,
+    },
 }
 
 impl Command {

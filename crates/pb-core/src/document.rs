@@ -23,7 +23,7 @@ use crate::rich::{self, Span, Spans};
 use crate::command::reorder;
 use crate::{
     Applied, AssetId, Assets, Command, Connector, Content, End, FrameData, Group, HAlign, Image,
-    Ink, Line, Link, Object, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Sticky, Style,
+    Ink, Layer, Line, Link, Object, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Sticky, Style,
     StyleChange, Tag, Tags, Text, VAlign, ZOrder,
 };
 
@@ -51,6 +51,10 @@ mod key {
     /// Root map of voting: `limit` (votes per person) while there is a session, `open`
     /// while it runs, and `v|<object>|<author>` each person's votes on an object.
     pub const VOTING: &str = "voting";
+    /// Root map of layers: `order;flags;name` by layer id, see `Layer::to_value`.
+    pub const LAYERS: &str = "layers";
+    /// The layer of a top-level object or group, absent for the base layer.
+    pub const LAYER: &str = "layer";
     /// Root map of reactions: `true` by `object|reaction|author`.
     pub const REACTIONS: &str = "reactions";
     /// Ids of an object's tags, joined by `;`.
@@ -230,6 +234,12 @@ pub struct Document {
     show_hidden: bool,
     /// The board is protected from changes; rebuilt with `objects`.
     read_only: bool,
+    /// The board's layers, bottom to top, the base layer among them; rebuilt with `objects`.
+    layers: Vec<Layer>,
+    /// The layers of top-level objects and groups not on the base layer.
+    unit_layers: HashMap<ObjectId, Arc<str>>,
+    /// Where new objects go. Not stored, like `focus`.
+    active_layer: Arc<str>,
 }
 
 /// An object in the spatial index: its world bounds (outline included) and its place in
@@ -267,12 +277,14 @@ enum NodeData {
         id: ObjectId,
         locked: bool,
         hidden: bool,
+        layer: Option<Arc<str>>,
     },
     Object {
         id: ObjectId,
         data: Box<ObjectData>,
         locked: bool,
         hidden: bool,
+        layer: Option<Arc<str>>,
     },
     /// An object of a kind this version does not know, or not readable: skipped.
     Unknown { id: ObjectId },
@@ -388,6 +400,9 @@ impl Document {
             focus: None,
             show_hidden: false,
             read_only: false,
+            layers: vec![Layer::base()],
+            unit_layers: HashMap::new(),
+            active_layer: Layer::BASE.into(),
         };
         document.refresh();
         document
@@ -524,13 +539,18 @@ impl Document {
             .reduce(|a, b| a.union(b))
     }
 
-    /// Whether `id` or any group around it is locked, or the whole board is read-only.
+    /// Whether `id`, any group around it or its layer is locked, or the whole board is
+    /// read-only.
     pub fn is_locked(&self, id: ObjectId) -> bool {
+        self.layer_of(id).locked || self.is_locked_here(id)
+    }
+
+    fn is_locked_here(&self, id: ObjectId) -> bool {
         let own = match self.get(id) {
             Some(object) => object.locked,
             None => self.groups.get(&id).is_some_and(|g| g.locked),
         };
-        self.read_only || own || self.parent(id).is_some_and(|p| self.is_locked(p))
+        self.read_only || own || self.parent(id).is_some_and(|p| self.is_locked_here(p))
     }
 
     /// Whether `id` or any group around it is hidden.
@@ -553,7 +573,7 @@ impl Document {
 
     /// Whether `id` is drawn: not hidden, or hidden ones are shown.
     pub fn is_shown(&self, id: ObjectId) -> bool {
-        self.show_hidden || !self.is_hidden(id)
+        self.layer_of(id).visible && (self.show_hidden || !self.is_hidden(id))
     }
 
     /// Whether `id` can be picked, selected or erased: shown and in focus.
@@ -713,6 +733,9 @@ impl Document {
                     let meta = self.tree.get_meta(node)?;
                     meta.insert(key::ID, id.to_string())?;
                     meta.insert(key::KIND, key::GROUP)?;
+                    if let Some(layer) = self.unit_layers.get(&self.top_level(top)) {
+                        meta.insert(key::LAYER, &**layer)?;
+                    }
                     for (i, member) in members.iter().enumerate() {
                         self.tree
                             .mov_to(self.nodes[member], TreeParentId::Node(node), i)?;
@@ -732,8 +755,17 @@ impl Document {
                     let node = self.nodes[&id];
                     // All children, including kinds this version does not know.
                     let mut prev = node;
+                    // Parts left at the top level stay on the group's layer.
+                    let layer = self
+                        .unit_layers
+                        .get(&id)
+                        .filter(|_| group.parent.is_none())
+                        .cloned();
                     for child in self.tree.children(node).unwrap_or_default() {
                         self.tree.mov_after(child, prev)?;
+                        if let Some(layer) = &layer {
+                            self.tree.get_meta(child)?.insert(key::LAYER, &**layer)?;
+                        }
                         prev = child;
                     }
                     self.tree.delete(node)?;
@@ -1077,6 +1109,46 @@ impl Document {
                 self.doc.get_map(key::META).insert(key::READ_ONLY, on)?;
                 self.doc.set_next_commit_origin(NOT_UNDONE);
             }
+            Command::DefineLayer(layer) => {
+                self.doc
+                    .get_map(key::LAYERS)
+                    .insert(&layer.id, layer.to_value())?;
+            }
+            Command::RemoveLayer(id) => {
+                if &*id != Layer::BASE {
+                    let on: Vec<ObjectId> = self
+                        .roots
+                        .iter()
+                        .copied()
+                        .filter(|r| self.unit_layers.get(r) == Some(&id))
+                        .collect();
+                    self.remember_connector_ends(&on)?;
+                    for unit in on {
+                        self.tree.delete(self.nodes[&unit])?;
+                    }
+                    let layers = self.doc.get_map(key::LAYERS);
+                    if layers.get(&id).is_some() {
+                        layers.delete(&id)?;
+                    }
+                }
+            }
+            Command::SetLayer { ids, layer } => {
+                let units: Vec<ObjectId> = self
+                    .outermost(&ids)?
+                    .into_iter()
+                    .map(|id| self.top_level(id))
+                    .collect();
+                for unit in units {
+                    let meta = self.tree.get_meta(self.nodes[&unit])?;
+                    if &*layer == Layer::BASE {
+                        if meta.get(key::LAYER).is_some() {
+                            meta.delete(key::LAYER)?;
+                        }
+                    } else {
+                        meta.insert(key::LAYER, &*layer)?;
+                    }
+                }
+            }
             Command::SetHidden { ids, hidden } => {
                 self.check_exist(&ids)?;
                 for id in ids {
@@ -1153,6 +1225,10 @@ impl Document {
         let id = ObjectId::from_node(node);
         let meta = self.tree.get_meta(node)?;
         meta.insert(key::ID, id.to_string())?;
+        let layer = self.active_layer();
+        if parent == TreeParentId::Root && !layer.is_base() {
+            meta.insert(key::LAYER, &*layer.id)?;
+        }
         let (from, data) = match content {
             Content::Object(data) => (None, data),
             Content::Copied { from, data } => (Some(*from), data),
@@ -1350,6 +1426,7 @@ impl Document {
     /// TODO: update incrementally from Loro diff events once boards get large.
     fn refresh(&mut self) {
         self.objects.clear();
+        self.unit_layers.clear();
         self.index.clear();
         self.groups.clear();
         self.nodes.clear();
@@ -1369,6 +1446,8 @@ impl Document {
             }
         }
         self.roots = self.read_children(TreeParentId::Root, None);
+        self.layers = read_layers(&self.doc.get_map(key::LAYERS));
+        self.stack_layers();
         self.tags = read_tags(&self.doc.get_map(key::TAGS));
         self.reactions = read_reactions(&self.doc.get_map(key::REACTIONS));
         self.threads = read_threads(&self.doc.get_map(key::COMMENTS));
@@ -1393,6 +1472,81 @@ impl Document {
             }
         }
         self.revision += 1;
+    }
+
+    /// Puts the roots and objects in layer order, keeping the order within each layer.
+    fn stack_layers(&mut self) {
+        if self.unit_layers.is_empty() {
+            return;
+        }
+        let rank: HashMap<&str, usize> = self
+            .layers
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (&*l.id, i))
+            .collect();
+        let base = rank[Layer::BASE];
+        let unit_rank = |id: &ObjectId| {
+            self.unit_layers
+                .get(id)
+                .and_then(|l| rank.get(&**l).copied())
+                .unwrap_or(base)
+        };
+        let mut roots = self.roots.clone();
+        roots.sort_by_key(&unit_rank);
+        let ranks: Vec<usize> = self
+            .objects
+            .iter()
+            .map(|o| unit_rank(&self.top_level(o.id)))
+            .collect();
+        let mut order: Vec<usize> = (0..self.objects.len()).collect();
+        order.sort_by_key(|&i| ranks[i]);
+        let mut objects: Vec<Option<Object>> = std::mem::take(&mut self.objects)
+            .into_iter()
+            .map(Some)
+            .collect();
+        self.objects = order.iter().filter_map(|&i| objects[i].take()).collect();
+        self.index = self
+            .objects
+            .iter()
+            .enumerate()
+            .map(|(i, o)| (o.id, i))
+            .collect();
+        self.roots = roots;
+    }
+
+    /// The board's layers, bottom to top.
+    pub fn layers(&self) -> &[Layer] {
+        &self.layers
+    }
+
+    /// The layer `id` is on: its top-level object's or group's, the base layer if that is
+    /// gone.
+    pub fn layer_of(&self, id: ObjectId) -> &Layer {
+        let unit = self.top_level(id);
+        self.unit_layers
+            .get(&unit)
+            .and_then(|l| self.layers.iter().find(|layer| layer.id == *l))
+            .unwrap_or_else(|| self.base_layer())
+    }
+
+    fn base_layer(&self) -> &Layer {
+        self.layers
+            .iter()
+            .find(|l| l.is_base())
+            .expect("the base layer is always read")
+    }
+
+    /// The layer new objects go to.
+    pub fn active_layer(&self) -> &Layer {
+        self.layers
+            .iter()
+            .find(|l| l.id == self.active_layer)
+            .unwrap_or_else(|| self.base_layer())
+    }
+
+    pub fn set_active_layer(&mut self, id: Arc<str>) {
+        self.active_layer = id;
     }
 
     /// An id for a new table row or column, unique across replicas.
@@ -1520,6 +1674,16 @@ impl Document {
             if self.nodes.contains_key(&id) {
                 continue;
             }
+            if group.is_none()
+                && let NodeData::Group {
+                    layer: Some(layer), ..
+                }
+                | NodeData::Object {
+                    layer: Some(layer), ..
+                } = &read
+            {
+                self.unit_layers.insert(id, layer.clone());
+            }
             if let NodeData::Group { locked, hidden, .. } = read {
                 self.nodes.insert(id, node);
                 let children = self.read_children(TreeParentId::Node(node), Some(id));
@@ -1581,8 +1745,17 @@ impl Document {
             )
         };
         let (locked, hidden) = (flag(key::LOCKED), flag(key::HIDDEN));
+        let layer = match meta.get(key::LAYER) {
+            Some(ValueOrContainer::Value(LoroValue::String(s))) => Some(s.to_string().into()),
+            _ => None,
+        };
         let read = if is_group(&meta) {
-            NodeData::Group { id, locked, hidden }
+            NodeData::Group {
+                id,
+                locked,
+                hidden,
+                layer,
+            }
         } else {
             match read_data(&meta) {
                 Some(data) => NodeData::Object {
@@ -1590,6 +1763,7 @@ impl Document {
                     data: Box::new(data),
                     locked,
                     hidden,
+                    layer,
                 },
                 None => NodeData::Unknown { id },
             }
@@ -2031,6 +2205,24 @@ fn read_reactions(map: &LoroMap) -> HashMap<ObjectId, crate::reaction::Reactions
 }
 
 /// The board's tags from their root map, sorted by name (then id, for a stable order).
+/// The board's layers from their root map, bottom to top, with the base layer whether
+/// stored or not.
+fn read_layers(map: &LoroMap) -> Vec<Layer> {
+    let mut layers = Vec::new();
+    map.for_each(|id, v| {
+        if let ValueOrContainer::Value(LoroValue::String(value)) = v
+            && let Some(layer) = Layer::parse(id, &value)
+        {
+            layers.push(layer);
+        }
+    });
+    if !layers.iter().any(Layer::is_base) {
+        layers.push(Layer::base());
+    }
+    layers.sort_by(|a, b| a.order.total_cmp(&b.order).then_with(|| a.id.cmp(&b.id)));
+    layers
+}
+
 fn read_tags(map: &LoroMap) -> Vec<Tag> {
     let mut tags = Vec::new();
     map.for_each(|id, v| {
@@ -3079,6 +3271,58 @@ mod tests {
         doc.undo().unwrap();
         assert!(!doc.read_only() && doc.reactions(a).is_empty());
         doc.apply(Command::Delete(vec![a])).unwrap();
+    }
+
+    #[test]
+    fn layers_stack_hide_lock_and_carry_their_objects() {
+        let layer = |id: &str, order: f64| Layer {
+            id: id.into(),
+            name: id.into(),
+            order,
+            visible: true,
+            locked: false,
+        };
+        let mut doc = Document::new();
+        let a = create(&mut doc, rect(0.0, 0.0, 10.0, 10.0));
+        doc.apply(Command::DefineLayer(layer("top", 1.0))).unwrap();
+        doc.set_active_layer("top".into());
+        let b = create(&mut doc, rect(0.0, 0.0, 10.0, 10.0));
+        doc.set_active_layer(Layer::BASE.into());
+        let c = create(&mut doc, rect(0.0, 0.0, 10.0, 10.0));
+        // The top layer paints above everything on the base layer, whenever made.
+        assert_eq!(order(&doc), [a, c, b]);
+        assert_eq!(doc.roots(), [a, c, b]);
+        assert_eq!(&*doc.layer_of(b).id, "top");
+        // Moving a layer below the base one restacks.
+        doc.apply(Command::DefineLayer(layer("top", -1.0))).unwrap();
+        assert_eq!(order(&doc), [b, a, c]);
+        // Hidden and locked layers hide and lock what is on them.
+        let mut hidden = layer("top", -1.0);
+        hidden.visible = false;
+        hidden.locked = true;
+        doc.apply(Command::DefineLayer(hidden)).unwrap();
+        assert!(!doc.is_shown(b) && doc.is_locked(b) && doc.is_shown(a));
+        doc.undo().unwrap();
+        // Groups take their layer along, and so do their parts when ungrouped.
+        doc.apply(Command::SetLayer {
+            ids: vec![a],
+            layer: "top".into(),
+        })
+        .unwrap();
+        let g = group(&mut doc, &[a, b]);
+        assert_eq!(&*doc.layer_of(a).id, "top");
+        doc.apply(Command::Ungroup(vec![g])).unwrap();
+        assert_eq!(&*doc.layer_of(a).id, "top");
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(&*loaded.layer_of(b).id, "top");
+        assert_eq!(loaded.layers().len(), 2);
+        // Removing a layer removes what is on it; undo brings both back.
+        doc.apply(Command::RemoveLayer("top".into())).unwrap();
+        assert_eq!(order(&doc), [c]);
+        assert_eq!(doc.layers().len(), 1);
+        doc.undo().unwrap();
+        assert_eq!(order(&doc).len(), 3);
+        assert_eq!(&*doc.layer_of(a).id, "top");
     }
 
     #[test]

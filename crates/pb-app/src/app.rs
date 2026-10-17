@@ -29,8 +29,8 @@ use crate::navigation::Navigation;
 use crate::pictures::{self, Picture};
 use crate::session::Session;
 use crate::ui::{
-    Action, CommentView, ContextMenuInfo, LinkInfo, Minimap, Model, STICKY_COLORS, SearchInfo,
-    SelectionInfo, ShapeText, TableInfo, TextFormat, ThreadView, Ui, VotingView,
+    Action, CommentView, ContextMenuInfo, LayersView, LinkInfo, Minimap, Model, STICKY_COLORS,
+    SearchInfo, SelectionInfo, ShapeText, TableInfo, TextFormat, ThreadView, Ui, VotingView,
 };
 
 pub enum UserEvent {
@@ -122,7 +122,7 @@ pub struct App {
     /// Objects it does not let through are faded. Not saved with the board.
     filter: pb_core::Filter,
     /// Who reactions and comments are by.
-    me: std::sync::Arc<str>,
+    me: Arc<str>,
     /// The structure tool picked last, which the toolbar's shared button offers.
     last_structure: ToolKind,
     /// The comment thread shown, or a new one being started.
@@ -144,6 +144,8 @@ pub struct App {
     presentation: Option<Presentation>,
     /// In focus mode (the area is the document's): where the camera was before.
     focus_saved: Option<Camera>,
+    /// The layers panel is open.
+    show_layers: bool,
     /// The countdown timer, while shown.
     timer: Option<Timer>,
     /// The voting results window is open.
@@ -203,6 +205,7 @@ impl App {
             show_templates: false,
             presentation: None,
             focus_saved: None,
+            show_layers: false,
             camera_glide: None,
             timer: None,
             show_results: false,
@@ -420,6 +423,7 @@ impl App {
             show_shortcuts: self.show_shortcuts,
             hidden: (self.document.hidden_count(), self.document.shows_hidden()),
             read_only: self.document.read_only(),
+            layers: self.layers_view(),
             diagram: self.diagram.clone(),
             show_templates: self.show_templates,
             focus: self.focus_saved.is_some(),
@@ -613,7 +617,7 @@ impl App {
     }
 
     /// Puts tag `id` on the unlocked selection, or takes it off if all of it has the tag.
-    fn toggle_tag(&mut self, id: std::sync::Arc<str>) {
+    fn toggle_tag(&mut self, id: Arc<str>) {
         let leaves = self.selected_leaves();
         if leaves.is_empty() {
             return;
@@ -847,6 +851,12 @@ impl App {
             locked: selection.has_locked(&self.document),
             hidden: ids.iter().all(|&id| self.document.is_hidden(id)),
             read_only: self.document.read_only(),
+            layers: self.layer_choices(),
+            layer: {
+                let mut layers = ids.iter().map(|&id| &self.document.layer_of(id).id);
+                let first = layers.next().cloned();
+                first.filter(|f| layers.all(|l| l == f))
+            },
         })
     }
 
@@ -1188,6 +1198,47 @@ impl App {
             Action::Ungroup => self.apply_with(Tools::ungroup_selected),
             Action::ToggleLock => self.apply_with(Tools::toggle_lock_selected),
             Action::ToggleHidden => self.toggle_hidden(),
+            Action::ToggleLayers => self.show_layers = !self.show_layers,
+            Action::AddLayer => {
+                let layers = self.document.layers();
+                let order = layers.iter().map(|l| l.order).fold(0.0, f64::max) + 1.0;
+                let id: Arc<str> = self.document.new_line_id().into();
+                let layer = pb_core::Layer {
+                    id: id.clone(),
+                    name: format!("Layer {}", layers.len() + 1).into(),
+                    order,
+                    visible: true,
+                    locked: false,
+                };
+                self.apply(Command::DefineLayer(layer));
+                self.document.set_active_layer(id);
+            }
+            Action::ActivateLayer(id) => self.document.set_active_layer(id),
+            Action::UpdateLayer(layer) => {
+                // New objects should not land where they cannot be seen or changed.
+                if layer.id == self.document.active_layer().id
+                    && (!layer.visible || layer.locked)
+                    && let Some(other) = self
+                        .document
+                        .layers()
+                        .iter()
+                        .rev()
+                        .find(|l| l.id != layer.id && l.visible && !l.locked)
+                {
+                    let other = other.id.clone();
+                    self.document.set_active_layer(other);
+                }
+                self.apply(Command::DefineLayer(layer));
+                self.drop_unreachable();
+            }
+            Action::MoveLayer(id, up) => self.move_layer(&id, up),
+            Action::RemoveLayer(id) => self.apply(Command::RemoveLayer(id)),
+            Action::MoveToLayer(layer) => {
+                let ids = self.tools.selection().ids().to_vec();
+                if !ids.is_empty() {
+                    self.apply(Command::SetLayer { ids, layer });
+                }
+            }
             Action::ToggleReadOnly => {
                 self.finish_editing();
                 self.tools.cancel();
@@ -1496,7 +1547,7 @@ impl App {
         if &*embed.url != url {
             return;
         }
-        let pick = |new: &str, old: &std::sync::Arc<str>| -> std::sync::Arc<str> {
+        let pick = |new: &str, old: &Arc<str>| -> Arc<str> {
             if new.is_empty() {
                 old.clone()
             } else {
@@ -2030,6 +2081,62 @@ impl App {
         self.glide_to(&target);
     }
 
+    /// Layers to move the selection to, top first, when there is more than one.
+    fn layer_choices(&self) -> Vec<(Arc<str>, String)> {
+        let layers = self.document.layers();
+        if layers.len() < 2 {
+            return Vec::new();
+        }
+        layers
+            .iter()
+            .rev()
+            .map(|l| (l.id.clone(), l.name.to_string()))
+            .collect()
+    }
+
+    /// The layers panel's contents, when it is open.
+    fn layers_view(&self) -> Option<LayersView> {
+        if !self.show_layers {
+            return None;
+        }
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for &root in self.document.roots() {
+            *counts.entry(&self.document.layer_of(root).id).or_default() += 1;
+        }
+        Some(LayersView {
+            layers: self
+                .document
+                .layers()
+                .iter()
+                .rev()
+                .map(|l| (l.clone(), counts.get(&*l.id).copied().unwrap_or(0)))
+                .collect(),
+            active: self.document.active_layer().id.clone(),
+        })
+    }
+
+    /// Swaps layer `id` with the one above it (`up`) or below it.
+    fn move_layer(&mut self, id: &str, up: bool) {
+        let layers = self.document.layers();
+        let Some(i) = layers.iter().position(|l| &*l.id == id) else {
+            return;
+        };
+        let j = if up { i + 1 } else { i.wrapping_sub(1) };
+        let (Some(a), Some(b)) = (layers.get(i), layers.get(j)) else {
+            return;
+        };
+        let (mut a, mut b) = (a.clone(), b.clone());
+        std::mem::swap(&mut a.order, &mut b.order);
+        if a.order == b.order {
+            // Same order (stacked by id): spread them apart.
+            a.order += if up { 0.5 } else { -0.5 };
+        }
+        self.document.begin_undo_group();
+        self.apply(Command::DefineLayer(a));
+        self.apply(Command::DefineLayer(b));
+        self.document.end_undo_group();
+    }
+
     /// Hides the selection, or shows it again (Ctrl+Shift+H).
     fn toggle_hidden(&mut self) {
         self.finish_editing();
@@ -2334,7 +2441,7 @@ impl App {
 
     /// Pins of the threads shown: the spot each marks (world), its id and whether it is
     /// resolved.
-    fn comment_pins(&self) -> Vec<(Point, std::sync::Arc<str>, bool)> {
+    fn comment_pins(&self) -> Vec<(Point, Arc<str>, bool)> {
         self.document
             .threads()
             .iter()
@@ -2345,7 +2452,7 @@ impl App {
     }
 
     /// The thread whose pin is at `screen` (logical pixels), if any.
-    fn comment_pin_at(&self, screen: Point) -> Option<std::sync::Arc<str>> {
+    fn comment_pin_at(&self, screen: Point) -> Option<Arc<str>> {
         self.comment_pins()
             .into_iter()
             .rev()
@@ -2396,7 +2503,7 @@ impl App {
 
     /// The board's threads for the Comments menu: id, a line about it, and whether it
     /// is resolved.
-    fn thread_list(&self) -> Vec<(std::sync::Arc<str>, String, bool)> {
+    fn thread_list(&self) -> Vec<(Arc<str>, String, bool)> {
         self.document
             .threads()
             .iter()
@@ -2429,7 +2536,7 @@ impl App {
         if text.trim().is_empty() {
             return;
         }
-        let thread: std::sync::Arc<str> = match &panel.thread {
+        let thread: Arc<str> = match &panel.thread {
             Some(id) => id.clone(),
             None => self.document.new_line_id().into(),
         };
@@ -2452,7 +2559,7 @@ impl App {
     }
 
     /// Opens a thread from the Comments menu, bringing its pin into view.
-    fn open_thread(&mut self, id: std::sync::Arc<str>) {
+    fn open_thread(&mut self, id: Arc<str>) {
         let Some(at) = self
             .document
             .thread(&id)
@@ -3848,7 +3955,7 @@ impl Glide {
 /// The comment thread in the panel.
 struct ThreadPanel {
     /// `None` until the first comment starts it.
-    thread: Option<std::sync::Arc<str>>,
+    thread: Option<Arc<str>>,
     /// Where a new thread goes.
     anchor: Option<pb_core::ThreadAnchor>,
 }

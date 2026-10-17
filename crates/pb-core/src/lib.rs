@@ -6,6 +6,7 @@ pub mod comment;
 pub mod connector;
 mod document;
 pub mod kanban;
+mod layer;
 pub mod mindmap;
 mod object;
 pub mod reaction;
@@ -19,6 +20,7 @@ pub use comment::{Comment, Thread, ThreadAnchor};
 pub use connector::{Anchor, Cap, Connector, ConnectorChange, End, Label, Route};
 pub use document::{Document, Error, Result, Voting};
 pub use kanban::{Card, Column, Kanban, KanbanPart};
+pub use layer::Layer;
 pub use mindmap::{MindMap, MindMapPart, Node};
 pub use object::{
     Content, Doc, Embed, Filter, FrameData, Group, HAlign, Image, Ink, InkPoint, Link, Object,

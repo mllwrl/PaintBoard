@@ -58,6 +58,20 @@ pub enum Action {
     ShowHidden,
     /// Protects the board from changes, or lifts that.
     ToggleReadOnly,
+    /// Opens or closes the layers panel.
+    ToggleLayers,
+    /// Adds a layer on top and makes it the one new objects go to.
+    AddLayer,
+    /// Makes a layer the one new objects go to.
+    ActivateLayer(Arc<str>),
+    /// Stores a layer as given: shown or hidden, locked or not, renamed.
+    UpdateLayer(pb_core::Layer),
+    /// Moves a layer one step up (true) or down.
+    MoveLayer(Arc<str>, bool),
+    /// Removes a layer with everything on it.
+    RemoveLayer(Arc<str>),
+    /// Moves the selection to a layer.
+    MoveToLayer(Arc<str>),
     Duplicate,
     Delete,
     Reorder(ZOrder),
@@ -239,6 +253,8 @@ pub struct Model<'a> {
     pub hidden: (usize, bool),
     /// The board is read-only: only looking and commenting.
     pub read_only: bool,
+    /// The layers panel, while open.
+    pub layers: Option<LayersView>,
     /// The diagram-from-text window, when it is open, with the last error.
     pub diagram: Option<Option<String>>,
     /// The template gallery is open.
@@ -422,6 +438,17 @@ pub struct SelectionInfo {
     pub hidden: bool,
     /// The board is read-only.
     pub read_only: bool,
+    /// The board's layers, top first, when there are several, and the selection's layer
+    /// if it is all on one.
+    pub layers: Vec<(Arc<str>, String)>,
+    pub layer: Option<Arc<str>>,
+}
+
+/// The layers panel: layers top first, each with how many objects are on it, and the
+/// layer new objects go to.
+pub struct LayersView {
+    pub layers: Vec<(pb_core::Layer, usize)>,
+    pub active: Arc<str>,
 }
 
 /// The link of the selected object.
@@ -519,6 +546,8 @@ pub struct Ui {
     diagram_text: String,
     /// A comment being written.
     comment_text: String,
+    /// The layer being renamed, with the name typed so far.
+    layer_name: Option<(Arc<str>, String)>,
     repaint_at: Option<Instant>,
 }
 
@@ -548,6 +577,7 @@ impl Ui {
             search_text: String::new(),
             diagram_text: DIAGRAM_EXAMPLE.to_owned(),
             comment_text: String::new(),
+            layer_name: None,
             repaint_at: None,
         }
     }
@@ -595,6 +625,7 @@ impl Ui {
         let search_text = &mut self.search_text;
         let diagram_text = &mut self.diagram_text;
         let comment_text = &mut self.comment_text;
+        let layer_name = &mut self.layer_name;
         let output = self.ctx.run_pass(input, |ctx| {
             if let Some(timer) = &model.timer {
                 timer_pill(ctx, timer, &mut actions);
@@ -624,6 +655,10 @@ impl Ui {
             let view = view_controls(ctx, model, &mut actions);
             if let Some(map) = model.minimap.as_ref().filter(|_| !model.focus) {
                 minimap(ctx, map, view, &mut actions);
+            }
+            match &model.layers {
+                Some(layers) => layers_panel(ctx, layers, layer_name, &mut actions),
+                None => *layer_name = None,
             }
             if let Some(selection) = &model.selection {
                 let fields = Fields { new_tag, link_text };
@@ -1294,6 +1329,13 @@ fn view_controls(ctx: &Context, model: &Model, actions: &mut Vec<Action>) -> Rec
                     {
                         actions.push(Action::ToggleMinimap);
                     }
+                    if ui
+                        .selectable_label(model.layers.is_some(), "Layers")
+                        .on_hover_text("Layers of the board")
+                        .clicked()
+                    {
+                        actions.push(Action::ToggleLayers);
+                    }
                     let (hidden, shown) = model.hidden;
                     if (hidden > 0 || shown)
                         && ui
@@ -1609,6 +1651,19 @@ fn selection_toolbar(
                     }
                     if ui.button("Lock").on_hover_text("Ctrl+Shift+L").clicked() {
                         actions.push(Action::ToggleLock);
+                    }
+                    if !selection.layers.is_empty() {
+                        ui.menu_button("Layer", |ui| {
+                            for (id, name) in &selection.layers {
+                                let here = selection.layer.as_ref() == Some(id);
+                                if ui.add(Button::selectable(here, name)).clicked() {
+                                    actions.push(Action::MoveToLayer(id.clone()));
+                                    ui.close();
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text("Move to another layer");
                     }
                     let hide = if selection.hidden { "Show" } else { "Hide" };
                     if ui.button(hide).on_hover_text("Ctrl+Shift+H").clicked() {
@@ -2280,6 +2335,123 @@ fn timer_pill(ctx: &Context, timer: &TimerView, actions: &mut Vec<Action>) {
                         actions.push(Action::CloseTimer);
                     }
                 });
+            });
+        });
+}
+
+/// The board's layers, top first, by the right edge: each can be shown or hidden, locked,
+/// renamed (double click), moved up or down and removed; clicking one makes new objects
+/// go there.
+fn layers_panel(
+    ctx: &Context,
+    view: &LayersView,
+    renaming: &mut Option<(Arc<str>, String)>,
+    actions: &mut Vec<Action>,
+) {
+    let screen = ctx.content_rect();
+    let last = view.layers.len().saturating_sub(1);
+    Area::new(Id::unique("layers"))
+        .fixed_pos(Pos2::new(screen.right() - MARGIN, 70.0))
+        .pivot(Align2::RIGHT_TOP)
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            panel().show(ui, |ui| {
+                ui.set_width(250.0);
+                ui.horizontal(|ui| {
+                    ui.strong("Layers");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button("+ Add")
+                            .on_hover_text("New layer on top")
+                            .clicked()
+                        {
+                            actions.push(Action::AddLayer);
+                        }
+                    });
+                });
+                ui.separator();
+                egui::Grid::new("layers")
+                    .num_columns(5)
+                    .spacing([6.0, 4.0])
+                    .show(ui, |ui| {
+                        for (i, (layer, count)) in view.layers.iter().enumerate() {
+                            let mut visible = layer.visible;
+                            if ui
+                                .checkbox(&mut visible, "")
+                                .on_hover_text("Visible")
+                                .changed()
+                            {
+                                actions.push(Action::UpdateLayer(pb_core::Layer {
+                                    visible,
+                                    ..layer.clone()
+                                }));
+                            }
+                            match renaming.as_mut().filter(|(id, _)| *id == layer.id) {
+                                Some((_, name)) => {
+                                    let field = ui
+                                        .add(egui::TextEdit::singleline(name).desired_width(110.0));
+                                    field.request_focus();
+                                    if field.lost_focus() {
+                                        let name = name.trim();
+                                        if !name.is_empty() {
+                                            actions.push(Action::UpdateLayer(pb_core::Layer {
+                                                name: name.into(),
+                                                ..layer.clone()
+                                            }));
+                                        }
+                                        *renaming = None;
+                                    }
+                                }
+                                None => {
+                                    let active = layer.id == view.active;
+                                    let label = ui
+                                        .add(
+                                            Button::selectable(
+                                                active,
+                                                format!("{}  ({count})", layer.name),
+                                            )
+                                            .min_size(Vec2::new(110.0, 0.0)),
+                                        )
+                                        .on_hover_text(
+                                            "New objects go to the selected layer; \
+                                             double click to rename",
+                                        );
+                                    if label.double_clicked() {
+                                        *renaming =
+                                            Some((layer.id.clone(), layer.name.to_string()));
+                                    } else if label.clicked() {
+                                        actions.push(Action::ActivateLayer(layer.id.clone()));
+                                    }
+                                }
+                            }
+                            if ui
+                                .selectable_label(layer.locked, "Lock")
+                                .on_hover_text("Nothing on a locked layer can be changed")
+                                .clicked()
+                            {
+                                actions.push(Action::UpdateLayer(pb_core::Layer {
+                                    locked: !layer.locked,
+                                    ..layer.clone()
+                                }));
+                            }
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 2.0;
+                                if ui.add_enabled(i > 0, Button::new("↑")).clicked() {
+                                    actions.push(Action::MoveLayer(layer.id.clone(), true));
+                                }
+                                if ui.add_enabled(i < last, Button::new("↓")).clicked() {
+                                    actions.push(Action::MoveLayer(layer.id.clone(), false));
+                                }
+                            });
+                            let remove = ui
+                                .add_enabled(!layer.is_base(), Button::new("×"))
+                                .on_hover_text("Remove the layer and everything on it");
+                            if remove.clicked() {
+                                actions.push(Action::RemoveLayer(layer.id.clone()));
+                            }
+                            ui.end_row();
+                        }
+                    });
             });
         });
 }
