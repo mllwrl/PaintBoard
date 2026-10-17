@@ -1086,7 +1086,7 @@ fn table_tool_places_a_grid_and_lines_come_and_go() {
     assert_eq!((table.rows.len(), table.cols.len()), (3, 3));
     assert_eq!(data.bounds.size(), pb_geom::kurbo::Size::new(360.0, 132.0));
     tools.select_only([id]);
-    let cmd = tools.add_table_line(&doc, true).unwrap();
+    let cmd = tools.add_table_line(&doc, true, true).unwrap();
     doc.apply(cmd).unwrap();
     let data = doc.get(id).unwrap().data.clone();
     let ObjectKind::Table(table) = &data.kind else {
@@ -1097,7 +1097,7 @@ fn table_tool_places_a_grid_and_lines_come_and_go() {
     // Rows keep their size.
     let rect = table.cell_rect(data.bounds, 0, 0).unwrap();
     assert!((rect.height() - 44.0).abs() < 1e-9);
-    let cmd = tools.remove_table_line(&doc, false).unwrap();
+    let cmd = tools.remove_table_lines(&doc, false).unwrap();
     doc.apply(cmd).unwrap();
     let data = doc.get(id).unwrap().data.clone();
     let ObjectKind::Table(table) = &data.kind else {
@@ -1105,4 +1105,92 @@ fn table_tool_places_a_grid_and_lines_come_and_go() {
     };
     assert_eq!(table.cols.len(), 2);
     assert!((data.bounds.width() - 240.0).abs() < 1e-9);
+}
+
+#[test]
+fn table_cells_are_selected_and_lines_go_in_between() {
+    let mut doc = Document::new();
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Table);
+    let cmd = click(&mut tools, &doc, at(0.0, 0.0)).unwrap();
+    let id = doc.apply(cmd).unwrap().created[0];
+    let table = |doc: &Document| match &doc.get(id).unwrap().data.kind {
+        ObjectKind::Table(t) => t.clone(),
+        _ => panic!("not a table"),
+    };
+    let bounds = doc.get(id).unwrap().data.bounds;
+    let center = |r: usize, c: usize| {
+        let rect = table(&doc).cell_rect(bounds, r, c).unwrap();
+        at(rect.center().x, rect.center().y)
+    };
+    // With the table selected, a click picks a cell, and a drag then picks a block.
+    tools.select_only([id]);
+    assert_eq!(tools.table_cells(&doc), None);
+    click(&mut tools, &doc, center(1, 1));
+    assert_eq!(tools.table_cells(&doc), Some((id, CellRange::cell((1, 1)))));
+    assert!(drag(&mut tools, &doc, center(0, 1), center(1, 2)).is_none());
+    let block = CellRange::new((0, 1), (1, 2));
+    assert_eq!(tools.table_cells(&doc), Some((id, block)));
+    let mut shift = center(2, 2);
+    shift.shift = true;
+    click(&mut tools, &doc, shift);
+    assert_eq!(
+        tools.table_cells(&doc),
+        Some((id, CellRange::new((0, 1), (2, 2))))
+    );
+    click(&mut tools, &doc, center(1, 1));
+
+    // A row above the cell: the cell moves down with its row.
+    let before = table(&doc).rows[1].id.clone();
+    let cmd = tools.add_table_line(&doc, true, false).unwrap();
+    doc.apply(cmd).unwrap();
+    tools.sync(&doc);
+    let t = table(&doc);
+    assert_eq!(t.rows.len(), 4);
+    assert_eq!(t.rows[2].id, before);
+    assert_eq!(tools.table_cells(&doc), Some((id, CellRange::cell((2, 1)))));
+    // A column to the right.
+    let cmd = tools.add_table_line(&doc, false, true).unwrap();
+    doc.apply(cmd).unwrap();
+    let t = table(&doc);
+    assert_eq!(t.cols.len(), 4);
+    assert_eq!(tools.table_cells(&doc), Some((id, CellRange::cell((2, 1)))));
+    // Deleting the cell's column removes that column only.
+    let gone = t.cols[1].id.clone();
+    let cmd = tools.remove_table_lines(&doc, false).unwrap();
+    doc.apply(cmd).unwrap();
+    tools.sync(&doc);
+    let t = table(&doc);
+    assert_eq!(t.cols.len(), 3);
+    assert!(t.cols.iter().all(|c| c.id != gone));
+    assert_eq!(tools.table_cells(&doc), None);
+    assert_eq!(tools.selection().ids(), &[id]);
+}
+
+#[test]
+fn deleting_with_cells_selected_empties_them() {
+    let mut doc = Document::new();
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Table);
+    let cmd = click(&mut tools, &doc, at(0.0, 0.0)).unwrap();
+    let id = doc.apply(cmd).unwrap().created[0];
+    let ObjectKind::Table(t) = doc.get(id).unwrap().data.kind.clone() else {
+        panic!("not a table");
+    };
+    for (r, c) in [(0, 0), (0, 1), (2, 2)] {
+        doc.apply(Command::SetCell {
+            id,
+            row: t.rows[r].id.clone(),
+            col: t.cols[c].id.clone(),
+            cell: pb_core::Cell {
+                text: "x".into(),
+                spans: Default::default(),
+            },
+        })
+        .unwrap();
+    }
+    tools.select_cell(id, (0, 0));
+    assert_eq!(tools.clear_cells_text(&doc).len(), 1);
+    tools.select_only([id]);
+    assert!(tools.clear_cells_text(&doc).is_empty());
 }

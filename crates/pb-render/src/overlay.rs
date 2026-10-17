@@ -20,6 +20,8 @@ pub struct Overlay {
     pub rotate_knob: Option<Point>,
     /// Object under the pointer (world).
     pub hover: Option<Frame>,
+    /// Selected cells of a table (world).
+    pub cells: Option<Frame>,
     /// Rubber-band selection rectangle (world).
     pub marquee: Option<Rect>,
     /// Smart guides showing what a dragged object lines up with (world).
@@ -114,6 +116,17 @@ pub fn draw_overlay(
         for frame in &overlay.selected {
             scene.stroke(&thin, id, faint, None, &outline(frame));
         }
+    }
+    if let Some(cells) = &overlay.cells {
+        let path = outline(cells);
+        scene.fill(
+            Fill::NonZero,
+            id,
+            colors.accent.multiply_alpha(0.12),
+            None,
+            &path,
+        );
+        scene.stroke(&thick, id, colors.accent, None, &path);
     }
     if let Some(frame) = &overlay.selection {
         let corners = frame.corners().map(to_px);

@@ -26,8 +26,8 @@ pub use selection::{Selection, selection_frame, unit_frame};
 
 use bend::BendGrip;
 use pb_core::{
-    Cap, Command, Connector, ConnectorChange, Content, Document, End, FrameData, Label, Object,
-    ObjectData, ObjectId, ObjectKind, Route, ShapeKind, Style, Table,
+    Cap, CellRange, Command, Connector, ConnectorChange, Content, Document, End, FrameData, Label,
+    Object, ObjectData, ObjectId, ObjectKind, Route, ShapeKind, Style, Table,
 };
 use pb_geom::kurbo::{Line, Point, Rect, Vec2};
 use pb_geom::{Frame, GridLevel, Snapper, xs_of, ys_of};
@@ -171,7 +171,11 @@ enum Gesture {
         duplicate: bool,
         /// Clicking (not dragging) an object of a multi-selection selects just that object.
         select_only_on_click: Option<ObjectId>,
+        /// Clicking (not dragging) the selected table selects this cell of it.
+        cell_on_click: Option<(usize, usize)>,
     },
+    /// Dragging over the cells of the selected table to select a block of them.
+    SelectCells,
     Resize {
         handle: Handle,
         from: Frame,
@@ -259,6 +263,16 @@ pub struct Tools {
     connector_route: Route,
     /// Where a connector would start, while the connector tool hovers.
     connect_hover: Option<End>,
+    /// Selected cells of the selected table.
+    cells: Option<CellSelection>,
+}
+
+/// A block of cells of table `id`, from the cell first picked to the one picked last.
+#[derive(Clone, Copy, Debug)]
+struct CellSelection {
+    id: ObjectId,
+    anchor: (usize, usize),
+    end: (usize, usize),
 }
 
 impl Default for Tools {
@@ -277,6 +291,7 @@ impl Default for Tools {
             eraser_at: None,
             connector_route: Route::default(),
             connect_hover: None,
+            cells: None,
         }
     }
 }
@@ -361,6 +376,38 @@ impl Tools {
 
     pub fn select_only(&mut self, ids: impl IntoIterator<Item = ObjectId>) {
         self.selection.set(ids);
+        self.cells = None;
+    }
+
+    /// Selects table `id` and its cell `cell`.
+    pub fn select_cell(&mut self, id: ObjectId, cell: (usize, usize)) {
+        self.selection.set([id]);
+        self.cells = Some(CellSelection {
+            id,
+            anchor: cell,
+            end: cell,
+        });
+    }
+
+    /// The selected cells, if a block of cells of the single selected table is selected.
+    pub fn table_cells(&self, doc: &Document) -> Option<(ObjectId, CellRange)> {
+        let sel = self.cells?;
+        let (id, _, table) = self.single_table(doc).filter(|(id, ..)| *id == sel.id)?;
+        let range = CellRange::new(sel.anchor, sel.end);
+        (range.row1 < table.rows.len() && range.col1 < table.cols.len()).then_some((id, range))
+    }
+
+    /// Where the selected cells are (world), following the table's rotation.
+    pub fn cells_frame(&self, doc: &Document) -> Option<Frame> {
+        let (_, range) = self.table_cells(doc)?;
+        let (_, data, table) = self.single_table(doc)?;
+        let rect = table.range_rect(data.bounds, range)?;
+        Some(Frame::axis_aligned(rect).rotated_about(data.bounds.center(), data.rotation))
+    }
+
+    /// Deselects the cells but keeps their table selected. Returns true if any were selected.
+    pub fn clear_cells(&mut self) -> bool {
+        self.cells.take().is_some()
     }
 
     /// Selects everything that is not locked.
@@ -368,18 +415,23 @@ impl Tools {
         self.set_active(ToolKind::Select);
         let ids = doc.roots().iter().filter(|&&id| !doc.is_locked(id));
         self.selection.set(ids.copied());
+        self.cells = None;
     }
 
     /// Returns true if something was selected.
     pub fn clear_selection(&mut self) -> bool {
         let had = !self.selection.is_empty();
         self.selection.clear();
+        self.cells = None;
         had
     }
 
     /// Call after every document change: objects may have disappeared or been grouped.
     pub fn sync(&mut self, doc: &Document) {
         self.selection.retain_existing(doc);
+        if self.cells.is_some() && self.table_cells(doc).is_none() {
+            self.cells = None;
+        }
         if self.hover.is_some_and(|id| !doc.contains(id)) {
             self.hover = None;
         }
@@ -558,7 +610,38 @@ impl Tools {
         }
 
         let toggle = pointer.toggles_selection();
-        match self.object_at(doc, pointer) {
+        let under = self.object_at(doc, pointer);
+        let cell = self
+            .single_table(doc)
+            .filter(|(id, ..)| under == Some(*id))
+            .and_then(|(id, data, table)| {
+                let local = data.frame().to_local(p);
+                Some((id, table.cell_at(data.bounds, local)?))
+            });
+        let mut cell_on_click = None;
+        if let Some((id, cell)) = cell {
+            let picking = self.cells.is_some_and(|c| c.id == id);
+            if picking || pointer.shift {
+                // With cells selected, a drag selects cells; Shift extends the block.
+                let anchor = match self.cells {
+                    Some(c) if c.id == id && pointer.shift => c.anchor,
+                    _ => cell,
+                };
+                self.cells = Some(CellSelection {
+                    id,
+                    anchor,
+                    end: cell,
+                });
+                self.gesture = Some(Gesture::SelectCells);
+                self.hover = None;
+                return true;
+            }
+            if !toggle {
+                cell_on_click = Some(cell);
+            }
+        }
+        self.cells = None;
+        match under {
             Some(id) => {
                 let mut select_only_on_click = None;
                 if toggle && self.selection.contains(id) {
@@ -582,6 +665,7 @@ impl Tools {
                     dragging: false,
                     duplicate: pointer.alt,
                     select_only_on_click,
+                    cell_on_click,
                 });
             }
             None => {
@@ -617,6 +701,22 @@ impl Tools {
                 *current = pointer;
                 *dragging |= pointer.screen_distance(*start) >= CLICK_SLOP;
                 *dragging
+            }
+            Some(Gesture::SelectCells) => {
+                let Some((id, data, table)) = self.single_table(doc) else {
+                    return false;
+                };
+                let b = data.bounds;
+                let local = data.frame().to_local(pointer.world);
+                // Past the table's edge, the nearest cell.
+                let inside = Point::new(local.x.clamp(b.x0, b.x1), local.y.clamp(b.y0, b.y1));
+                match (&mut self.cells, table.cell_at(b, inside)) {
+                    (Some(sel), Some(cell)) if sel.id == id && sel.end != cell => {
+                        sel.end = cell;
+                        true
+                    }
+                    _ => false,
+                }
             }
             Some(Gesture::Marquee {
                 start,
@@ -768,13 +868,18 @@ impl Tools {
             }
             Gesture::Move {
                 select_only_on_click,
+                cell_on_click,
                 ..
             } => {
                 if let Some(id) = *select_only_on_click {
                     self.selection.set([id]);
+                    if let Some(cell) = *cell_on_click {
+                        self.select_cell(id, cell);
+                    }
                 }
                 None
             }
+            Gesture::SelectCells => None,
             Gesture::Resize { .. } | Gesture::Rotate { .. } => {
                 let changes = self.geometry_changes(doc);
                 let changed = changes
@@ -899,47 +1004,88 @@ impl Tools {
         }
     }
 
-    /// Adds a row at the bottom (`rows`) or a column at the right of the selected table,
-    /// as big as the average one; the table grows to make room.
-    pub fn add_table_line(&self, doc: &Document, rows: bool) -> Option<Command> {
+    /// Adds a row (`rows`) or a column to the selected table, as big as the average one;
+    /// the table grows to make room. It goes after the selected cells (`after`) or before
+    /// them, or at the bottom or right when no cells are selected.
+    pub fn add_table_line(&mut self, doc: &Document, rows: bool, after: bool) -> Option<Command> {
         let (id, data, table) = self.single_table(doc)?;
+        let cells = self.table_cells(doc).map(|(_, range)| range);
         let lines = if rows { &table.rows } else { &table.cols };
+        let at = match cells {
+            Some(range) if after => range.lines(rows).end() + 1,
+            Some(range) => *range.lines(rows).start(),
+            None => lines.len(),
+        };
         let total: f64 = lines.iter().map(|l| l.weight).sum();
         let weight = total / lines.len() as f64;
         let mut grown = lines.to_vec();
-        grown.push(pb_core::Line {
-            id: doc.new_line_id().into(),
-            weight,
-        });
-        let scale = (total + weight) / total;
-        let b = data.bounds;
-        let bounds = if rows {
-            Rect::new(b.x0, b.y0, b.x1, b.y0 + b.height() * scale)
-        } else {
-            Rect::new(b.x0, b.y0, b.x0 + b.width() * scale, b.y1)
-        };
-        Some(self.table_lines(id, table, rows, grown, bounds))
+        grown.insert(
+            at,
+            pb_core::Line {
+                id: doc.new_line_id().into(),
+                weight,
+            },
+        );
+        let bounds = resized_bounds(data.bounds, rows, (total + weight) / total);
+        let command = self.table_lines(id, table, rows, grown, bounds);
+        // The selected cells stay on their lines.
+        if let Some(sel) = &mut self.cells
+            && !after
+            && cells.is_some()
+        {
+            for cell in [&mut sel.anchor, &mut sel.end] {
+                let i = if rows { &mut cell.0 } else { &mut cell.1 };
+                *i += 1;
+            }
+        }
+        Some(command)
     }
 
-    /// Removes the bottom row or the right column of the selected table, if it has more
-    /// than one; the table shrinks by its size.
-    pub fn remove_table_line(&self, doc: &Document, rows: bool) -> Option<Command> {
+    /// Removes the rows (`rows`) or columns of the selected cells from the selected table,
+    /// or its bottom row or right column when no cells are selected; at least one is left.
+    /// The table shrinks by their size.
+    pub fn remove_table_lines(&mut self, doc: &Document, rows: bool) -> Option<Command> {
         let (id, data, table) = self.single_table(doc)?;
         let lines = if rows { &table.rows } else { &table.cols };
-        if lines.len() < 2 {
+        let gone = match self.table_cells(doc) {
+            Some((_, range)) => range.lines(rows),
+            None => lines.len() - 1..=lines.len() - 1,
+        };
+        if gone.clone().count() >= lines.len() {
             return None;
         }
         let total: f64 = lines.iter().map(|l| l.weight).sum();
-        let last = lines[lines.len() - 1].weight;
-        let scale = (total - last) / total;
-        let b = data.bounds;
-        let bounds = if rows {
-            Rect::new(b.x0, b.y0, b.x1, b.y0 + b.height() * scale)
-        } else {
-            Rect::new(b.x0, b.y0, b.x0 + b.width() * scale, b.y1)
+        let removed: f64 = lines[gone.clone()].iter().map(|l| l.weight).sum();
+        let bounds = resized_bounds(data.bounds, rows, (total - removed) / total);
+        let kept = lines
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !gone.contains(i))
+            .map(|(_, l)| l.clone())
+            .collect();
+        self.cells = None;
+        Some(self.table_lines(id, table, rows, kept, bounds))
+    }
+
+    /// Empties the selected cells, one command per cell with text.
+    pub fn clear_cells_text(&self, doc: &Document) -> Vec<Command> {
+        let Some((id, range)) = self.table_cells(doc) else {
+            return Vec::new();
         };
-        let shrunk = lines[..lines.len() - 1].to_vec();
-        Some(self.table_lines(id, table, rows, shrunk, bounds))
+        let Some((_, _, table)) = self.single_table(doc) else {
+            return Vec::new();
+        };
+        range
+            .rows()
+            .flat_map(|r| range.cols().map(move |c| (r, c)))
+            .filter(|&(r, c)| !table.text(r, c).0.is_empty())
+            .map(|(r, c)| Command::SetCell {
+                id,
+                row: table.rows[r].id.clone(),
+                col: table.cols[c].id.clone(),
+                cell: pb_core::Cell::default(),
+            })
+            .collect()
     }
 
     fn table_lines(
@@ -1535,6 +1681,15 @@ impl Tools {
 }
 
 /// Up-down arrows over a line between rows, left-right ones over a line between columns.
+/// `bounds` with its height (`rows`) or width scaled by `scale`, keeping the top left.
+fn resized_bounds(b: Rect, rows: bool, scale: f64) -> Rect {
+    if rows {
+        Rect::new(b.x0, b.y0, b.x1, b.y0 + b.height() * scale)
+    } else {
+        Rect::new(b.x0, b.y0, b.x0 + b.width() * scale, b.y1)
+    }
+}
+
 fn divider_cursor(divider: Divider) -> CursorHint {
     if divider.rows {
         CursorHint::ResizeNs

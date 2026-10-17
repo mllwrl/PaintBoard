@@ -36,6 +36,52 @@ pub struct Cell {
     pub spans: Spans,
 }
 
+/// A block of cells, by index: rows `row0..=row1` and columns `col0..=col1`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellRange {
+    pub row0: usize,
+    pub col0: usize,
+    pub row1: usize,
+    pub col1: usize,
+}
+
+impl CellRange {
+    /// The block spanned by two corner cells, in any order.
+    pub fn new((r0, c0): (usize, usize), (r1, c1): (usize, usize)) -> Self {
+        Self {
+            row0: r0.min(r1),
+            col0: c0.min(c1),
+            row1: r0.max(r1),
+            col1: c0.max(c1),
+        }
+    }
+
+    pub fn cell((row, col): (usize, usize)) -> Self {
+        Self::new((row, col), (row, col))
+    }
+
+    pub fn rows(&self) -> std::ops::RangeInclusive<usize> {
+        self.row0..=self.row1
+    }
+
+    pub fn cols(&self) -> std::ops::RangeInclusive<usize> {
+        self.col0..=self.col1
+    }
+
+    /// Its rows (`rows`) or columns.
+    pub fn lines(&self, rows: bool) -> std::ops::RangeInclusive<usize> {
+        if rows { self.rows() } else { self.cols() }
+    }
+
+    pub fn contains(&self, (row, col): (usize, usize)) -> bool {
+        self.rows().contains(&row) && self.cols().contains(&col)
+    }
+
+    pub fn is_single(&self) -> bool {
+        self.row0 == self.row1 && self.col0 == self.col1
+    }
+}
+
 /// Cells by the ids of their row and column.
 pub type Cells = BTreeMap<(Arc<str>, Arc<str>), Cell>;
 
@@ -124,6 +170,13 @@ impl Table {
             *xs.get(col + 1)?,
             *ys.get(row + 1)?,
         ))
+    }
+
+    /// The area of `range` in a table with `bounds`.
+    pub fn range_rect(&self, bounds: Rect, range: CellRange) -> Option<Rect> {
+        let a = self.cell_rect(bounds, range.row0, range.col0)?;
+        let b = self.cell_rect(bounds, range.row1, range.col1)?;
+        Some(a.union(b))
     }
 
     /// The cell at `point` (in the table's unrotated coordinates), if inside.

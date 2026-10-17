@@ -69,10 +69,14 @@ pub enum Action {
     ToggleMinimap,
     /// Puts the selected connector back on its automatic path.
     ResetBends,
-    /// Adds a row (`true`) or column to the selected table.
-    AddTableLine(bool),
-    /// Removes the last row (`true`) or column of the selected table.
-    RemoveTableLine(bool),
+    /// Adds a row (`rows`) or column to the selected table: after the selected cells
+    /// (`after`) or before them, or at the end when no cells are selected.
+    AddTableLine {
+        rows: bool,
+        after: bool,
+    },
+    /// Removes the rows (`true`) or columns of the selected cells, or the last one.
+    RemoveTableLines(bool),
     /// Centers the view on a world point (from the minimap).
     LookAt(kurbo::Point),
     /// Replace the selected handwriting with typed text.
@@ -159,8 +163,8 @@ pub struct SelectionInfo {
     pub handwriting: Option<bool>,
     /// Text style of the first selected shape or table, if there is one.
     pub shape_text: Option<ShapeText>,
-    /// A single table is selected: its numbers of rows and columns.
-    pub table: Option<(usize, usize)>,
+    /// A single table is selected.
+    pub table: Option<TableInfo>,
     /// A single unlocked image is selected.
     pub can_crop: bool,
     pub several: bool,
@@ -896,13 +900,34 @@ fn selection_toolbar(
                     if let Some(c) = &selection.connector {
                         connector_controls(ui, c, actions);
                     }
-                    if let Some((rows, cols)) = selection.table {
-                        let buttons = [
-                            ("+ Row", "Add a row at the bottom", Action::AddTableLine(true), true),
-                            ("+ Column", "Add a column at the right", Action::AddTableLine(false), true),
-                            ("− Row", "Remove the bottom row", Action::RemoveTableLine(true), rows > 1),
-                            ("− Column", "Remove the right column", Action::RemoveTableLine(false), cols > 1),
-                        ];
+                    if let Some(table) = selection.table {
+                        let add = |rows, after| Action::AddTableLine { rows, after };
+                        let buttons = match table.cells {
+                            None => vec![
+                                ("+ Row", "Add a row at the bottom", add(true, true), true),
+                                ("+ Column", "Add a column at the right", add(false, true), true),
+                                ("− Row", "Remove the bottom row", Action::RemoveTableLines(true), table.rows > 1),
+                                ("− Column", "Remove the right column", Action::RemoveTableLines(false), table.cols > 1),
+                            ],
+                            Some(cells) => vec![
+                                ("Row ↑", "Insert a row above", add(true, false), true),
+                                ("Row ↓", "Insert a row below", add(true, true), true),
+                                ("Column ←", "Insert a column to the left", add(false, false), true),
+                                ("Column →", "Insert a column to the right", add(false, true), true),
+                                (
+                                    "Delete rows",
+                                    "Delete the selected rows",
+                                    Action::RemoveTableLines(true),
+                                    cells.rows().count() < table.rows,
+                                ),
+                                (
+                                    "Delete columns",
+                                    "Delete the selected columns",
+                                    Action::RemoveTableLines(false),
+                                    cells.cols().count() < table.cols,
+                                ),
+                            ],
+                        };
                         for (label, tip, action, enabled) in buttons {
                             if ui
                                 .add_enabled(enabled, Button::new(label))
@@ -1308,6 +1333,14 @@ fn paint_cursor(painter: &Painter, rect: Rect, color: Color32) {
         at(0.15, 0.0),
     ];
     painter.add(Shape::line(points, Stroke::new(1.6, color)));
+}
+
+/// The selected table: its size, and the selected cells.
+#[derive(Clone, Copy, Debug)]
+pub struct TableInfo {
+    pub rows: usize,
+    pub cols: usize,
+    pub cells: Option<pb_core::CellRange>,
 }
 
 /// A table: a box split into cells.

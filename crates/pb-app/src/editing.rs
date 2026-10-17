@@ -358,6 +358,14 @@ impl TextEdit {
         Self::cell(engine, Target::Existing(id), data, table, row, col)
     }
 
+    /// The table and cell being edited, when editing a table cell.
+    pub fn edited_cell(&self) -> Option<(ObjectId, (usize, usize))> {
+        match (self.target, self.placement) {
+            (Target::Existing(id), Placement::Cell { row, col, .. }) => Some((id, (row, col))),
+            _ => None,
+        }
+    }
+
     /// The cell after this one (before it with `back`), when editing a table cell.
     pub fn next_cell(&self, back: bool) -> Option<(ObjectId, (usize, usize))> {
         let (Target::Existing(id), Placement::Cell { row, col, .. }, Some(table)) =

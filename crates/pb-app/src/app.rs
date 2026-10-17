@@ -28,7 +28,9 @@ use crate::editing::{self, KeyOutcome, NEW_TEXT_SIZE, TextEdit};
 use crate::navigation::Navigation;
 use crate::pictures::{self, Picture};
 use crate::session::Session;
-use crate::ui::{Action, Minimap, Model, STICKY_COLORS, SelectionInfo, ShapeText, TextFormat, Ui};
+use crate::ui::{
+    Action, Minimap, Model, STICKY_COLORS, SelectionInfo, ShapeText, TableInfo, TextFormat, Ui,
+};
 
 pub enum UserEvent {
     /// GPU initialization finished (asynchronous on the web).
@@ -449,9 +451,11 @@ impl App {
             .then_some(self.recognition.is_some()),
             shape_text,
             table: match (ids, leaves.first().map(|o| &o.data.kind)) {
-                ([_], Some(ObjectKind::Table(t))) if leaves.len() == 1 => {
-                    Some((t.rows.len(), t.cols.len()))
-                }
+                ([_], Some(ObjectKind::Table(t))) if leaves.len() == 1 => Some(TableInfo {
+                    rows: t.rows.len(),
+                    cols: t.cols.len(),
+                    cells: self.tools.table_cells(&self.document).map(|(_, r)| r),
+                }),
                 _ => None,
             },
             can_crop: matches!(ids, [id] if Crop::new(&self.document, *id).is_some()),
@@ -510,13 +514,13 @@ impl App {
             Action::NextGrid => self.grid = self.grid.next(),
             Action::ToggleSnap => self.tools.set_snap_to_grid(!self.tools.snap_to_grid()),
             Action::ToggleMinimap => self.show_minimap = !self.show_minimap,
-            Action::AddTableLine(rows) => {
-                if let Some(command) = self.tools.add_table_line(&self.document, rows) {
+            Action::AddTableLine { rows, after } => {
+                if let Some(command) = self.tools.add_table_line(&self.document, rows, after) {
                     self.apply(command);
                 }
             }
-            Action::RemoveTableLine(rows) => {
-                if let Some(command) = self.tools.remove_table_line(&self.document, rows) {
+            Action::RemoveTableLines(rows) => {
+                if let Some(command) = self.tools.remove_table_lines(&self.document, rows) {
                     self.apply(command);
                 }
             }
@@ -722,6 +726,19 @@ impl App {
         }
     }
 
+    /// Empties the selected table cells as one undo step.
+    fn clear_cells(&mut self) {
+        let commands = self.tools.clear_cells_text(&self.document);
+        if commands.is_empty() {
+            return;
+        }
+        self.document.begin_undo_group();
+        for command in commands {
+            self.apply(command);
+        }
+        self.document.end_undo_group();
+    }
+
     fn next_sticky(&mut self, below: bool) {
         let Some(edit) = &mut self.editing else {
             return;
@@ -758,8 +775,14 @@ impl App {
             return false;
         }
         let zoom = self.camera.zoom();
-        let Some(mut edit) = TextEdit::existing(self.text.engine(), &self.document, id, None, zoom)
-        else {
+        let engine = self.text.engine();
+        let edit = match self.tools.table_cells(&self.document) {
+            Some((_, range)) => {
+                TextEdit::table_cell(engine, &self.document, id, (range.row0, range.col0))
+            }
+            None => TextEdit::existing(engine, &self.document, id, None, zoom),
+        };
+        let Some(mut edit) = edit else {
             return self.start_crop(id);
         };
         edit.select_all(self.text.engine());
@@ -1337,6 +1360,11 @@ impl App {
             } else {
                 ZOrder::Backward
             }),
+            KeyCode::Delete | KeyCode::Backspace
+                if self.tools.table_cells(&self.document).is_some() =>
+            {
+                self.clear_cells();
+            }
             KeyCode::Delete | KeyCode::Backspace => {
                 if let Some(command) = self.tools.delete_selected(&self.document) {
                     self.apply(command);
@@ -1346,9 +1374,9 @@ impl App {
             KeyCode::ArrowRight => self.nudge(1.0, 0.0),
             KeyCode::ArrowUp => self.nudge(0.0, -1.0),
             KeyCode::ArrowDown => self.nudge(0.0, 1.0),
-            // Esc backs out one level: gesture, then tool, then selection.
+            // Esc backs out one level: gesture, then tool, then cells, then selection.
             KeyCode::Escape => {
-                if !self.tools.cancel() {
+                if !self.tools.cancel() && !self.tools.clear_cells() {
                     if self.tools.active() != ToolKind::Select {
                         self.tools.set_active(ToolKind::Select);
                     } else {
@@ -1580,7 +1608,14 @@ impl App {
                     let modifiers = self.navigation.modifiers();
                     match edit.key(self.text.engine(), &event, modifiers) {
                         KeyOutcome::Handled => {}
-                        KeyOutcome::Finish => self.finish_editing(),
+                        KeyOutcome::Finish => {
+                            // Escape from a cell leaves the cell selected.
+                            let cell = edit.edited_cell();
+                            self.finish_editing();
+                            if let Some((id, cell)) = cell {
+                                self.tools.select_cell(id, cell);
+                            }
+                        }
                         KeyOutcome::FinishAndPass => {
                             self.finish_editing();
                             self.handle_key(&event);
@@ -1757,6 +1792,7 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
             .filter(|_| show_handles && tools.can_rotate(document))
             .map(|f| rotation_knob(f, zoom)),
         hover,
+        cells: tools.cells_frame(document),
         marquee: tools.marquee(),
         guides: tools.guides(document),
         eraser: tools.eraser(),
