@@ -16,7 +16,8 @@ pub struct Hit {
 
 /// Every place `query` appears, ignoring case, in reading order: top to bottom, then left
 /// to right. Searches text, sticky notes, shapes, frame titles, connector labels, table
-/// cells, kanban cards and column titles, and the names of objects' tags. Empty for a
+/// cells, kanban cards and column titles, mind map topics (shown ones), and the names of
+/// objects' tags. Empty for a
 /// blank query.
 pub fn search(doc: &Document, query: &str) -> Vec<Hit> {
     let query = query.trim().to_lowercase();
@@ -78,6 +79,14 @@ pub fn search(doc: &Document, query: &str) -> Vec<Hit> {
                         {
                             hit(part(rect));
                         }
+                    }
+                }
+            }
+            ObjectKind::MindMap(map) => {
+                let layout = map.layout();
+                for placed in &layout.placed {
+                    if found(&map.nodes[placed.index].text) {
+                        hit(part(map.to_world(&layout, data.bounds, placed.rect)));
                     }
                 }
             }
@@ -201,6 +210,19 @@ mod tests {
         doc.apply(Command::Create(items)).unwrap();
         let hits = search(&doc, "tota");
         assert_eq!(hits.len(), 3);
+        // Mind map topics are found by their boxes.
+        let size = kurbo::Size::new(50.0, 20.0);
+        let map = crate::MindMap::new("r", "Budget totals", size);
+        let map_bounds = Rect::from_origin_size((0.0, 2000.0), map.layout().bounds.size());
+        doc.apply(Command::Create(vec![
+            data(ObjectKind::MindMap(map.clone()), map_bounds).into(),
+        ]))
+        .unwrap();
+        let hits = search(&doc, "budget");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].area.rect, map.node_rect(map_bounds, 0).unwrap());
+        let hits = search(&doc, "tota");
+        assert_eq!(hits.len(), 4);
         assert_eq!(hits[0].area.rect, Rect::new(100.0, 50.0, 200.0, 100.0));
         assert_eq!(hits[1].area.rect, kanban.card_rect(k_bounds, 0).unwrap());
         assert_eq!(hits[2].area.rect, Rect::new(0.0, 900.0, 100.0, 1000.0));

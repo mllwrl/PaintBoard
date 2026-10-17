@@ -1703,6 +1703,9 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
                 "Shift / Ctrl + click",
                 "Add to or remove from the selection",
             ),
+            ("Alt+A / D / W / S", "Align left / right / top / bottom"),
+            ("Alt+H / Alt+V", "Center horizontally / vertically"),
+            ("Alt+Shift+H / V", "Distribute horizontally / vertically"),
         ],
     ),
     (
