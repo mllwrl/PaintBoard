@@ -97,6 +97,17 @@ pub enum Action {
     /// Makes a diagram from this Mermaid text.
     InsertDiagram(String),
     CloseDiagram,
+    /// Adds this comment to the thread shown, starting it if new.
+    PostComment(String),
+    DeleteComment(std::sync::Arc<str>),
+    /// Marks the thread shown resolved (`true`) or open.
+    ResolveThread(bool),
+    DeleteThread,
+    CloseThread,
+    /// Shows a thread from the Comments menu.
+    OpenThread(std::sync::Arc<str>),
+    /// Shows or hides resolved threads.
+    ToggleShowResolved,
     /// Opens the search bar (Ctrl+F).
     OpenSearch,
     /// Searches the board for this text.
@@ -186,6 +197,33 @@ pub struct Model<'a> {
     pub show_shortcuts: bool,
     /// The diagram-from-text window, when it is open, with the last error.
     pub diagram: Option<Option<String>>,
+    /// The comment thread shown.
+    pub thread: Option<ThreadView>,
+    /// The board's threads: id, a line about it, and whether it is resolved.
+    pub threads: Vec<(std::sync::Arc<str>, String, bool)>,
+    pub show_resolved: bool,
+}
+
+/// A comment thread in its panel.
+#[derive(Clone, Debug)]
+pub struct ThreadView {
+    /// The spot it marks, in logical pixels.
+    pub pos: (f32, f32),
+    /// Not started yet: no comments.
+    pub is_new: bool,
+    pub resolved: bool,
+    pub comments: Vec<CommentView>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CommentView {
+    pub id: std::sync::Arc<str>,
+    pub author: String,
+    /// How long ago, for people.
+    pub when: String,
+    pub text: String,
+    /// Written by the person using the app.
+    pub mine: bool,
 }
 
 /// What the right-click menu offers.
@@ -384,6 +422,8 @@ pub struct Ui {
     search_text: String,
     /// Mermaid text in the diagram window, kept between openings.
     diagram_text: String,
+    /// A comment being written.
+    comment_text: String,
     repaint_at: Option<Instant>,
 }
 
@@ -412,6 +452,7 @@ impl Ui {
             link_text: String::new(),
             search_text: String::new(),
             diagram_text: DIAGRAM_EXAMPLE.to_owned(),
+            comment_text: String::new(),
             repaint_at: None,
         }
     }
@@ -458,6 +499,7 @@ impl Ui {
         let link_text = &mut self.link_text;
         let search_text = &mut self.search_text;
         let diagram_text = &mut self.diagram_text;
+        let comment_text = &mut self.comment_text;
         let output = self.ctx.run_pass(input, |ctx| {
             board_menu(ctx, model, &mut actions);
             toolbar(ctx, model, &mut actions);
@@ -486,6 +528,10 @@ impl Ui {
             }
             if let Some(error) = &model.diagram {
                 diagram_window(ctx, error.as_deref(), diagram_text, &mut actions);
+            }
+            match &model.thread {
+                Some(thread) => thread_panel(ctx, thread, comment_text, &mut actions),
+                None => comment_text.clear(),
             }
         });
         self.state
@@ -628,6 +674,13 @@ fn board_menu(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         RichText::new("Filter ●").color(Color32::from_rgb(0x3B, 0x82, 0xF6))
                     };
                     ui.menu_button(label, |ui| filter_menu(ui, model, actions));
+                    let open = model.threads.iter().filter(|(_, _, r)| !r).count();
+                    let label = if open > 0 {
+                        format!("Comments ({open})")
+                    } else {
+                        "Comments".to_owned()
+                    };
+                    ui.menu_button(label, |ui| comments_menu(ui, model, actions));
                     if ui
                         .button("Find")
                         .on_hover_text("Find on the board (Ctrl+F)")
@@ -688,6 +741,7 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         (ToolKind::Kanban, "Kanban (K)", paint_kanban),
                         (ToolKind::MindMap, "Mind map", paint_mindmap),
                         (ToolKind::Doc, "Markdown document (D)", paint_doc),
+                        (ToolKind::Comment, "Comment (C)", paint_comment),
                     ];
                     let mut ink_button = shapes.rect;
                     for (tool, tooltip, paint) in ink_tools {
@@ -1628,6 +1682,144 @@ fn context_menu(ctx: &Context, info: ContextMenuInfo, actions: &mut Vec<Action>)
     }
 }
 
+/// The board's comment threads, and whether resolved ones show.
+fn comments_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
+    if model.threads.is_empty() {
+        ui.weak("No comments yet: use the comment tool (C)");
+    }
+    for (id, line, resolved) in &model.threads {
+        if *resolved && !model.show_resolved {
+            continue;
+        }
+        let text = if *resolved {
+            RichText::new(format!("✓ {line}")).weak()
+        } else {
+            RichText::new(line)
+        };
+        if ui.button(text).clicked() {
+            actions.push(Action::OpenThread(id.clone()));
+            ui.close();
+        }
+    }
+    ui.separator();
+    let mut show = model.show_resolved;
+    if ui.checkbox(&mut show, "Show resolved").clicked() {
+        actions.push(Action::ToggleShowResolved);
+    }
+}
+
+/// A comment thread next to its pin: the comments, and a field for the next one.
+fn thread_panel(ctx: &Context, thread: &ThreadView, text: &mut String, actions: &mut Vec<Action>) {
+    let accent = Color32::from_rgb(0x25, 0x63, 0xEB);
+    Area::new(Id::unique("thread"))
+        .fixed_pos(Pos2::new(thread.pos.0 + 14.0, thread.pos.1 - 10.0))
+        .constrain(true)
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            panel().show(ui, |ui| {
+                ui.set_width(300.0);
+                ui.horizontal(|ui| {
+                    ui.strong(if thread.is_new {
+                        "New comment"
+                    } else {
+                        "Comments"
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("×").on_hover_text("Close (Esc)").clicked() {
+                            actions.push(Action::CloseThread);
+                        }
+                        if !thread.is_new {
+                            if ui
+                                .small_button("Delete")
+                                .on_hover_text("Delete the thread")
+                                .clicked()
+                            {
+                                actions.push(Action::DeleteThread);
+                            }
+                            let (label, tip) = if thread.resolved {
+                                ("Reopen", "Mark it open again")
+                            } else {
+                                (
+                                    "Resolve",
+                                    "Mark it done; it hides unless resolved ones show",
+                                )
+                            };
+                            if ui.small_button(label).on_hover_text(tip).clicked() {
+                                actions.push(Action::ResolveThread(!thread.resolved));
+                            }
+                        }
+                    });
+                });
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        for comment in &thread.comments {
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.strong(&comment.author);
+                                ui.weak(&comment.when);
+                                if comment.mine {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui.small_button("Delete").clicked() {
+                                                actions.push(Action::DeleteComment(
+                                                    comment.id.clone(),
+                                                ));
+                                            }
+                                        },
+                                    );
+                                }
+                            });
+                            ui.label(mention_job(ui, &comment.text, accent));
+                        }
+                    });
+                ui.separator();
+                let field = ui.add(
+                    egui::TextEdit::multiline(text)
+                        .hint_text("Write a comment… @name mentions someone")
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY),
+                );
+                if thread.is_new
+                    && thread.comments.is_empty()
+                    && !field.has_focus()
+                    && text.is_empty()
+                {
+                    field.request_focus();
+                }
+                let send = field.has_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
+                ui.horizontal(|ui| {
+                    let label = if thread.is_new { "Comment" } else { "Reply" };
+                    let button = ui
+                        .add_enabled(!text.trim().is_empty(), Button::new(label))
+                        .on_hover_text("Ctrl+Enter");
+                    if (button.clicked() || send) && !text.trim().is_empty() {
+                        actions.push(Action::PostComment(std::mem::take(text)));
+                    }
+                });
+            });
+        });
+}
+
+/// `text` with its `@mentions` in `accent`.
+fn mention_job(ui: &egui::Ui, text: &str, accent: Color32) -> egui::text::LayoutJob {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let normal = egui::TextFormat::simple(font.clone(), ui.visuals().text_color());
+    let mention = egui::TextFormat::simple(font, accent);
+    let mut job = egui::text::LayoutJob::default();
+    let mut at = 0;
+    for range in pb_core::comment::mention_ranges(text) {
+        job.append(&text[at..range.start], 0.0, normal.clone());
+        job.append(&text[range.clone()], 0.0, mention.clone());
+        at = range.end;
+    }
+    job.append(&text[at..], 0.0, normal);
+    job.wrap.max_width = 290.0;
+    job
+}
+
 /// What the diagram window starts with.
 const DIAGRAM_EXAMPLE: &str = "flowchart TD
     A([Start]) --> B[Write the plan]
@@ -1697,6 +1889,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("F", "Frame"),
             ("K", "Kanban board"),
             ("D", "Markdown document"),
+            ("C", "Comment"),
             ("Tab / Enter", "Mind map: add a subtopic / topic"),
             ("F2", "Edit the selected topic"),
             ("P / M / E", "Pen / marker / eraser"),
@@ -2246,6 +2439,20 @@ fn paint_reaction(painter: &Painter, rect: Rect, reaction: pb_core::Reaction) {
             Shape::line(points, Stroke::new(width, color))
         });
     }
+}
+
+/// A comment: a speech bubble.
+fn paint_comment(painter: &Painter, rect: Rect, color: Color32) {
+    let at = |x: f32, y: f32| rect.min + Vec2::new(x, y) * rect.width();
+    let stroke = Stroke::new(1.6, color);
+    painter.rect_stroke(
+        Rect::from_min_max(at(0.05, 0.1), at(0.95, 0.72)),
+        4,
+        stroke,
+        egui::StrokeKind::Middle,
+    );
+    painter.line_segment([at(0.25, 0.72), at(0.18, 0.95)], stroke);
+    painter.line_segment([at(0.18, 0.95), at(0.45, 0.72)], stroke);
 }
 
 /// A document: a page with a heading and lines of text.

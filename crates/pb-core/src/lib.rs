@@ -2,6 +2,7 @@
 
 mod asset;
 mod command;
+pub mod comment;
 pub mod connector;
 mod document;
 pub mod kanban;
@@ -14,6 +15,7 @@ pub mod table;
 
 pub use asset::{AssetId, Assets};
 pub use command::{Applied, Command, ZOrder};
+pub use comment::{Comment, Thread, ThreadAnchor};
 pub use connector::{Anchor, Cap, Connector, ConnectorChange, End, Label, Route};
 pub use document::{Document, Error, Result};
 pub use kanban::{Card, Column, Kanban, KanbanPart};

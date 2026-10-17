@@ -47,6 +47,9 @@ pub struct Overlay {
     /// Search results (world), and the one shown now.
     pub search_hits: Vec<Frame>,
     pub search_current: Option<Frame>,
+    /// Comment thread pins: the point each one marks (world), whether its thread is
+    /// resolved, and whether it is the one open.
+    pub comment_pins: Vec<(Point, bool, bool)>,
     /// Top right corners of objects with links (world); their badges sit beside them.
     pub link_badges: Vec<Point>,
     pub quick_dot_radius: f64,
@@ -68,6 +71,16 @@ pub struct OverlayColors {
     pub handle_fill: Color,
     pub guide: Color,
     pub caret: Color,
+}
+
+/// Comment pins: radius in logical pixels.
+pub const COMMENT_PIN_RADIUS: f64 = 11.0;
+
+/// Where the bubble of a comment pin marking `tip` (physical pixels) is drawn: up and to
+/// the left, its tail on the spot.
+pub fn comment_pin_center(tip: Point, scale: f64) -> Point {
+    let d = (COMMENT_PIN_RADIUS + 4.0) * scale;
+    tip + Vec2::new(-d, -d)
 }
 
 /// Link badges: radius, and how far up and right of the object's corner they sit, in
@@ -240,6 +253,33 @@ pub fn draw_overlay(
         for d in [Vec2::new(arm, 0.0), Vec2::new(0.0, arm)] {
             let line = Line::new(center - d, center + d);
             scene.stroke(&handle_stroke, id, colors.accent, None, &line);
+        }
+    }
+    for &(at, resolved, open) in &overlay.comment_pins {
+        let tip = to_px(at);
+        let center = comment_pin_center(tip, scale);
+        let r = COMMENT_PIN_RADIUS * scale;
+        let fill = if resolved {
+            Color::from_rgb8(0x9C, 0xA3, 0xAF)
+        } else {
+            colors.accent
+        };
+        // A speech bubble whose tail points at the spot.
+        let mut bubble = Circle::new(center, r).to_path(0.1);
+        let side = (center - tip).normalize();
+        let normal = Vec2::new(-side.y, side.x) * r * 0.45;
+        bubble.move_to(tip);
+        bubble.line_to(center - side * (r * 0.5) + normal);
+        bubble.line_to(center - side * (r * 0.5) - normal);
+        bubble.close_path();
+        scene.fill(Fill::NonZero, id, fill, None, &bubble);
+        if open {
+            let ring = Circle::new(center, r + 2.5 * scale);
+            scene.stroke(&Stroke::new(2.0 * scale), id, fill, None, &ring);
+        }
+        for dx in [-1.0, 0.0, 1.0] {
+            let dot = Circle::new(center + Vec2::new(dx * r * 0.42, 0.0), r * 0.13);
+            scene.fill(Fill::NonZero, id, colors.handle_fill, None, &dot);
         }
     }
     for &corner in &overlay.link_badges {

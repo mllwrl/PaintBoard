@@ -29,8 +29,8 @@ use crate::navigation::Navigation;
 use crate::pictures::{self, Picture};
 use crate::session::Session;
 use crate::ui::{
-    Action, ContextMenuInfo, LinkInfo, Minimap, Model, STICKY_COLORS, SearchInfo, SelectionInfo,
-    ShapeText, TableInfo, TextFormat, Ui,
+    Action, CommentView, ContextMenuInfo, LinkInfo, Minimap, Model, STICKY_COLORS, SearchInfo,
+    SelectionInfo, ShapeText, TableInfo, TextFormat, ThreadView, Ui,
 };
 
 pub enum UserEvent {
@@ -114,6 +114,10 @@ pub struct App {
     filter: pb_core::Filter,
     /// Who reactions and comments are by.
     me: std::sync::Arc<str>,
+    /// The comment thread shown, or a new one being started.
+    thread_panel: Option<ThreadPanel>,
+    /// Resolved threads keep their pins.
+    show_resolved: bool,
     /// The object whose link target is being picked on the board, by clicking it.
     picking_link: Option<ObjectId>,
     /// Searching the board, while the search bar is open.
@@ -165,6 +169,8 @@ impl App {
             show_minimap: true,
             filter: pb_core::Filter::default(),
             me: pb_platform::user_name().into(),
+            thread_panel: None,
+            show_resolved: false,
             picking_link: None,
             search: None,
             focus_search: false,
@@ -220,6 +226,17 @@ impl App {
         }
         let mut overlay = overlay(&self.document, &self.tools, &overrides, self.camera.zoom());
         overlay.link_badges = self.link_badges().into_iter().map(|(p, _)| p).collect();
+        overlay.comment_pins = self
+            .comment_pins()
+            .into_iter()
+            .map(|(p, id, resolved)| {
+                let open = self
+                    .thread_panel
+                    .as_ref()
+                    .is_some_and(|t| t.thread.as_deref() == Some(&*id));
+                (p, resolved, open)
+            })
+            .collect();
         self.refresh_search();
         if let Some(search) = &self.search {
             overlay.search_hits = search.hits.iter().map(|h| h.area).collect();
@@ -310,6 +327,9 @@ impl App {
                 .map(|(screen, _)| self.context_menu_info(screen)),
             show_shortcuts: self.show_shortcuts,
             diagram: self.diagram.clone(),
+            thread: self.thread_view(),
+            threads: self.thread_list(),
+            show_resolved: self.show_resolved,
             search: self.search.as_ref().map(|s| SearchInfo {
                 count: s.hits.len(),
                 current: s.current,
@@ -803,6 +823,45 @@ impl App {
             Action::Search(query) => self.search_for(query),
             Action::SearchStep(forward) => self.search_step(forward),
             Action::CloseSearch => self.search = None,
+            Action::PostComment(text) => self.post_comment(text),
+            Action::DeleteComment(comment) => {
+                if let Some(thread) = self.thread_panel.as_ref().and_then(|p| p.thread.clone()) {
+                    self.apply(Command::RemoveComment {
+                        thread: thread.clone(),
+                        comment,
+                    });
+                    if self.document.thread(&thread).is_none() {
+                        self.thread_panel = None;
+                    }
+                }
+            }
+            Action::ResolveThread(resolved) => {
+                if let Some(thread) = self.thread_panel.as_ref().and_then(|p| p.thread.clone()) {
+                    self.apply(Command::SetResolved { thread, resolved });
+                    if resolved && !self.show_resolved {
+                        self.thread_panel = None;
+                    }
+                }
+            }
+            Action::DeleteThread => {
+                if let Some(thread) = self.thread_panel.take().and_then(|p| p.thread) {
+                    self.apply(Command::RemoveThread(thread));
+                }
+            }
+            Action::CloseThread => self.thread_panel = None,
+            Action::OpenThread(id) => self.open_thread(id),
+            Action::ToggleShowResolved => {
+                self.show_resolved = !self.show_resolved;
+                let hidden = self
+                    .thread_panel
+                    .as_ref()
+                    .and_then(|p| p.thread.as_deref())
+                    .and_then(|id| self.document.thread(id))
+                    .is_some_and(|t| t.resolved);
+                if hidden && !self.show_resolved {
+                    self.thread_panel = None;
+                }
+            }
             Action::SetLink(text) => {
                 if let ([id], Some(link)) = (self.tools.selection().ids(), Link::from_input(&text))
                 {
@@ -1592,6 +1651,148 @@ impl App {
         }
     }
 
+    /// Pins of the threads shown: the spot each marks (world), its id and whether it is
+    /// resolved.
+    fn comment_pins(&self) -> Vec<(Point, std::sync::Arc<str>, bool)> {
+        self.document
+            .threads()
+            .iter()
+            .filter(|t| self.show_resolved || !t.resolved)
+            .filter_map(|t| Some((self.document.thread_point(t)?, t.id.clone(), t.resolved)))
+            .collect()
+    }
+
+    /// The thread whose pin is at `screen` (logical pixels), if any.
+    fn comment_pin_at(&self, screen: Point) -> Option<std::sync::Arc<str>> {
+        self.comment_pins()
+            .into_iter()
+            .rev()
+            .find_map(|(at, id, _)| {
+                let tip = self.camera.world_to_screen(at);
+                let center = pb_render::comment_pin_center(tip, 1.0);
+                ((center - screen).hypot() <= pb_render::COMMENT_PIN_RADIUS + 3.0).then_some(id)
+            })
+    }
+
+    /// What the thread panel shows.
+    fn thread_view(&self) -> Option<ThreadView> {
+        let panel = self.thread_panel.as_ref()?;
+        let (at, thread) = match &panel.thread {
+            Some(id) => {
+                let thread = self.document.thread(id)?;
+                (self.document.thread_point(thread)?, Some(thread))
+            }
+            None => match panel.anchor? {
+                pb_core::ThreadAnchor::Point(p) => (p, None),
+                pb_core::ThreadAnchor::Object(id) => {
+                    (self.document.get(id)?.data.frame().corners()[0], None)
+                }
+            },
+        };
+        let screen = self.camera.world_to_screen(at);
+        let now = pb_platform::now_ms();
+        Some(ThreadView {
+            pos: (screen.x as f32, screen.y as f32),
+            is_new: thread.is_none(),
+            resolved: thread.is_some_and(|t| t.resolved),
+            comments: thread
+                .map(|t| {
+                    t.comments
+                        .iter()
+                        .map(|c| CommentView {
+                            id: c.id.clone(),
+                            author: c.author.to_string(),
+                            when: time_ago(now, c.at_ms),
+                            text: c.text.to_string(),
+                            mine: c.author == self.me,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+    }
+
+    /// The board's threads for the Comments menu: id, a line about it, and whether it
+    /// is resolved.
+    fn thread_list(&self) -> Vec<(std::sync::Arc<str>, String, bool)> {
+        self.document
+            .threads()
+            .iter()
+            .map(|t| {
+                let first = &t.comments[0];
+                let text: String = first.text.chars().take(40).collect();
+                let more = if first.text.chars().count() > 40 {
+                    "…"
+                } else {
+                    ""
+                };
+                let replies = match t.comments.len() {
+                    1 => String::new(),
+                    n => format!(" ({n})"),
+                };
+                (
+                    t.id.clone(),
+                    format!("{}: {text}{more}{replies}", first.author),
+                    t.resolved,
+                )
+            })
+            .collect()
+    }
+
+    /// Adds `text` to the thread shown, starting it if it is new.
+    fn post_comment(&mut self, text: String) {
+        let Some(panel) = &self.thread_panel else {
+            return;
+        };
+        if text.trim().is_empty() {
+            return;
+        }
+        let thread: std::sync::Arc<str> = match &panel.thread {
+            Some(id) => id.clone(),
+            None => self.document.new_line_id().into(),
+        };
+        let comment = pb_core::Comment {
+            id: self.document.new_line_id().into(),
+            author: self.me.clone(),
+            at_ms: pb_platform::now_ms(),
+            text: text.trim().into(),
+        };
+        let anchor = panel.anchor;
+        self.apply(Command::AddComment {
+            thread: thread.clone(),
+            anchor,
+            comment,
+        });
+        self.thread_panel = Some(ThreadPanel {
+            thread: Some(thread),
+            anchor: None,
+        });
+    }
+
+    /// Opens a thread from the Comments menu, bringing its pin into view.
+    fn open_thread(&mut self, id: std::sync::Arc<str>) {
+        let Some(at) = self
+            .document
+            .thread(&id)
+            .and_then(|t| self.document.thread_point(t))
+        else {
+            return;
+        };
+        let viewport = self.viewport();
+        let view = self.camera.visible_world_rect(viewport);
+        if !view.inset(-FRAME_MARGIN / self.camera.zoom()).contains(at) {
+            let zoom = self.camera.zoom();
+            self.camera.look_at(at, zoom, viewport);
+        }
+        if self.document.thread(&id).is_some_and(|t| t.resolved) {
+            self.show_resolved = true;
+        }
+        self.thread_panel = Some(ThreadPanel {
+            thread: Some(id),
+            anchor: None,
+        });
+    }
+
     /// Objects on screen with links, with the top right corners their badges sit by.
     fn link_badges(&self) -> Vec<(Point, Link)> {
         let visible = self.camera.visible_world_rect(self.viewport());
@@ -1748,6 +1949,30 @@ impl App {
                 && (pos - screen).hypot() <= DOUBLE_CLICK_DISTANCE
         });
         self.last_press = Some((now, screen));
+        if self.editing.is_none()
+            && let Some(thread) = self.comment_pin_at(screen)
+        {
+            self.thread_panel = Some(ThreadPanel {
+                thread: Some(thread),
+                anchor: None,
+            });
+            return true;
+        }
+        if self.tools.active() == ToolKind::Comment {
+            self.tools.set_active(ToolKind::Select);
+            let anchor = match self.tools.object_at(&self.document, pointer) {
+                Some(id) if self.document.get(id).is_some() => pb_core::ThreadAnchor::Object(id),
+                _ => pb_core::ThreadAnchor::Point(pointer.world),
+            };
+            self.finish_editing();
+            self.thread_panel = Some(ThreadPanel {
+                thread: None,
+                anchor: Some(anchor),
+            });
+            return true;
+        }
+        // A click on the board puts the thread away.
+        self.thread_panel = None;
         if let Some(source) = self.picking_link.take() {
             let target = self.tools.object_at(&self.document, pointer);
             if let Some(target) = target.filter(|&t| t != source) {
@@ -2306,6 +2531,7 @@ impl App {
             KeyCode::KeyF if !ctrl => self.tools.set_active(ToolKind::Frame),
             KeyCode::KeyK if !ctrl => self.tools.set_active(ToolKind::Kanban),
             KeyCode::KeyD if !ctrl => self.tools.set_active(ToolKind::Doc),
+            KeyCode::KeyC if !ctrl => self.tools.set_active(ToolKind::Comment),
             KeyCode::Enter | KeyCode::NumpadEnter if !ctrl => return self.edit_selected_text(),
             KeyCode::KeyP if !ctrl => self.tools.set_active(ToolKind::Pen),
             KeyCode::KeyM if !ctrl => self.tools.set_active(ToolKind::Marker),
@@ -2384,6 +2610,7 @@ impl App {
             // Esc backs out one level: picking a link target, gesture, tool, cells, selection.
             KeyCode::Escape => {
                 let closed = self.context_menu.take().is_some()
+                    || self.thread_panel.take().is_some()
                     || std::mem::replace(&mut self.show_shortcuts, false);
                 if !closed
                     && self.picking_link.take().is_none()
@@ -2780,6 +3007,39 @@ impl App {
     }
 }
 
+/// The comment thread in the panel.
+struct ThreadPanel {
+    /// `None` until the first comment starts it.
+    thread: Option<std::sync::Arc<str>>,
+    /// Where a new thread goes.
+    anchor: Option<pb_core::ThreadAnchor>,
+}
+
+/// How long ago `at_ms` was at `now_ms`, for people: "just now", "5 min ago", "3 h ago",
+/// "2 d ago", or the date.
+fn time_ago(now_ms: i64, at_ms: i64) -> String {
+    let minutes = (now_ms - at_ms).max(0) / 60_000;
+    match minutes {
+        0 => "just now".to_owned(),
+        1..60 => format!("{minutes} min ago"),
+        60..1440 => format!("{} h ago", minutes / 60),
+        1440..10080 => format!("{} d ago", minutes / 1440),
+        _ => {
+            // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
+            let z = at_ms.div_euclid(86_400_000) + 719_468;
+            let era = z.div_euclid(146_097);
+            let doe = z - era * 146_097;
+            let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+            let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+            let mp = (5 * doy + 2) / 153;
+            let day = doy - (153 * mp + 2) / 5 + 1;
+            let month = if mp < 10 { mp + 3 } else { mp - 9 };
+            let year = yoe + era * 400 + i64::from(month <= 2);
+            format!("{year}-{month:02}-{day:02}")
+        }
+    }
+}
+
 /// What a new document starts with.
 const DOC_TEMPLATE: &str = "# Title
 
@@ -2883,6 +3143,7 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
         },
         quick_dot_radius: pb_tools::quick::DOT_RADIUS,
         link_badges: Vec::new(),
+        comment_pins: Vec::new(),
         search_hits: Vec::new(),
         search_current: None,
         lines,
@@ -2891,5 +3152,23 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
         bend_handles: tools.bend_handles(document),
         connection_points,
         connection_active,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn times_read_like_people_say_them() {
+        let now = 1_760_000_000_000; // 2025-10-09
+        assert_eq!(time_ago(now, now - 10_000), "just now");
+        assert_eq!(time_ago(now, now - 5 * 60_000), "5 min ago");
+        assert_eq!(time_ago(now, now - 3 * 3_600_000), "3 h ago");
+        assert_eq!(time_ago(now, now - 2 * 86_400_000), "2 d ago");
+        assert_eq!(time_ago(now, 0), "1970-01-01");
+        assert_eq!(time_ago(now, 951_782_400_000), "2000-02-29");
+        // Clocks a little apart do not make the future.
+        assert_eq!(time_ago(now, now + 5_000), "just now");
     }
 }

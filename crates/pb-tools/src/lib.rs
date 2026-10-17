@@ -72,6 +72,8 @@ pub enum ToolKind {
     MindMap,
     /// Click to place a Markdown document and type it; run by the app like [`Self::Text`].
     Doc,
+    /// Click an object or the board to start a comment thread there; run by the app.
+    Comment,
 }
 
 impl ToolKind {
@@ -90,6 +92,7 @@ impl ToolKind {
             Self::Kanban => "Kanban",
             Self::MindMap => "Mind map",
             Self::Doc => "Document",
+            Self::Comment => "Comment",
         }
     }
 
@@ -657,7 +660,11 @@ impl Tools {
                 return true;
             }
             // Text editing is handled by the app.
-            ToolKind::Text | ToolKind::Sticky | ToolKind::MindMap | ToolKind::Doc => {
+            ToolKind::Text
+            | ToolKind::Sticky
+            | ToolKind::MindMap
+            | ToolKind::Doc
+            | ToolKind::Comment => {
                 return false;
             }
             ToolKind::Connector => {

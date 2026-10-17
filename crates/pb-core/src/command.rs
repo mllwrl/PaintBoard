@@ -4,8 +4,8 @@ use kurbo::{Rect, Vec2};
 use pb_geom::Frame;
 
 use crate::{
-    Card, Cell, Column, ConnectorChange, Content, Label, Line, Link, Merge, Node, ObjectId,
-    Reaction, Spans, StyleChange, Tag,
+    Card, Cell, Column, Comment, ConnectorChange, Content, Label, Line, Link, Merge, Node,
+    ObjectId, Reaction, Spans, StyleChange, Tag, ThreadAnchor,
 };
 
 /// A user-level edit. Each applied command is one undo step and, later, one unit of sync.
@@ -113,6 +113,24 @@ pub enum Command {
         ids: Vec<ObjectId>,
         link: Option<Link>,
     },
+    /// Adds `comment` to `thread`; a new thread needs its `anchor`.
+    AddComment {
+        thread: Arc<str>,
+        anchor: Option<ThreadAnchor>,
+        comment: Comment,
+    },
+    /// Removes a comment; a thread left without any is no longer listed.
+    RemoveComment {
+        thread: Arc<str>,
+        comment: Arc<str>,
+    },
+    /// Marks a thread resolved, or open again.
+    SetResolved {
+        thread: Arc<str>,
+        resolved: bool,
+    },
+    /// Removes a thread with all its comments.
+    RemoveThread(Arc<str>),
     /// Puts `author`'s `reaction` on object `id` (`on`), or takes it off.
     React {
         id: ObjectId,

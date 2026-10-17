@@ -40,6 +40,9 @@ mod key {
     pub const OBJECTS: &str = "objects";
     /// Root map of the board's tags: `RRGGBBAA;name` (hex color) by tag id.
     pub const TAGS: &str = "tags";
+    /// Root map of comment threads: `t|<thread>` its anchor, `r|<thread>` set while
+    /// resolved, and `c|<thread>|<comment>` each comment.
+    pub const COMMENTS: &str = "comments";
     /// Root map of reactions: `true` by `object|reaction|author`.
     pub const REACTIONS: &str = "reactions";
     /// Ids of an object's tags, joined by `;`.
@@ -129,6 +132,8 @@ mod key {
 #[derive(Debug)]
 pub enum Error {
     UnknownObject(ObjectId),
+    /// A reply to a thread that does not exist.
+    UnknownThread(Arc<str>),
     /// The board was saved by a newer version of the app.
     UnsupportedSchema(i64),
     Crdt(LoroError),
@@ -138,6 +143,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownObject(id) => write!(f, "object {id} does not exist"),
+            Self::UnknownThread(id) => write!(f, "comment thread {id} does not exist"),
             Self::UnsupportedSchema(v) => {
                 write!(
                     f,
@@ -192,6 +198,8 @@ pub struct Document {
     line_ids: std::cell::Cell<u64>,
     /// The board's tags, by name; rebuilt with `objects`.
     tags: Vec<Tag>,
+    /// Comment threads with comments, oldest first; rebuilt with `objects`.
+    threads: Vec<crate::Thread>,
     /// Reactions on objects, each with who put it there; rebuilt with `objects`.
     reactions: HashMap<ObjectId, crate::reaction::Reactions>,
     /// Files used by images. They are not part of the CRDT and never removed while the board
@@ -349,6 +357,7 @@ impl Document {
             line_ids: std::cell::Cell::new(0),
             tags: Vec::new(),
             reactions: HashMap::new(),
+            threads: Vec::new(),
         };
         document.refresh();
         document
@@ -499,6 +508,25 @@ impl Document {
     /// The board's tags, sorted by name.
     pub fn tags(&self) -> &[Tag] {
         &self.tags
+    }
+
+    /// Comment threads that have comments, oldest first. Threads on missing objects are
+    /// included; see [`Self::thread_point`].
+    pub fn threads(&self) -> &[crate::Thread] {
+        &self.threads
+    }
+
+    pub fn thread(&self, id: &str) -> Option<&crate::Thread> {
+        self.threads.iter().find(|t| &*t.id == id)
+    }
+
+    /// Where a thread's pin goes (world): by its object's top left corner, or its point;
+    /// `None` while its object is gone.
+    pub fn thread_point(&self, thread: &crate::Thread) -> Option<Point> {
+        match thread.anchor {
+            crate::ThreadAnchor::Point(p) => Some(p),
+            crate::ThreadAnchor::Object(id) => Some(self.get(id)?.data.frame().corners()[0]),
+        }
     }
 
     /// Reactions on object `id`, in [`crate::Reaction::ALL`] order, with who put them
@@ -664,6 +692,51 @@ impl Document {
                         None if meta.get(key::LINK).is_some() => meta.delete(key::LINK)?,
                         None => {}
                     }
+                }
+            }
+            Command::AddComment {
+                thread,
+                anchor,
+                comment,
+            } => {
+                let map = self.doc.get_map(key::COMMENTS);
+                let anchor_key = format!("t|{thread}");
+                if map.get(&anchor_key).is_none() {
+                    let Some(anchor) = anchor else {
+                        return Err(Error::UnknownThread(thread));
+                    };
+                    map.insert(&anchor_key, anchor.to_stored())?;
+                }
+                map.insert(&format!("c|{thread}|{}", comment.id), comment.to_stored())?;
+            }
+            Command::RemoveComment { thread, comment } => {
+                let map = self.doc.get_map(key::COMMENTS);
+                let k = format!("c|{thread}|{comment}");
+                if map.get(&k).is_some() {
+                    map.delete(&k)?;
+                }
+            }
+            Command::SetResolved { thread, resolved } => {
+                let map = self.doc.get_map(key::COMMENTS);
+                let k = format!("r|{thread}");
+                if resolved {
+                    map.insert(&k, true)?;
+                } else if map.get(&k).is_some() {
+                    map.delete(&k)?;
+                }
+            }
+            Command::RemoveThread(thread) => {
+                let map = self.doc.get_map(key::COMMENTS);
+                let mut keys = Vec::new();
+                map.for_each(|k, _| {
+                    let mut parts = k.split('|');
+                    let _kind = parts.next();
+                    if parts.next() == Some(&*thread) {
+                        keys.push(k.to_owned());
+                    }
+                });
+                for k in keys {
+                    map.delete(&k)?;
                 }
             }
             Command::React {
@@ -1136,6 +1209,7 @@ impl Document {
         self.roots = self.read_children(TreeParentId::Root, None);
         self.tags = read_tags(&self.doc.get_map(key::TAGS));
         self.reactions = read_reactions(&self.doc.get_map(key::REACTIONS));
+        self.threads = read_threads(&self.doc.get_map(key::COMMENTS));
         // Everything but connectors first: connectors route around it.
         let placed_objects = self
             .objects
@@ -1605,6 +1679,56 @@ fn read_object_tags(meta: &LoroMap) -> Tags {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Comment threads from their root map: those with comments, oldest first.
+fn read_threads(map: &LoroMap) -> Vec<crate::Thread> {
+    let mut anchors: HashMap<String, crate::ThreadAnchor> = HashMap::new();
+    let mut resolved: HashSet<String> = HashSet::new();
+    let mut comments: HashMap<String, Vec<crate::Comment>> = HashMap::new();
+    map.for_each(|k, v| {
+        let mut parts = k.splitn(3, '|');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some("t"), Some(thread), None) => {
+                if let ValueOrContainer::Value(LoroValue::String(s)) = v
+                    && let Some(anchor) = crate::ThreadAnchor::from_stored(&s)
+                {
+                    anchors.insert(thread.to_owned(), anchor);
+                }
+            }
+            (Some("r"), Some(thread), None) => {
+                resolved.insert(thread.to_owned());
+            }
+            (Some("c"), Some(thread), Some(id)) => {
+                if let ValueOrContainer::Value(LoroValue::String(s)) = v
+                    && let Some(comment) = crate::Comment::from_stored(id, &s)
+                {
+                    comments.entry(thread.to_owned()).or_default().push(comment);
+                }
+            }
+            _ => {}
+        }
+    });
+    let mut threads: Vec<crate::Thread> = comments
+        .into_iter()
+        .filter_map(|(id, mut comments)| {
+            let anchor = *anchors.get(&id)?;
+            comments.sort_by(|a, b| a.at_ms.cmp(&b.at_ms).then_with(|| a.id.cmp(&b.id)));
+            Some(crate::Thread {
+                resolved: resolved.contains(&id),
+                id: id.into(),
+                anchor,
+                comments,
+            })
+        })
+        .collect();
+    threads.sort_by(|a, b| {
+        a.comments[0]
+            .at_ms
+            .cmp(&b.comments[0].at_ms)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    threads
 }
 
 /// Reactions from their root map, by object.
@@ -3161,6 +3285,76 @@ mod tests {
         assert_eq!(current(&doc).nodes.len(), 1);
         doc.undo().unwrap();
         assert_eq!(current(&doc).nodes.len(), 2);
+    }
+
+    #[test]
+    fn comment_threads_collect_replies() {
+        let mut doc = Document::new();
+        let a = create(&mut doc, rect(0.0, 0.0, 10.0, 10.0));
+        let comment = |id: &str, who: &str, at_ms, text: &str| crate::Comment {
+            id: id.into(),
+            author: who.into(),
+            at_ms,
+            text: text.into(),
+        };
+        let thread: Arc<str> = doc.new_line_id().into();
+        doc.apply(Command::AddComment {
+            thread: thread.clone(),
+            anchor: Some(crate::ThreadAnchor::Object(a)),
+            comment: comment("1", "ann", 10, "Is this right?"),
+        })
+        .unwrap();
+        // Replies need no anchor; one for a missing thread fails.
+        let mut other = Document::from_snapshot(&doc.snapshot()).unwrap();
+        other
+            .apply(Command::AddComment {
+                thread: thread.clone(),
+                anchor: None,
+                comment: comment("2", "bob", 20, "Yes, @ann"),
+            })
+            .unwrap();
+        doc.apply(Command::AddComment {
+            thread: thread.clone(),
+            anchor: None,
+            comment: comment("3", "ann", 30, "Thanks"),
+        })
+        .unwrap();
+        assert!(
+            doc.apply(Command::AddComment {
+                thread: "nope".into(),
+                anchor: None,
+                comment: comment("4", "ann", 40, "?"),
+            })
+            .is_err()
+        );
+        doc.doc.import(&other.snapshot()).unwrap();
+        doc.refresh();
+        let t = doc.thread(&thread).unwrap().clone();
+        let texts: Vec<_> = t.comments.iter().map(|c| &*c.text).collect();
+        assert_eq!(texts, ["Is this right?", "Yes, @ann", "Thanks"]);
+        assert_eq!(doc.thread_point(&t), Some(Point::new(0.0, 0.0)));
+        // Resolving, removing a comment, removing the thread; undo brings it back.
+        doc.apply(Command::SetResolved {
+            thread: thread.clone(),
+            resolved: true,
+        })
+        .unwrap();
+        assert!(doc.thread(&thread).unwrap().resolved);
+        doc.apply(Command::RemoveComment {
+            thread: thread.clone(),
+            comment: "3".into(),
+        })
+        .unwrap();
+        assert_eq!(doc.thread(&thread).unwrap().comments.len(), 2);
+        doc.apply(Command::RemoveThread(thread.clone())).unwrap();
+        assert!(doc.threads().is_empty());
+        doc.undo().unwrap();
+        assert_eq!(doc.threads().len(), 1);
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(loaded.threads(), doc.threads());
+        // A thread on a deleted object has no pin.
+        doc.apply(Command::Delete(vec![a])).unwrap();
+        assert_eq!(doc.thread_point(&doc.threads()[0]), None);
     }
 
     #[test]
