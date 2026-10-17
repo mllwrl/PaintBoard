@@ -29,8 +29,8 @@ use crate::navigation::Navigation;
 use crate::pictures::{self, Picture};
 use crate::session::Session;
 use crate::ui::{
-    Action, LinkInfo, Minimap, Model, STICKY_COLORS, SelectionInfo, ShapeText, TableInfo,
-    TextFormat, Ui,
+    Action, LinkInfo, Minimap, Model, STICKY_COLORS, SearchInfo, SelectionInfo, ShapeText,
+    TableInfo, TextFormat, Ui,
 };
 
 pub enum UserEvent {
@@ -114,6 +114,10 @@ pub struct App {
     filter: pb_core::Filter,
     /// The object whose link target is being picked on the board, by clicking it.
     picking_link: Option<ObjectId>,
+    /// Searching the board, while the search bar is open.
+    search: Option<Search>,
+    /// The search field should take the keyboard on the next frame.
+    focus_search: bool,
     /// Time and screen position of the last left press, to detect double clicks.
     last_press: Option<(Instant, Point)>,
     recognition: Option<PendingRecognition>,
@@ -151,6 +155,8 @@ impl App {
             show_minimap: true,
             filter: pb_core::Filter::default(),
             picking_link: None,
+            search: None,
+            focus_search: false,
             last_press: None,
             recognition: None,
             next_request: 0,
@@ -200,6 +206,11 @@ impl App {
         }
         let mut overlay = overlay(&self.document, &self.tools, &overrides, self.camera.zoom());
         overlay.link_badges = self.link_badges().into_iter().map(|(p, _)| p).collect();
+        self.refresh_search();
+        if let Some(search) = &self.search {
+            overlay.search_hits = search.hits.iter().map(|h| h.area).collect();
+            overlay.search_current = search.hits.get(search.current).map(|h| h.area);
+        }
         if let Some(edit) = &mut self.editing {
             let engine = self.text.engine();
             // The edit box replaces the selection frame and handles.
@@ -279,7 +290,14 @@ impl App {
             tags: self.tag_counts(),
             fill_colors: self.fill_colors(),
             filter: &self.filter,
+            search: self.search.as_ref().map(|s| SearchInfo {
+                count: s.hits.len(),
+                current: s.current,
+                has_query: !s.query.trim().is_empty(),
+                focus: self.focus_search,
+            }),
         };
+        self.focus_search = false;
         let actions = match &mut self.ui {
             Some(ui) => ui.run(&window, &model),
             None => Vec::new(),
@@ -707,6 +725,10 @@ impl App {
                     self.apply(command);
                 }
             }
+            Action::OpenSearch => self.open_search(),
+            Action::Search(query) => self.search_for(query),
+            Action::SearchStep(forward) => self.search_step(forward),
+            Action::CloseSearch => self.search = None,
             Action::SetLink(text) => {
                 if let ([id], Some(link)) = (self.tools.selection().ids(), Link::from_input(&text))
                 {
@@ -996,6 +1018,81 @@ impl App {
         if let Some(mut edit) = TextEdit::table_cell(engine, &self.document, id, cell) {
             edit.select_all(engine);
             self.start_editing(edit);
+        }
+    }
+
+    /// Opens the search bar, or gives its field the keyboard again.
+    fn open_search(&mut self) {
+        self.finish_editing();
+        self.search.get_or_insert_with(Search::default);
+        self.focus_search = true;
+    }
+
+    /// Searches for `query` and shows the first result.
+    fn search_for(&mut self, query: String) {
+        let hits = pb_core::search::search(&self.document, &query);
+        self.search = Some(Search {
+            query,
+            hits,
+            current: 0,
+            revision: self.document.revision(),
+        });
+        self.show_search_result();
+    }
+
+    /// Goes to the next result, or the previous one.
+    fn search_step(&mut self, forward: bool) {
+        if let Some(search) = &mut self.search
+            && !search.hits.is_empty()
+        {
+            let n = search.hits.len();
+            search.current = if forward {
+                (search.current + 1) % n
+            } else {
+                (search.current + n - 1) % n
+            };
+            self.show_search_result();
+        }
+    }
+
+    /// Searches again after the board changed, staying on the same result if it can.
+    fn refresh_search(&mut self) {
+        let revision = self.document.revision();
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        if search.revision == revision {
+            return;
+        }
+        let hits = pb_core::search::search(&self.document, &search.query);
+        search.current = search.current.min(hits.len().saturating_sub(1));
+        search.hits = hits;
+        search.revision = revision;
+    }
+
+    /// Brings the current result into view: pans to it, zooming out only if it does not
+    /// fit.
+    fn show_search_result(&mut self) {
+        let Some(area) = self
+            .search
+            .as_ref()
+            .and_then(|s| s.hits.get(s.current))
+            .map(|h| h.area.aabb())
+        else {
+            return;
+        };
+        let viewport = self.viewport();
+        let zoom = self.camera.zoom();
+        let margin = FRAME_MARGIN / zoom;
+        let view = self.camera.visible_world_rect(viewport);
+        let room = view.inset(-margin);
+        if room.contains(area.origin()) && room.contains(Point::new(area.x1, area.y1)) {
+            return;
+        }
+        if area.width() <= room.width() && area.height() <= room.height() {
+            self.camera.look_at(area.center(), zoom, viewport);
+        } else {
+            self.camera.fit(area, viewport, FRAME_MARGIN);
         }
     }
 
@@ -1697,6 +1794,7 @@ impl App {
             KeyCode::KeyT if !ctrl => self.tools.set_active(ToolKind::Text),
             KeyCode::KeyN if !ctrl => self.tools.set_active(ToolKind::Sticky),
             KeyCode::KeyL if !ctrl => self.tools.set_active(ToolKind::Connector),
+            KeyCode::KeyF if ctrl => self.open_search(),
             KeyCode::KeyF if !ctrl => self.tools.set_active(ToolKind::Frame),
             KeyCode::KeyK if !ctrl => self.tools.set_active(ToolKind::Kanban),
             KeyCode::Enter | KeyCode::NumpadEnter if !ctrl => return self.edit_selected_text(),
@@ -2125,6 +2223,17 @@ impl App {
     }
 }
 
+/// Searching the board.
+#[derive(Default)]
+struct Search {
+    query: String,
+    hits: Vec<pb_core::search::Hit>,
+    /// The result shown now.
+    current: usize,
+    /// The board's revision the results are for.
+    revision: u64,
+}
+
 /// Selection feedback, following objects mid-gesture.
 fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) -> Overlay {
     let overrides: HashMap<_, _> = overrides.iter().map(|o| (o.id, &o.data)).collect();
@@ -2197,6 +2306,8 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
         },
         quick_dot_radius: pb_tools::quick::DOT_RADIUS,
         link_badges: Vec::new(),
+        search_hits: Vec::new(),
+        search_current: None,
         lines,
         gaps,
         end_handles: end_handles.map(Vec::from).unwrap_or_default(),

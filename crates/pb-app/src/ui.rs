@@ -79,6 +79,13 @@ pub enum Action {
     RemoveTableLines(bool),
     /// Merges the selected table cells (`true`), or splits the merged ones among them.
     MergeCells(bool),
+    /// Opens the search bar (Ctrl+F).
+    OpenSearch,
+    /// Searches the board for this text.
+    Search(String),
+    /// Shows the next search result, or the previous one.
+    SearchStep(bool),
+    CloseSearch,
     /// Links the selected object to a typed or pasted address or anchor.
     SetLink(String),
     /// Links the selected object to another object.
@@ -146,6 +153,20 @@ pub struct Model<'a> {
     /// Fill colors on the board, to filter by.
     pub fill_colors: Vec<Rgba>,
     pub filter: &'a pb_core::Filter,
+    /// The search bar, when it is open.
+    pub search: Option<SearchInfo>,
+}
+
+/// What the search bar shows.
+#[derive(Clone, Copy, Debug)]
+pub struct SearchInfo {
+    pub count: usize,
+    /// The result shown now.
+    pub current: usize,
+    /// Something is typed, so "no results" means something.
+    pub has_query: bool,
+    /// The field should take the keyboard.
+    pub focus: bool,
 }
 
 /// What the minimap shows, in world coordinates.
@@ -307,6 +328,8 @@ pub struct Ui {
     new_tag: String,
     /// Address typed for a link.
     link_text: String,
+    /// Text typed into the search bar.
+    search_text: String,
     repaint_at: Option<Instant>,
 }
 
@@ -333,6 +356,7 @@ impl Ui {
             popup: None,
             new_tag: String::new(),
             link_text: String::new(),
+            search_text: String::new(),
             repaint_at: None,
         }
     }
@@ -377,6 +401,7 @@ impl Ui {
         let popup = &mut self.popup;
         let new_tag = &mut self.new_tag;
         let link_text = &mut self.link_text;
+        let search_text = &mut self.search_text;
         let output = self.ctx.run_pass(input, |ctx| {
             board_menu(ctx, model, &mut actions);
             toolbar(ctx, model, &mut actions);
@@ -392,6 +417,10 @@ impl Ui {
             }
             if let Some(format) = &model.text_format {
                 format_bar(ctx, format, &mut actions);
+            }
+            match model.search {
+                Some(info) => search_bar(ctx, info, search_text, &mut actions),
+                None => search_text.clear(),
             }
         });
         self.state
@@ -533,6 +562,13 @@ fn board_menu(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         RichText::new("Filter ●").color(Color32::from_rgb(0x3B, 0x82, 0xF6))
                     };
                     ui.menu_button(label, |ui| filter_menu(ui, model, actions));
+                    if ui
+                        .button("Find")
+                        .on_hover_text("Find on the board (Ctrl+F)")
+                        .clicked()
+                    {
+                        actions.push(Action::OpenSearch);
+                    }
                 });
             });
         });
@@ -1318,6 +1354,77 @@ fn selection_toolbar(
     {
         *popup = None;
     }
+}
+
+/// The search field at the top right, with the number of results and steps between them.
+fn search_bar(ctx: &Context, info: SearchInfo, text: &mut String, actions: &mut Vec<Action>) {
+    let screen = ctx.content_rect();
+    Area::new(Id::unique("search bar"))
+        .fixed_pos(Pos2::new(screen.right() - MARGIN, MARGIN))
+        .pivot(Align2::RIGHT_TOP)
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            panel().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let field = ui.add(
+                        egui::TextEdit::singleline(text)
+                            .hint_text("Find on the board")
+                            .desired_width(220.0),
+                    );
+                    if info.focus {
+                        field.request_focus();
+                    }
+                    if field.changed() {
+                        actions.push(Action::Search(text.clone()));
+                    }
+                    let (enter, shift, escape, up, down) = ui.input(|i| {
+                        (
+                            i.key_pressed(egui::Key::Enter),
+                            i.modifiers.shift,
+                            i.key_pressed(egui::Key::Escape),
+                            i.key_pressed(egui::Key::ArrowUp),
+                            i.key_pressed(egui::Key::ArrowDown),
+                        )
+                    });
+                    let typing = field.has_focus() || field.lost_focus();
+                    if typing && enter {
+                        actions.push(Action::SearchStep(!shift));
+                        // Enter takes the focus away; keep typing.
+                        field.request_focus();
+                    }
+                    if field.has_focus() && (up || down) {
+                        actions.push(Action::SearchStep(down));
+                    }
+                    if typing && escape {
+                        actions.push(Action::CloseSearch);
+                    }
+                    let status = match (info.count, info.has_query) {
+                        (0, true) => "No results".to_owned(),
+                        (0, false) => String::new(),
+                        (n, _) => format!("{} of {n}", info.current + 1),
+                    };
+                    ui.label(status);
+                    let some = info.count > 0;
+                    if ui
+                        .add_enabled(some, Button::new("↑"))
+                        .on_hover_text("Previous (Shift+Enter)")
+                        .clicked()
+                    {
+                        actions.push(Action::SearchStep(false));
+                    }
+                    if ui
+                        .add_enabled(some, Button::new("↓"))
+                        .on_hover_text("Next (Enter)")
+                        .clicked()
+                    {
+                        actions.push(Action::SearchStep(true));
+                    }
+                    if ui.button("×").on_hover_text("Close (Esc)").clicked() {
+                        actions.push(Action::CloseSearch);
+                    }
+                });
+            });
+        });
 }
 
 /// Tags and fill colors to show only some objects, and managing the board's tags.

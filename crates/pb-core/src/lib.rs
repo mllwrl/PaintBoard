@@ -7,6 +7,7 @@ mod document;
 pub mod kanban;
 mod object;
 pub mod rich;
+pub mod search;
 pub mod table;
 
 pub use asset::{AssetId, Assets};

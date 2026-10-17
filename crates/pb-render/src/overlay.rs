@@ -44,6 +44,9 @@ pub struct Overlay {
     pub connection_active: Option<Point>,
     /// Quick create's "+" dots (world) and their radius in logical pixels.
     pub quick_dots: Vec<Point>,
+    /// Search results (world), and the one shown now.
+    pub search_hits: Vec<Frame>,
+    pub search_current: Option<Frame>,
     /// Top right corners of objects with links (world); their badges sit beside them.
     pub link_badges: Vec<Point>,
     pub quick_dot_radius: f64,
@@ -129,6 +132,15 @@ pub fn draw_overlay(
         for frame in &overlay.selected {
             scene.stroke(&thin, id, faint, None, &outline(frame));
         }
+    }
+    let found = colors.guide;
+    for hit in &overlay.search_hits {
+        scene.stroke(&thick, id, found.multiply_alpha(0.45), None, &outline(hit));
+    }
+    if let Some(hit) = &overlay.search_current {
+        let path = outline(hit);
+        scene.fill(Fill::NonZero, id, found.multiply_alpha(0.15), None, &path);
+        scene.stroke(&Stroke::new(3.0 * scale), id, found, None, &path);
     }
     if let Some(cells) = &overlay.cells {
         let path = outline(cells);
