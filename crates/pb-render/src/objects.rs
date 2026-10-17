@@ -30,6 +30,12 @@ const FRAME_TITLE: Color = Color::from_rgb8(0x5F, 0x63, 0x68);
 const CARD_FILL: Color = Color::from_rgb8(0xFF, 0xFF, 0xFF);
 const ADD_LABEL: Color = Color::from_rgb8(0x6B, 0x72, 0x80);
 
+/// Document layouts kept by [`TextRenderer`]; the cache is dropped when it grows past this.
+const DOC_CACHE_LIMIT: usize = 256;
+/// Code block backgrounds, and quote bars and rules in documents.
+const CODE_FILL: Color = Color::from_rgb8(0xF3, 0xF4, 0xF6);
+const DOC_LINE: Color = Color::from_rgb8(0xD1, 0xD5, 0xDB);
+
 /// Fitted sizes kept by [`TextRenderer`]; the cache is dropped when it grows past this.
 const FIT_CACHE_LIMIT: usize = 4096;
 
@@ -61,6 +67,8 @@ pub struct TextRenderer {
     engine: TextEngine,
     /// Font sizes of fitted text by text, styles and box, as fitting takes several layouts.
     fitted: HashMap<(Arc<str>, Spans, [u64; 3]), f64>,
+    /// Laid-out Markdown documents by source, column width and text size.
+    docs: HashMap<(Arc<str>, [u64; 2]), Arc<pb_text::markdown::MarkdownLayout>>,
 }
 
 impl TextRenderer {
@@ -68,7 +76,32 @@ impl TextRenderer {
         Self {
             engine: TextEngine::new(),
             fitted: HashMap::new(),
+            docs: HashMap::new(),
         }
+    }
+
+    /// Markdown `source` laid out `width` wide with body text at `size`, from the cache.
+    pub fn markdown(
+        &mut self,
+        source: &Arc<str>,
+        width: f64,
+        size: f64,
+    ) -> Arc<pb_text::markdown::MarkdownLayout> {
+        let key = (source.clone(), [width.to_bits(), size.to_bits()]);
+        if let Some(layout) = self.docs.get(&key) {
+            return layout.clone();
+        }
+        if self.docs.len() >= DOC_CACHE_LIMIT {
+            self.docs.clear();
+        }
+        let layout = Arc::new(pb_text::markdown::layout(
+            &mut self.engine,
+            source,
+            width,
+            size,
+        ));
+        self.docs.insert(key, layout.clone());
+        layout
     }
 
     fn fitted_font_size(&mut self, text: &Arc<str>, spans: &Spans, text_box: TextBox) -> f64 {
@@ -337,6 +370,7 @@ pub(crate) fn draw_object(
             }
         }
         ObjectKind::MindMap(map) => draw_mindmap(scene, transform, data, map, text),
+        ObjectKind::Doc(doc) => draw_doc(scene, transform, data, doc, text),
         ObjectKind::Frame(frame) => {
             let b = data.bounds;
             scene.fill(Fill::NonZero, transform, color(style.fill), None, &b);
@@ -503,6 +537,63 @@ pub fn painted_bounds(data: &ObjectData) -> Rect {
 }
 
 /// How far an object paints outside its bounds: half its outline, or a sticky's shadow.
+/// Draws a Markdown document on its page; `transform` maps the object's unrotated
+/// coordinates to physical pixels.
+fn draw_doc(
+    scene: &mut Scene,
+    transform: Affine,
+    data: &ObjectData,
+    doc: &pb_core::Doc,
+    text: &mut TextRenderer,
+) {
+    use pb_text::markdown::BlockKind;
+
+    let style = &data.style;
+    let b = data.bounds;
+    let page = RoundedRect::from_rect(b, doc.size * 0.3);
+    scene.fill(Fill::NonZero, transform, color(style.fill), None, &page);
+    if style.stroke_width > 0.0 {
+        let stroke = Stroke::new(style.stroke_width);
+        scene.stroke(&stroke, transform, color(style.stroke), None, &page);
+    }
+    let pad = doc.size * pb_core::Doc::PADDING;
+    let layout = text.markdown(&doc.text, b.width() - 2.0 * pad, doc.size);
+    let (ox, oy) = (b.x0 + pad, b.y0 + pad);
+    let brush = color(style.text_color());
+    let thin = Stroke::new(doc.size * 0.08);
+    for block in &layout.blocks {
+        let (x0, y0, x1, y1) = block.area;
+        let area = Rect::new(ox + x0, oy + y0, ox + x1, oy + y1);
+        match block.kind {
+            BlockKind::Code => {
+                let bg = RoundedRect::from_rect(area, doc.size * 0.25);
+                scene.fill(Fill::NonZero, transform, CODE_FILL, None, &bg);
+            }
+            BlockKind::Quote => {
+                let bar = Rect::new(area.x0, area.y0, area.x0 + doc.size * 0.2, area.y1);
+                scene.fill(Fill::NonZero, transform, DOC_LINE, None, &bar);
+            }
+            BlockKind::Rule => {
+                let y = area.center().y;
+                let line = Line::new((area.x0, y), (area.x1, y));
+                scene.stroke(&thin, transform, DOC_LINE, None, &line);
+                continue;
+            }
+            _ => {}
+        }
+        if let Some((mx, marker)) = &block.marker {
+            draw_text(scene, transform, (ox + mx, oy + block.y), marker, brush);
+        }
+        draw_text(
+            scene,
+            transform,
+            (ox + block.x, oy + block.y),
+            &block.layout,
+            brush,
+        );
+    }
+}
+
 /// Draws a mind map over `data`'s bounds; `transform` maps its unrotated coordinates to
 /// physical pixels.
 fn draw_mindmap(

@@ -76,6 +76,8 @@ pub enum ObjectKind {
     Kanban(Kanban),
     /// A tree of topics around a central one, laid out automatically over the bounds.
     MindMap(MindMap),
+    /// A Markdown document on a page in the fill color, outlined in the outline color.
+    Doc(Doc),
 }
 
 impl ObjectKind {
@@ -91,6 +93,7 @@ impl ObjectKind {
             Self::Table(_) => "table",
             Self::Kanban(_) => "kanban",
             Self::MindMap(_) => "mindmap",
+            Self::Doc(_) => "doc",
             Self::Shape(shape) => shape_name(shape.kind),
         }
     }
@@ -121,6 +124,7 @@ impl ObjectKind {
                 | Self::Table(_)
                 | Self::Kanban(_)
                 | Self::MindMap(_)
+                | Self::Doc(_)
         )
     }
 
@@ -131,6 +135,7 @@ impl ObjectKind {
             Self::Sticky(sticky) => Some(&sticky.text),
             Self::Shape(shape) => Some(&shape.text),
             Self::Frame(frame) => Some(&frame.title),
+            Self::Doc(doc) => Some(&doc.text),
             Self::Ink(_)
             | Self::Image(_)
             | Self::Connector(_)
@@ -152,7 +157,8 @@ impl ObjectKind {
             | Self::Connector(_)
             | Self::Table(_)
             | Self::Kanban(_)
-            | Self::MindMap(_) => &[],
+            | Self::MindMap(_)
+            | Self::Doc(_) => &[],
         }
     }
 }
@@ -431,7 +437,10 @@ impl StyleChange {
     /// have text styles; kanban boards have a text color only, their layout is fixed.
     pub fn for_kind(mut self, kind: &ObjectKind) -> Self {
         if !matches!(kind, ObjectKind::Shape(_) | ObjectKind::Table(_)) {
-            if !matches!(kind, ObjectKind::Kanban(_) | ObjectKind::MindMap(_)) {
+            if !matches!(
+                kind,
+                ObjectKind::Kanban(_) | ObjectKind::MindMap(_) | ObjectKind::Doc(_)
+            ) {
                 self.text_color = None;
             }
             self.font_size = None;
@@ -452,6 +461,34 @@ pub struct Text {
     pub spans: Spans,
     /// Font size in world units.
     pub size: f64,
+}
+
+/// A Markdown document: its source, drawn formatted on a page over the object's bounds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Doc {
+    pub text: Arc<str>,
+    /// Body text size in world units; headings are larger.
+    pub size: f64,
+}
+
+impl Doc {
+    /// Space between the page's edge and its text, relative to the body text size.
+    pub const PADDING: f64 = 1.0;
+    /// Width of a new document, in logical pixels at the zoom it is placed at.
+    pub const WIDTH: f64 = 480.0;
+    /// Body text size of a new document, in logical pixels at the zoom it is placed at.
+    pub const SIZE: f64 = 16.0;
+
+    /// Default look: a white page with a light outline and dark text.
+    pub fn style() -> Style {
+        Style {
+            fill: Rgba::rgb(0xFF, 0xFF, 0xFF),
+            stroke: Rgba::rgb(0xD0, 0xD4, 0xDA),
+            stroke_width: 1.0,
+            text_color: Some(Rgba::rgb(0x1F, 0x29, 0x37)),
+            ..Style::default()
+        }
+    }
 }
 
 /// A sticky note's text. Its font size is not stored: the text is drawn as large as fits.
@@ -769,6 +806,7 @@ impl ObjectData {
             ObjectKind::Text(_) | ObjectKind::Ink(_) | ObjectKind::Image(_) => None,
             ObjectKind::Connector(_) | ObjectKind::Frame(_) => None,
             ObjectKind::Table(_) | ObjectKind::Kanban(_) | ObjectKind::MindMap(_) => None,
+            ObjectKind::Doc(_) => None,
         }
     }
 

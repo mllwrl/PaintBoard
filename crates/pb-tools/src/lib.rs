@@ -70,6 +70,8 @@ pub enum ToolKind {
     /// Click to place a mind map and type its central topic; run by the app like
     /// [`Self::Text`].
     MindMap,
+    /// Click to place a Markdown document and type it; run by the app like [`Self::Text`].
+    Doc,
 }
 
 impl ToolKind {
@@ -87,6 +89,7 @@ impl ToolKind {
             Self::Table => "Table",
             Self::Kanban => "Kanban",
             Self::MindMap => "Mind map",
+            Self::Doc => "Document",
         }
     }
 
@@ -654,7 +657,9 @@ impl Tools {
                 return true;
             }
             // Text editing is handled by the app.
-            ToolKind::Text | ToolKind::Sticky | ToolKind::MindMap => return false,
+            ToolKind::Text | ToolKind::Sticky | ToolKind::MindMap | ToolKind::Doc => {
+                return false;
+            }
             ToolKind::Connector => {
                 let start = connect::end_at(doc, &pointer, None);
                 self.gesture = Some(Gesture::Connect {

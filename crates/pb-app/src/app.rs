@@ -1003,6 +1003,21 @@ impl App {
     /// skipped; unreadable images are reported.
     fn insert_files(&mut self, paths: &[PathBuf], at: Option<Point>) {
         let mut errors = Vec::new();
+        let documents: Vec<(String, String)> = paths
+            .iter()
+            .filter(|p| is_document_file(p))
+            .filter_map(|p| match pb_platform::fs::read(p) {
+                Ok(bytes) => Some((
+                    p.display().to_string(),
+                    String::from_utf8_lossy(&bytes).replace("\r\n", "\n"),
+                )),
+                Err(err) => {
+                    errors.push(format!("{}: {err}", p.display()));
+                    None
+                }
+            })
+            .collect();
+        self.insert_documents(&documents, at);
         let pictures: Vec<_> = paths
             .iter()
             .filter(|p| pictures::is_image_file(p))
@@ -1010,7 +1025,7 @@ impl App {
             .collect();
         self.insert_pictures(pictures, at);
         if !errors.is_empty() {
-            dialog::show_error("Some images could not be added", &errors.join("\n"));
+            dialog::show_error("Some files could not be added", &errors.join("\n"));
         }
     }
 
@@ -1119,6 +1134,66 @@ impl App {
         };
         let edit = TextEdit::new_sticky(self.text.engine(), bounds, style);
         self.start_editing(edit);
+    }
+
+    /// Starts typing a new Markdown document with its top middle at `at` (world), from a
+    /// short example that the first keystroke replaces.
+    fn add_doc_at(&mut self, at: Point) {
+        self.finish_editing();
+        self.tools.set_active(ToolKind::Select);
+        let zoom = self.camera.zoom();
+        let (width, size) = (pb_core::Doc::WIDTH / zoom, pb_core::Doc::SIZE / zoom);
+        let corner = at - pb_geom::kurbo::Vec2::new(width / 2.0, 0.0);
+        let engine = self.text.engine();
+        let mut edit = TextEdit::new_doc(engine, corner, width, size, DOC_TEMPLATE);
+        edit.select_all(engine);
+        self.start_editing(edit);
+    }
+
+    /// Adds Markdown and text files as documents side by side, at `at` (world) or in the
+    /// middle of the view, as one undo step.
+    fn insert_documents(&mut self, files: &[(String, String)], at: Option<Point>) {
+        if files.is_empty() {
+            return;
+        }
+        let zoom = self.camera.zoom();
+        let (width, size) = (pb_core::Doc::WIDTH / zoom, pb_core::Doc::SIZE / zoom);
+        let pad = size * pb_core::Doc::PADDING;
+        let gap = 40.0 / zoom;
+        let total = files.len() as f64 * (width + gap) - gap;
+        let center = at.unwrap_or_else(|| self.camera.visible_world_rect(self.viewport()).center());
+        let mut x = center.x - total / 2.0;
+        let mut items = Vec::new();
+        for (_, text) in files {
+            let height =
+                pb_text::markdown::layout(self.text.engine(), text, width - 2.0 * pad, size)
+                    .height
+                    .max(size);
+            let bounds = pb_geom::kurbo::Rect::new(
+                x,
+                center.y - 100.0 / zoom,
+                x + width,
+                center.y - 100.0 / zoom + height + 2.0 * pad,
+            );
+            items.push(
+                ObjectData {
+                    kind: ObjectKind::Doc(pb_core::Doc {
+                        text: text.as_str().into(),
+                        size,
+                    }),
+                    bounds,
+                    rotation: 0.0,
+                    style: pb_core::Doc::style(),
+                    tags: Default::default(),
+                    link: None,
+                }
+                .into(),
+            );
+            x += width + gap;
+        }
+        self.finish_editing();
+        self.tools.set_active(ToolKind::Select);
+        self.apply(Command::Create(items));
     }
 
     /// Places a mind map with its central topic on `at` (world) and starts typing it.
@@ -1404,6 +1479,7 @@ impl App {
                         | ObjectKind::Frame(_)
                         | ObjectKind::Connector(_)
                         | ObjectKind::Table(_)
+                        | ObjectKind::Doc(_)
                 )
             }),
             single_object: single.is_some(),
@@ -1687,6 +1763,10 @@ impl App {
         }
         if self.tools.active() == ToolKind::MindMap {
             self.add_mindmap_at(pointer.world);
+            return true;
+        }
+        if self.tools.active() == ToolKind::Doc {
+            self.add_doc_at(pointer.world);
             return true;
         }
         if self.tools.active() == ToolKind::Select
@@ -2194,6 +2274,7 @@ impl App {
             }
             KeyCode::KeyF if !ctrl => self.tools.set_active(ToolKind::Frame),
             KeyCode::KeyK if !ctrl => self.tools.set_active(ToolKind::Kanban),
+            KeyCode::KeyD if !ctrl => self.tools.set_active(ToolKind::Doc),
             KeyCode::Enter | KeyCode::NumpadEnter if !ctrl => return self.edit_selected_text(),
             KeyCode::KeyP if !ctrl => self.tools.set_active(ToolKind::Pen),
             KeyCode::KeyM if !ctrl => self.tools.set_active(ToolKind::Marker),
@@ -2666,6 +2747,22 @@ impl App {
             self.request_redraw();
         }
     }
+}
+
+/// What a new document starts with.
+const DOC_TEMPLATE: &str = "# Title
+
+Write **Markdown** here: *italic*, `code`, [links](https://example.com).
+
+- lists
+- and more
+";
+
+/// Whether `path` is a Markdown or plain text file, added as a document.
+fn is_document_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| ["md", "markdown", "txt"].contains(&e.to_ascii_lowercase().as_str()))
 }
 
 /// Font size and wrap width of diagram text made from Mermaid, in world units at 100%.

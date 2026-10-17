@@ -268,7 +268,8 @@ pub fn obstacle(data: &ObjectData) -> Option<Rect> {
         | ObjectKind::Image(_)
         | ObjectKind::Table(_)
         | ObjectKind::Kanban(_)
-        | ObjectKind::MindMap(_) => Some(data.frame().aabb()),
+        | ObjectKind::MindMap(_)
+        | ObjectKind::Doc(_) => Some(data.frame().aabb()),
         ObjectKind::Ink(_) | ObjectKind::Connector(_) | ObjectKind::Frame(_) => None,
     }
 }

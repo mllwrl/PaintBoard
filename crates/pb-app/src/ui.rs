@@ -682,6 +682,7 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         (ToolKind::Table, "Table", paint_table),
                         (ToolKind::Kanban, "Kanban (K)", paint_kanban),
                         (ToolKind::MindMap, "Mind map", paint_mindmap),
+                        (ToolKind::Doc, "Markdown document (D)", paint_doc),
                     ];
                     let mut ink_button = shapes.rect;
                     for (tool, tooltip, paint) in ink_tools {
@@ -1670,6 +1671,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("L", "Connector"),
             ("F", "Frame"),
             ("K", "Kanban board"),
+            ("D", "Markdown document"),
             ("Tab / Enter", "Mind map: add a subtopic / topic"),
             ("F2", "Edit the selected topic"),
             ("P / M / E", "Pen / marker / eraser"),
@@ -2177,6 +2179,22 @@ fn paint_kanban(painter: &Painter, rect: Rect, color: Color32) {
                 egui::StrokeKind::Middle,
             );
         }
+    }
+}
+
+/// A document: a page with a heading and lines of text.
+fn paint_doc(painter: &Painter, rect: Rect, color: Color32) {
+    let at = |x: f32, y: f32| rect.min + Vec2::new(x, y) * rect.width();
+    let stroke = Stroke::new(1.6, color);
+    painter.rect_stroke(
+        Rect::from_min_max(at(0.15, 0.0), at(0.85, 1.0)),
+        2,
+        stroke,
+        egui::StrokeKind::Middle,
+    );
+    painter.line_segment([at(0.28, 0.2), at(0.6, 0.2)], Stroke::new(2.4, color));
+    for y in [0.42, 0.6, 0.78] {
+        painter.line_segment([at(0.28, y), at(0.72, y)], stroke);
     }
 }
 

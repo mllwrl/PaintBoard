@@ -5,7 +5,7 @@
 //! the whole edit and autosave and sync see finished text only.
 
 use pb_core::{
-    Card, Cell, Command, Document, FrameData, Kanban, KanbanPart, Label, MindMap, MindMapPart,
+    Card, Cell, Command, Doc, Document, FrameData, Kanban, KanbanPart, Label, MindMap, MindMapPart,
     Node, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Span, Sticky, Style, Table, Text, TextBox,
     TextMarks,
 };
@@ -102,6 +102,9 @@ enum Placement {
     /// A node of a mind map (see `TextEdit::mindmap`): its box grows with the text and the
     /// map is laid out again as it is typed.
     MindNode,
+    /// The Markdown source of a document, shown as plain text from `origin` (world, inside
+    /// the page's padding) and wrapped at `width`; the page fits the formatted text after.
+    Markdown { origin: Point, width: f64 },
 }
 
 /// What of a kanban board is edited.
@@ -127,7 +130,7 @@ impl Placement {
             } => Some(Sticky::text_box(bounds)),
             Self::Cell { text_box, .. } | Self::Board { text_box, .. } => Some(text_box),
             // Not fitted: the box grows with the text.
-            Self::MindNode => None,
+            Self::MindNode | Self::Markdown { .. } => None,
             Self::Free { .. } | Self::Label { .. } | Self::Title { .. } => None,
         }
     }
@@ -161,6 +164,51 @@ pub struct TextEdit {
 }
 
 impl TextEdit {
+    /// A new Markdown document with its top left corner at `at`, `width` wide with body
+    /// text at `size`, starting with `template`.
+    pub fn new_doc(
+        engine: &mut TextEngine,
+        at: Point,
+        width: f64,
+        size: f64,
+        template: &str,
+    ) -> Self {
+        let pad = size * Doc::PADDING;
+        let mut this = Self::markdown(
+            engine,
+            template,
+            size,
+            at + Vec2::new(pad, pad),
+            width - 2.0 * pad,
+        );
+        this.target = Target::New;
+        this.original = String::new();
+        this
+    }
+
+    /// Edits Markdown `text` as plain text at `size`, from `origin`, wrapping at `width`.
+    fn markdown(engine: &mut TextEngine, text: &str, size: f64, origin: Point, width: f64) -> Self {
+        let mut editor = TextEditor::new(engine, text, size);
+        editor.set_wrap(Some(width), TextAlign::Start);
+        Self {
+            target: Target::New,
+            editor,
+            placement: Placement::Markdown { origin, width },
+            rotation: 0.0,
+            style: Doc::style(),
+            original: text.to_owned(),
+            original_spans: Vec::new(),
+            selecting: false,
+            active_at: Instant::now(),
+            caret_drawn: false,
+            connector: None,
+            table: None,
+            kanban: None,
+            new_card: false,
+            mindmap: None,
+        }
+    }
+
     /// A new text whose first line is centered vertically on `at`.
     pub fn new_text(engine: &mut TextEngine, at: Point, size: f64, color: Rgba) -> Self {
         let editor = TextEditor::new(engine, "", size);
@@ -370,6 +418,17 @@ impl TextEdit {
                     KanbanPart::Add(_) => return None,
                 };
                 Self::board(engine, target, data, kanban.clone(), part, false)
+            }
+            ObjectKind::Doc(doc) => {
+                let pad = doc.size * Doc::PADDING;
+                let b = data.bounds;
+                let origin = b.origin() + Vec2::new(pad, pad);
+                let mut this =
+                    Self::markdown(engine, &doc.text, doc.size, origin, b.width() - 2.0 * pad);
+                this.target = target;
+                this.rotation = data.rotation;
+                this.style = data.style;
+                Some(this)
             }
             ObjectKind::MindMap(map) => {
                 let local = data.frame().to_local(near?);
@@ -740,6 +799,10 @@ impl TextEdit {
             }
             Placement::Fitted { bounds, .. } => bounds,
             Placement::Cell { rect, .. } | Placement::Board { rect, .. } => rect,
+            Placement::Markdown { origin, width } => {
+                let layout = self.editor.layout(engine);
+                Rect::from_origin_size(origin, (width, layout.height))
+            }
             Placement::MindNode => self
                 .live_map(engine)
                 .and_then(|(map, bounds, i)| map.text_box(bounds, i))
@@ -767,6 +830,9 @@ impl TextEdit {
             | Placement::Cell { bounds, .. }
             | Placement::Board { bounds, .. } => bounds,
             Placement::MindNode => self.live_map(engine).map_or(Rect::ZERO, |(_, b, _)| b),
+            // The source shows as plain text over the text area; the page is sized when
+            // editing ends.
+            Placement::Markdown { .. } => self.frame(engine).rect,
             _ => self.frame(engine).rect,
         }
     }
@@ -776,6 +842,7 @@ impl TextEdit {
         match self.placement {
             Placement::Free { origin, .. } => origin,
             Placement::Title { .. } => self.frame(engine).rect.origin(),
+            Placement::Markdown { origin, .. } => origin,
             // The box is as big as the text, or wider for short text: centered there.
             Placement::MindNode => {
                 let area = self.frame(engine).rect;
@@ -1129,6 +1196,12 @@ impl TextEdit {
                     let map = self.live_map(engine).map(|(map, _, _)| map);
                     ObjectKind::MindMap(map.expect("node of a mind map"))
                 }
+                // The source as typed; it is formatted once editing ends.
+                Placement::Markdown { .. } => ObjectKind::Text(Text {
+                    text,
+                    spans: Default::default(),
+                    size: self.editor.size(),
+                }),
                 Placement::Fitted { shape: None, .. } | Placement::Label { .. } => {
                     ObjectKind::Sticky(Sticky {
                         spans: spans.clone(),
@@ -1138,7 +1211,14 @@ impl TextEdit {
             },
             bounds,
             rotation: frame.rotation,
-            style: self.style,
+            style: match self.placement {
+                // Plain text is drawn in the outline color.
+                Placement::Markdown { .. } => Style {
+                    stroke: self.style.text_color(),
+                    ..self.style
+                },
+                _ => self.style,
+            },
             tags: Default::default(),
             link: None,
         }
@@ -1213,6 +1293,41 @@ impl TextEdit {
                     spans: spans.into(),
                 },
             });
+        }
+        if let Placement::Markdown { origin, width } = self.placement {
+            let size = self.editor.size();
+            let pad = size * Doc::PADDING;
+            let height = pb_text::markdown::layout(engine, &text, width, size).height;
+            let bounds = Rect::new(
+                origin.x - pad,
+                origin.y - pad,
+                origin.x + width + pad,
+                origin.y + height.max(size) + pad,
+            );
+            return match self.target {
+                Target::New if text.trim().is_empty() => None,
+                Target::New => Some(Command::Create(vec![
+                    ObjectData {
+                        kind: ObjectKind::Doc(Doc {
+                            text: text.into(),
+                            size,
+                        }),
+                        bounds,
+                        rotation: 0.0,
+                        style: self.style,
+                        tags: Default::default(),
+                        link: None,
+                    }
+                    .into(),
+                ])),
+                Target::Existing(_) if text == self.original => None,
+                Target::Existing(id) => Some(Command::SetText {
+                    id,
+                    text: text.into(),
+                    spans: Default::default(),
+                    bounds,
+                }),
+            };
         }
         if let (Target::Existing(id), Placement::MindNode) = (self.target, self.placement) {
             let unchanged = text == self.original && spans == self.original_spans;
@@ -1810,6 +1925,55 @@ mod tests {
         let n = m.nodes.iter().find(|n| n.parent.is_some()).unwrap();
         assert_eq!(&*n.text, "Research");
         assert!(n.text_size.width > 0.0);
+    }
+
+    #[test]
+    fn markdown_documents_are_edited_as_source() {
+        let mut e = engine();
+        let mut doc = Document::new();
+        // A new document left empty is not added.
+        let mut edit = TextEdit::new_doc(&mut e, Point::new(0.0, 0.0), 400.0, 16.0, "# Hi");
+        edit.select_all(&mut e);
+        edit.editor.insert(&mut e, " ");
+        assert!(edit.finish(&mut e).is_none());
+        // While typed it shows the source; the page fits the formatted text after.
+        let mut edit = TextEdit::new_doc(&mut e, Point::new(0.0, 0.0), 400.0, 16.0, "");
+        edit.editor.insert(
+            &mut e,
+            "# Plan
+
+- one
+- two",
+        );
+        assert!(matches!(edit.data(&mut e).kind, ObjectKind::Text(_)));
+        let Some(cmd @ Command::Create(_)) = edit.finish(&mut e) else {
+            panic!("expected Create");
+        };
+        let id = doc.apply(cmd).unwrap().created[0];
+        let data = doc.get(id).unwrap().data.clone();
+        let ObjectKind::Doc(d) = &data.kind else {
+            panic!("not a document");
+        };
+        assert_eq!(
+            &*d.text,
+            "# Plan
+
+- one
+- two"
+        );
+        let pad = 16.0 * Doc::PADDING;
+        let height = pb_text::markdown::layout(&mut e, &d.text, 400.0 - 2.0 * pad, 16.0).height;
+        assert_eq!(data.bounds, Rect::new(0.0, 0.0, 400.0, height + 2.0 * pad));
+        // Editing it again changes its text and refits the page.
+        let mut edit = TextEdit::existing(&mut e, &doc, id, None, 1.0).unwrap();
+        edit.editor.select_all(&mut e);
+        edit.editor.insert(&mut e, "Short");
+        let Some(Command::SetText { text, bounds, .. }) = edit.finish(&mut e) else {
+            panic!("expected SetText");
+        };
+        assert_eq!(&*text, "Short");
+        assert!(bounds.height() < data.bounds.height());
+        assert_eq!(bounds.width(), 400.0);
     }
 
     #[test]

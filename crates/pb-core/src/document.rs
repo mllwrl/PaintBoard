@@ -1376,6 +1376,10 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
             meta.insert(key::FONT_SIZE, text.size)?;
         }
         ObjectKind::Sticky(sticky) => meta.insert(key::TEXT, &*sticky.text)?,
+        ObjectKind::Doc(doc) => {
+            meta.insert(key::TEXT, &*doc.text)?;
+            meta.insert(key::FONT_SIZE, doc.size)?;
+        }
         ObjectKind::Frame(frame) => meta.insert(key::TEXT, &*frame.title)?,
         ObjectKind::Table(table) => {
             meta.insert(key::ROWS, lines_to_string(&table.rows))?;
@@ -2083,6 +2087,17 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
         }
         ValueOrContainer::Value(LoroValue::String(s)) if &**s == "mindmap" => {
             ObjectKind::MindMap(read_mindmap(meta)?)
+        }
+        ValueOrContainer::Value(LoroValue::String(s)) if &**s == "doc" => {
+            let text = get_str(meta, key::TEXT).unwrap_or_default();
+            let size = match meta.get(key::FONT_SIZE) {
+                Some(ValueOrContainer::Value(LoroValue::Double(v))) => v,
+                _ => DEFAULT_FONT_SIZE,
+            };
+            ObjectKind::Doc(crate::Doc {
+                text: text.into(),
+                size,
+            })
         }
         ValueOrContainer::Value(LoroValue::String(s)) if &**s == "frame" => {
             let title = get_str(meta, key::TEXT).unwrap_or_default();

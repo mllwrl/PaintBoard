@@ -3,9 +3,10 @@
 //! All text uses Inter (SIL Open Font License, see `assets/fonts/Inter-OFL.txt`), which
 //! covers Latin, Cyrillic and Greek, in regular, bold, italic and bold italic.
 //!
-//! TODO: lists and links.
+//! Markdown documents are laid out in [`markdown`].
 
 mod editor;
+pub mod markdown;
 mod rich_editor;
 
 pub use editor::{Mark, Motion, TextEditor, TextRect};
