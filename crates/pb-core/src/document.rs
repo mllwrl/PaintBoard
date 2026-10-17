@@ -43,6 +43,9 @@ mod key {
     /// Root map of comment threads: `t|<thread>` its anchor, `r|<thread>` set while
     /// resolved, and `c|<thread>|<comment>` each comment.
     pub const COMMENTS: &str = "comments";
+    /// Root map of voting: `limit` (votes per person) while there is a session, `open`
+    /// while it runs, and `v|<object>|<author>` each person's votes on an object.
+    pub const VOTING: &str = "voting";
     /// Root map of reactions: `true` by `object|reaction|author`.
     pub const REACTIONS: &str = "reactions";
     /// Ids of an object's tags, joined by `;`.
@@ -202,6 +205,8 @@ pub struct Document {
     line_ids: std::cell::Cell<u64>,
     /// The board's tags, by name; rebuilt with `objects`.
     tags: Vec<Tag>,
+    /// The voting session, if there is one; rebuilt with `objects`.
+    voting: Option<Voting>,
     /// Comment threads with comments, oldest first; rebuilt with `objects`.
     threads: Vec<crate::Thread>,
     /// Reactions on objects, each with who put it there; rebuilt with `objects`.
@@ -362,6 +367,7 @@ impl Document {
             tags: Vec::new(),
             reactions: HashMap::new(),
             threads: Vec::new(),
+            voting: None,
         };
         document.refresh();
         document
@@ -512,6 +518,11 @@ impl Document {
     /// The board's tags, sorted by name.
     pub fn tags(&self) -> &[Tag] {
         &self.tags
+    }
+
+    /// The voting session, running or ended with its results, if there is one.
+    pub fn voting(&self) -> Option<&Voting> {
+        self.voting.as_ref()
     }
 
     /// Comment threads that have comments, oldest first. Threads on missing objects are
@@ -705,6 +716,38 @@ impl Document {
                         None if meta.get(key::LINK).is_some() => meta.delete(key::LINK)?,
                         None => {}
                     }
+                }
+            }
+            Command::StartVoting { limit } => {
+                let map = self.doc.get_map(key::VOTING);
+                clear_map(&map)?;
+                map.insert("limit", i64::from(limit.max(1)))?;
+                map.insert("open", true)?;
+            }
+            Command::EndVoting => {
+                let map = self.doc.get_map(key::VOTING);
+                if map.get("open").is_some() {
+                    map.delete("open")?;
+                }
+            }
+            Command::ClearVotes => clear_map(&self.doc.get_map(key::VOTING))?,
+            Command::Vote { id, author, add } => {
+                let Some(voting) = &self.voting else {
+                    return Err(Error::UnknownObject(id));
+                };
+                if !voting.open || self.get(id).is_none() {
+                    return Err(Error::UnknownObject(id));
+                }
+                let mine = voting.votes_of(&author);
+                let here = voting.count(id, &author);
+                let map = self.doc.get_map(key::VOTING);
+                let k = format!("v|{id}|{author}");
+                if add && mine < voting.limit {
+                    map.insert(&k, i64::from(here + 1))?;
+                } else if !add && here > 1 {
+                    map.insert(&k, i64::from(here - 1))?;
+                } else if !add && here == 1 {
+                    map.delete(&k)?;
                 }
             }
             Command::AddComment {
@@ -1223,6 +1266,7 @@ impl Document {
         self.tags = read_tags(&self.doc.get_map(key::TAGS));
         self.reactions = read_reactions(&self.doc.get_map(key::REACTIONS));
         self.threads = read_threads(&self.doc.get_map(key::COMMENTS));
+        self.voting = read_voting(&self.doc.get_map(key::VOTING));
         // Everything but connectors first: connectors route around it.
         let placed_objects = self
             .objects
@@ -1702,6 +1746,91 @@ fn read_object_tags(meta: &LoroMap) -> Tags {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// A voting session: how many votes each person has, whether it runs, and the votes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Voting {
+    pub limit: u32,
+    /// People can vote; once ended, the votes are the results.
+    pub open: bool,
+    /// Votes on each object, by person.
+    pub votes: HashMap<ObjectId, Vec<(Arc<str>, u32)>>,
+}
+
+impl Voting {
+    /// How many votes `author` has given in all.
+    pub fn votes_of(&self, author: &str) -> u32 {
+        self.votes
+            .values()
+            .flat_map(|v| v.iter())
+            .filter(|(a, _)| &**a == author)
+            .map(|(_, n)| n)
+            .sum()
+    }
+
+    /// `author`'s votes on object `id`.
+    pub fn count(&self, id: ObjectId, author: &str) -> u32 {
+        self.votes
+            .get(&id)
+            .and_then(|v| v.iter().find(|(a, _)| &**a == author))
+            .map_or(0, |(_, n)| *n)
+    }
+
+    /// Everyone's votes on object `id`.
+    pub fn total(&self, id: ObjectId) -> u32 {
+        self.votes
+            .get(&id)
+            .map_or(0, |v| v.iter().map(|(_, n)| n).sum())
+    }
+
+    /// Objects with votes, most first (ties by id, for a stable order).
+    pub fn ranking(&self) -> Vec<(ObjectId, u32)> {
+        let mut out: Vec<_> = self.votes.keys().map(|&id| (id, self.total(id))).collect();
+        out.retain(|(_, n)| *n > 0);
+        out.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| a.0.to_string().cmp(&b.0.to_string()))
+        });
+        out
+    }
+}
+
+/// Removes every key of `map`.
+fn clear_map(map: &LoroMap) -> Result<()> {
+    let mut keys = Vec::new();
+    map.for_each(|k, _| keys.push(k.to_owned()));
+    for k in keys {
+        map.delete(&k)?;
+    }
+    Ok(())
+}
+
+/// The voting session from its root map, if there is one.
+fn read_voting(map: &LoroMap) -> Option<Voting> {
+    let limit = match map.get("limit")? {
+        ValueOrContainer::Value(LoroValue::I64(n)) => u32::try_from(n).ok()?,
+        _ => return None,
+    };
+    let mut voting = Voting {
+        limit,
+        open: map.get("open").is_some(),
+        votes: HashMap::new(),
+    };
+    map.for_each(|k, v| {
+        let mut parts = k.splitn(3, '|');
+        if let (Some("v"), Some(id), Some(author), ValueOrContainer::Value(LoroValue::I64(n))) =
+            (parts.next(), parts.next(), parts.next(), v)
+            && let (Some(id), Ok(n)) = (ObjectId::parse(id), u32::try_from(n))
+            && n > 0
+        {
+            voting.votes.entry(id).or_default().push((author.into(), n));
+        }
+    });
+    for list in voting.votes.values_mut() {
+        list.sort();
+    }
+    Some(voting)
 }
 
 /// Comment threads from their root map: those with comments, oldest first.
@@ -3317,6 +3446,50 @@ mod tests {
         assert_eq!(current(&doc).nodes.len(), 1);
         doc.undo().unwrap();
         assert_eq!(current(&doc).nodes.len(), 2);
+    }
+
+    #[test]
+    fn votes_are_limited_per_person() {
+        let mut doc = Document::new();
+        let a = create(&mut doc, rect(0.0, 0.0, 10.0, 10.0));
+        let b = create(&mut doc, rect(20.0, 0.0, 10.0, 10.0));
+        let vote = |doc: &mut Document, id, who: &str, add| {
+            doc.apply(Command::Vote {
+                id,
+                author: who.into(),
+                add,
+            })
+        };
+        // No session, no votes.
+        assert!(vote(&mut doc, a, "ann", true).is_err());
+        doc.apply(Command::StartVoting { limit: 2 }).unwrap();
+        vote(&mut doc, a, "ann", true).unwrap();
+        vote(&mut doc, a, "ann", true).unwrap();
+        // A third is over the limit and changes nothing.
+        vote(&mut doc, b, "ann", true).unwrap();
+        vote(&mut doc, b, "bob", true).unwrap();
+        let v = doc.voting().unwrap().clone();
+        assert_eq!(
+            (v.votes_of("ann"), v.count(a, "ann"), v.total(b)),
+            (2, 2, 1)
+        );
+        // Taking one back frees it.
+        vote(&mut doc, a, "ann", false).unwrap();
+        vote(&mut doc, b, "ann", true).unwrap();
+        let v = doc.voting().unwrap().clone();
+        assert_eq!(v.ranking(), vec![(b, 2), (a, 1)]);
+        // Ending keeps the results but stops voting; clearing removes everything.
+        doc.apply(Command::EndVoting).unwrap();
+        assert!(!doc.voting().unwrap().open);
+        assert_eq!(doc.voting().unwrap().total(b), 2);
+        assert!(vote(&mut doc, a, "bob", true).is_err());
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(loaded.voting(), doc.voting());
+        doc.apply(Command::ClearVotes).unwrap();
+        assert!(doc.voting().is_none());
+        // A new session starts from nothing.
+        doc.apply(Command::StartVoting { limit: 3 }).unwrap();
+        assert_eq!(doc.voting().unwrap().ranking(), Vec::new());
     }
 
     #[test]

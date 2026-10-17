@@ -866,6 +866,37 @@ pub(crate) fn draw_reactions(
     }
 }
 
+/// Vote badges: radius in logical pixels, and their colors (top results in gold).
+const VOTE_RADIUS: f64 = 13.0;
+const VOTE_FILL: Color = Color::from_rgb8(0x25, 0x63, 0xEB);
+const VOTE_TOP: Color = Color::from_rgb8(0xF5, 0x9E, 0x0B);
+
+/// Draws `count` votes as a round badge on the top right corner of `data`, the same size
+/// on screen at any zoom.
+pub(crate) fn draw_vote_badge(
+    scene: &mut Scene,
+    transform: Affine,
+    data: &ObjectData,
+    count: u32,
+    top: bool,
+    zoom: f64,
+    text: &mut TextRenderer,
+) {
+    let corner = data.frame().corners()[1];
+    let r = VOTE_RADIUS / zoom;
+    let dot = vello::kurbo::Circle::new(corner, r);
+    let fill = if top { VOTE_TOP } else { VOTE_FILL };
+    scene.fill(Fill::NonZero, transform, fill, None, &dot);
+    scene.stroke(&Stroke::new(2.0 / zoom), transform, CARD_FILL, None, &dot);
+    let label = count.to_string();
+    let layout = text.engine.layout(&label, r * 1.1, None);
+    let origin = (
+        corner.x - layout.width / 2.0,
+        corner.y - layout.height / 2.0,
+    );
+    draw_text(scene, transform, origin, &layout, CARD_FILL);
+}
+
 fn paint_padding(data: &ObjectData) -> f64 {
     match data.kind {
         ObjectKind::Sticky(_) => {

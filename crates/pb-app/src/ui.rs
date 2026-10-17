@@ -92,6 +92,14 @@ pub enum Action {
     CloseContextMenu,
     /// Opens or closes the keyboard shortcuts window.
     ToggleShortcuts,
+    /// Starts voting with this many votes per person.
+    StartVoting(u32),
+    /// Ends voting and shows the results.
+    EndVoting,
+    /// Removes the votes.
+    ClearVotes,
+    /// Opens or closes the voting results.
+    ToggleResults,
     /// Starts a countdown of this many minutes.
     StartTimer(u64),
     /// Pauses the countdown, or runs it on.
@@ -225,6 +233,10 @@ pub struct Model<'a> {
     pub presentation: Option<(usize, usize, String)>,
     /// The countdown, while shown.
     pub timer: Option<TimerView>,
+    /// The voting session, if there is one.
+    pub voting: Option<VotingView>,
+    /// The voting results window: objects with their votes, most first.
+    pub results: Option<Vec<(ObjectId, u32, String)>>,
     /// The board has frames to present.
     pub can_present: bool,
     /// The comment thread shown.
@@ -270,6 +282,16 @@ pub struct ContextMenuInfo {
     pub has_text: bool,
     /// A single object (not a group) is selected.
     pub single_object: bool,
+}
+
+/// A voting session, for the person using the app.
+#[derive(Clone, Copy, Debug)]
+pub struct VotingView {
+    /// People can still vote.
+    pub open: bool,
+    pub limit: u32,
+    /// Votes the person has left.
+    pub left: u32,
 }
 
 /// What the countdown shows.
@@ -549,6 +571,12 @@ impl Ui {
             if let Some(timer) = &model.timer {
                 timer_pill(ctx, timer, &mut actions);
             }
+            if let Some(voting) = model.voting.filter(|v| v.open) {
+                voting_banner(ctx, voting, &mut actions);
+            }
+            if let Some(results) = &model.results {
+                results_window(ctx, results, &mut actions);
+            }
             if let Some((index, count, title)) = &model.presentation {
                 // Nothing but the board and the controls.
                 *popup = None;
@@ -739,6 +767,7 @@ fn board_menu(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                     {
                         actions.push(Action::Present);
                     }
+                    ui.menu_button("Vote", |ui| voting_menu(ui, model.voting, &mut *actions));
                     ui.menu_button("Timer", |ui| {
                         for minutes in [1, 3, 5, 10, 15, 30] {
                             if ui.button(format!("{minutes} min")).clicked() {
@@ -1980,6 +2009,110 @@ fn mention_job(ui: &egui::Ui, text: &str, accent: Color32) -> egui::text::Layout
 
 /// How far below the top of the window the countdown sits, in logical pixels.
 const TIMER_DROP: f32 = 52.0;
+
+/// Starting, ending and clearing votes.
+fn voting_menu(ui: &mut egui::Ui, voting: Option<VotingView>, actions: &mut Vec<Action>) {
+    let start = |ui: &mut egui::Ui, actions: &mut Vec<Action>| {
+        ui.weak("Votes per person:");
+        ui.horizontal(|ui| {
+            for limit in [3, 5, 10] {
+                if ui.button(limit.to_string()).clicked() {
+                    actions.push(Action::StartVoting(limit));
+                    ui.close();
+                }
+            }
+        });
+    };
+    match voting {
+        None => start(ui, actions),
+        Some(v) if v.open => {
+            ui.label(format!("{} of {} votes left", v.left, v.limit));
+            if ui.button("End voting").clicked() {
+                actions.push(Action::EndVoting);
+                ui.close();
+            }
+        }
+        Some(_) => {
+            if ui.button("Results").clicked() {
+                actions.push(Action::ToggleResults);
+                ui.close();
+            }
+            if ui.button("Clear votes").clicked() {
+                actions.push(Action::ClearVotes);
+                ui.close();
+            }
+            ui.separator();
+            start(ui, actions);
+        }
+    }
+}
+
+/// The note at the bottom while voting.
+fn voting_banner(ctx: &Context, voting: VotingView, actions: &mut Vec<Action>) {
+    let screen = ctx.content_rect();
+    // Above the view controls, which reach the middle of narrow windows.
+    Area::new(Id::unique("voting"))
+        .fixed_pos(Pos2::new(screen.center().x, screen.bottom() - MARGIN - 52.0))
+        .pivot(Align2::CENTER_BOTTOM)
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            panel().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong("Voting");
+                    ui.label(format!(
+                        "{} of {} votes left · click an object to vote, Shift+click to take one back",
+                        voting.left, voting.limit
+                    ));
+                    if ui.button("End voting").clicked() {
+                        actions.push(Action::EndVoting);
+                    }
+                });
+            });
+        });
+}
+
+/// The voting results: objects by votes, each going to its object.
+fn results_window(ctx: &Context, results: &[(ObjectId, u32, String)], actions: &mut Vec<Action>) {
+    let mut open = true;
+    let shown = egui::Window::new("Voting results")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .order(Order::Foreground)
+        .anchor(Align2::RIGHT_TOP, egui::vec2(-MARGIN, 64.0))
+        .show(ctx, |ui| {
+            if results.is_empty() {
+                ui.weak("No votes yet");
+            }
+            egui::ScrollArea::vertical()
+                .max_height(360.0)
+                .show(ui, |ui| {
+                    egui::Grid::new("results")
+                        .num_columns(2)
+                        .spacing([12.0, 6.0])
+                        .show(ui, |ui| {
+                            for (id, votes, text) in results {
+                                ui.strong(votes.to_string());
+                                if ui.link(text).clicked() {
+                                    actions.push(Action::GoToFrame(*id));
+                                }
+                                ui.end_row();
+                            }
+                        });
+                });
+        });
+    if let Some(shown) = shown {
+        let layer = shown.response.layer_id;
+        let on_top = ctx.memory(|m| m.areas().top_layer_id(Order::Foreground)) == Some(layer);
+        if !on_top {
+            ctx.move_to_top(layer);
+            ctx.request_repaint();
+        }
+    }
+    if !open {
+        actions.push(Action::ToggleResults);
+    }
+}
 
 /// The countdown at the top middle, with its controls.
 fn timer_pill(ctx: &Context, timer: &TimerView, actions: &mut Vec<Action>) {

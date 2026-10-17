@@ -136,6 +136,20 @@ pub enum Command {
     },
     /// Removes a thread with all its comments.
     RemoveThread(Arc<str>),
+    /// Starts a voting session with `limit` votes per person, clearing earlier votes.
+    StartVoting {
+        limit: u32,
+    },
+    /// Ends the voting session; the votes stay, to show the results.
+    EndVoting,
+    /// Removes the votes and the session.
+    ClearVotes,
+    /// Gives object `id` one of `author`'s votes (`add`), or takes one back.
+    Vote {
+        id: ObjectId,
+        author: Arc<str>,
+        add: bool,
+    },
     /// Puts `author`'s `reaction` on object `id` (`on`), or takes it off.
     React {
         id: ObjectId,

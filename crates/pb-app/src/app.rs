@@ -30,7 +30,7 @@ use crate::pictures::{self, Picture};
 use crate::session::Session;
 use crate::ui::{
     Action, CommentView, ContextMenuInfo, LinkInfo, Minimap, Model, STICKY_COLORS, SearchInfo,
-    SelectionInfo, ShapeText, TableInfo, TextFormat, ThreadView, Ui,
+    SelectionInfo, ShapeText, TableInfo, TextFormat, ThreadView, Ui, VotingView,
 };
 
 pub enum UserEvent {
@@ -144,6 +144,8 @@ pub struct App {
     presentation: Option<Presentation>,
     /// The countdown timer, while shown.
     timer: Option<Timer>,
+    /// The voting results window is open.
+    show_results: bool,
     /// The camera gliding to a new place.
     camera_glide: Option<Glide>,
     /// The window for making a diagram from text is open, with what was wrong with the
@@ -200,6 +202,7 @@ impl App {
             presentation: None,
             camera_glide: None,
             timer: None,
+            show_results: false,
             diagram: None,
             last_press: None,
             recognition: None,
@@ -315,6 +318,7 @@ impl App {
             overlay.quick_dots.clear();
             overlay.hover = None;
         }
+        let votes = self.vote_badges();
         build_scene(
             &mut self.scene,
             &View {
@@ -331,6 +335,7 @@ impl App {
                 overlay: &overlay,
                 filter: &self.filter,
                 me: &self.me,
+                votes: &votes,
             },
             &mut self.text,
             &mut self.images,
@@ -396,6 +401,12 @@ impl App {
                 (p.index, p.frames.len(), title)
             }),
             timer: self.timer.as_ref().map(|t| t.view(Instant::now())),
+            voting: self.document.voting().map(|v| VotingView {
+                open: v.open,
+                limit: v.limit,
+                left: v.limit.saturating_sub(v.votes_of(&self.me)),
+            }),
+            results: self.show_results.then(|| self.vote_results()),
             can_present: self
                 .document
                 .objects()
@@ -905,6 +916,21 @@ impl App {
                 }
             }
             Action::CloseTimer => self.timer = None,
+            Action::StartVoting(limit) => {
+                self.finish_editing();
+                self.tools.clear_selection();
+                self.show_results = false;
+                self.apply(Command::StartVoting { limit });
+            }
+            Action::EndVoting => {
+                self.apply(Command::EndVoting);
+                self.show_results = true;
+            }
+            Action::ClearVotes => {
+                self.show_results = false;
+                self.apply(Command::ClearVotes);
+            }
+            Action::ToggleResults => self.show_results = !self.show_results,
             Action::Present => self.start_presentation(),
             Action::PresentStep(step) => self.present_step(step),
             Action::StopPresenting => self.stop_presentation(),
@@ -1789,6 +1815,60 @@ impl App {
         Ok(())
     }
 
+    /// Vote counts to show on objects: yours while voting, everyone's once it ended (the
+    /// top three marked).
+    fn vote_badges(&self) -> HashMap<ObjectId, (u32, bool)> {
+        let Some(voting) = self.document.voting() else {
+            return HashMap::new();
+        };
+        if voting.open {
+            return voting
+                .votes
+                .keys()
+                .map(|&id| (id, (voting.count(id, &self.me), false)))
+                .filter(|(_, (n, _))| *n > 0)
+                .collect();
+        }
+        let ranking = voting.ranking();
+        let third = ranking
+            .get(2.min(ranking.len().saturating_sub(1)))
+            .map_or(0, |r| r.1);
+        ranking
+            .into_iter()
+            .map(|(id, n)| (id, (n, n >= third.max(1))))
+            .collect()
+    }
+
+    /// Objects with votes, most first, each with a line about it.
+    fn vote_results(&self) -> Vec<(ObjectId, u32, String)> {
+        let Some(voting) = self.document.voting() else {
+            return Vec::new();
+        };
+        voting
+            .ranking()
+            .into_iter()
+            .filter_map(|(id, n)| {
+                let object = self.document.get(id)?;
+                let text = object
+                    .data
+                    .kind
+                    .text()
+                    .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .filter(|t| !t.is_empty())
+                    .map(|t| {
+                        let short: String = t.chars().take(48).collect();
+                        if t.chars().count() > 48 {
+                            format!("{short}…")
+                        } else {
+                            short
+                        }
+                    })
+                    .unwrap_or_else(|| "An object without text".to_owned());
+                Some((id, n, text))
+            })
+            .collect()
+    }
+
     /// Starts presenting the board's frames, in the order the Frames menu lists them.
     fn start_presentation(&mut self) {
         let frames: Vec<ObjectId> = self
@@ -2413,6 +2493,22 @@ impl App {
                 && (pos - screen).hypot() <= DOUBLE_CLICK_DISTANCE
         });
         self.last_press = Some((now, screen));
+        // While voting, a click on an object gives it a vote; with Shift it takes one back.
+        if self.document.voting().is_some_and(|v| v.open) && self.tools.active() == ToolKind::Select
+        {
+            if let Some(id) = self
+                .tools
+                .object_at(&self.document, pointer)
+                .filter(|&id| self.document.get(id).is_some())
+            {
+                self.apply(Command::Vote {
+                    id,
+                    author: self.me.clone(),
+                    add: !pointer.shift,
+                });
+            }
+            return true;
+        }
         if self.editing.is_none()
             && let Some(thread) = self.comment_pin_at(screen)
         {

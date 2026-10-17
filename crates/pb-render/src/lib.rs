@@ -72,6 +72,8 @@ pub struct View<'a> {
     pub filter: &'a pb_core::Filter,
     /// Who is looking: their own reactions stand out.
     pub me: &'a str,
+    /// Vote counts to show on objects, and whether each is among the top ones.
+    pub votes: &'a HashMap<ObjectId, (u32, bool)>,
 }
 
 /// Opacity of objects a filter hides, relative to their own.
@@ -195,6 +197,9 @@ pub fn build_scene(
         let tags: Vec<_> = data.tags.iter().filter_map(|t| doc.tag(t)).collect();
         if !tags.is_empty() {
             objects::draw_tags(scene, transform, data, &tags, text);
+        }
+        if let Some(&(count, top)) = id.and_then(|id| view.votes.get(&id)) {
+            objects::draw_vote_badge(scene, transform, data, count, top, zoom, text);
         }
         if let Some(id) = id {
             let reactions = doc.reactions(id);
