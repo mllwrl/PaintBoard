@@ -1120,7 +1120,9 @@ impl App {
 
     /// Asks for image files and places them in the middle of the view.
     fn insert_image_files(&mut self) {
-        let paths = dialog::pick_open_many("Images", pb_io::image::EXTENSIONS);
+        let mut extensions = pb_io::image::EXTENSIONS.to_vec();
+        extensions.push("pdf");
+        let paths = dialog::pick_open_many("Images and PDF", &extensions);
         self.insert_files(&paths, None);
     }
 
@@ -1143,6 +1145,11 @@ impl App {
             })
             .collect();
         self.insert_documents(&documents, at);
+        for path in paths.iter().filter(|p| is_pdf_file(p)) {
+            if let Err(err) = self.insert_pdf(path, at) {
+                errors.push(format!("{}: {err}", path.display()));
+            }
+        }
         let pictures: Vec<_> = paths
             .iter()
             .filter(|p| pictures::is_image_file(p))
@@ -1152,6 +1159,46 @@ impl App {
         if !errors.is_empty() {
             dialog::show_error("Some files could not be added", &errors.join("\n"));
         }
+    }
+
+    /// Adds the pages of the PDF file at `path` side by side as a group, as one undo step,
+    /// and selects it. Very long files are cut, with a note.
+    fn insert_pdf(&mut self, path: &std::path::Path, at: Option<Point>) -> Result<(), String> {
+        let bytes = pb_platform::fs::read(path).map_err(|e| e.to_string())?;
+        let count = pb_io::pdf::page_count(&bytes)?;
+        let pages = pb_io::pdf::render_pages(&bytes, MAX_PDF_PAGES)?;
+        let pictures: Vec<Picture> = pages
+            .into_iter()
+            .map(|page| Picture {
+                bytes: page.png,
+                // Shown at the page's own size in points: rendered at twice that, so it
+                // stays sharp up close.
+                width: (page.width / 2).max(1),
+                height: (page.height / 2).max(1),
+            })
+            .collect();
+        let several = pictures.len() > 1;
+        self.document.begin_undo_group();
+        self.insert_pictures(pictures, at);
+        if several {
+            let ids = self.tools.selection().ids().to_vec();
+            self.apply(Command::Group(ids.clone()));
+            if let Some(&first) = ids.first() {
+                let group = self.document.top_level(first);
+                self.tools.select_only([group]);
+            }
+        }
+        self.document.end_undo_group();
+        if count > MAX_PDF_PAGES {
+            dialog::show_error(
+                "Only the first pages were added",
+                &format!(
+                    "{} has {count} pages; the first {MAX_PDF_PAGES} are on the board.",
+                    path.display()
+                ),
+            );
+        }
+        Ok(())
     }
 
     /// Adds pictures side by side as one undo step, and selects them.
@@ -3192,6 +3239,16 @@ Write **Markdown** here: *italic*, `code`, [links](https://example.com).
 - lists
 - and more
 ";
+
+/// PDF files put on the board get at most this many pages.
+const MAX_PDF_PAGES: usize = 30;
+
+/// Whether `path` is a PDF file, whose pages are added as pictures.
+fn is_pdf_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+}
 
 /// Whether `path` is a Markdown or plain text file, added as a document.
 fn is_document_file(path: &std::path::Path) -> bool {

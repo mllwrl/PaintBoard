@@ -13,3 +13,5 @@ pb-core.workspace = true
 pb-geom.workspace = true
 pb-platform.workspace = true
 image.workspace = true
+# Rendering PDF pages to pictures.
+hayro = { version = "0.8", default-features = false, features = ["embed-fonts", "embed-cmaps"] }
