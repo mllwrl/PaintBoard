@@ -4,7 +4,7 @@ use kurbo::{Rect, Vec2};
 use pb_geom::Frame;
 
 use crate::{
-    Card, Cell, Column, Comment, ConnectorChange, Content, Label, Line, Link, Merge, Node,
+    Card, Cell, Column, Comment, ConnectorChange, Content, Embed, Label, Line, Link, Merge, Node,
     ObjectId, Reaction, Spans, StyleChange, Tag, ThreadAnchor,
 };
 
@@ -107,6 +107,11 @@ pub enum Command {
         ids: Vec<ObjectId>,
         add: Vec<Arc<str>>,
         remove: Vec<Arc<str>>,
+    },
+    /// Replaces a web page card's address, title, description and site. Takes a card only.
+    SetEmbed {
+        id: ObjectId,
+        embed: Embed,
     },
     /// Sets or (`None`) removes the link of objects; groups have none.
     SetLink {

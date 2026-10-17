@@ -30,6 +30,10 @@ const FRAME_TITLE: Color = Color::from_rgb8(0x5F, 0x63, 0x68);
 const CARD_FILL: Color = Color::from_rgb8(0xFF, 0xFF, 0xFF);
 const ADD_LABEL: Color = Color::from_rgb8(0x6B, 0x72, 0x80);
 
+/// Web page cards: the strip along their left and their address.
+const EMBED_STRIP: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
+const EMBED_URL: Color = Color::from_rgb8(0x25, 0x63, 0xEB);
+
 /// Document layouts kept by [`TextRenderer`]; the cache is dropped when it grows past this.
 const DOC_CACHE_LIMIT: usize = 256;
 /// Code block backgrounds, and quote bars and rules in documents.
@@ -371,6 +375,42 @@ pub(crate) fn draw_object(
         }
         ObjectKind::MindMap(map) => draw_mindmap(scene, transform, data, map, text),
         ObjectKind::Doc(doc) => draw_doc(scene, transform, data, doc, text),
+        ObjectKind::Embed(embed) => {
+            let b = data.bounds;
+            let radius = b.height() * 0.06;
+            let card = RoundedRect::from_rect(b, radius);
+            scene.fill(Fill::NonZero, transform, color(style.fill), None, &card);
+            scene.push_layer(Fill::NonZero, Mix::Normal, 1.0, transform, &card);
+            let strip = pb_core::Embed::strip(b);
+            scene.fill(Fill::NonZero, transform, EMBED_STRIP, None, &strip);
+            scene.pop_layer();
+            if style.stroke_width > 0.0 {
+                let stroke = Stroke::new(style.stroke_width);
+                scene.stroke(&stroke, transform, color(style.stroke), None, &card);
+            }
+            let [site, title, description, url] = pb_core::Embed::boxes(b);
+            let muted = Color::from_rgb8(0x6B, 0x72, 0x80);
+            let plain = Spans::default();
+            let bold: Spans = Arc::new([pb_core::Span {
+                start: 0,
+                end: embed.title.len(),
+                marks: pb_core::TextMarks {
+                    bold: true,
+                    ..Default::default()
+                },
+            }]);
+            let ink = color(style.text_color());
+            text.draw_fitted(scene, transform, (&embed.site, &plain), site, muted);
+            text.draw_fitted(scene, transform, (&embed.title, &bold), title, ink);
+            text.draw_fitted(
+                scene,
+                transform,
+                (&embed.description, &plain),
+                description,
+                muted,
+            );
+            text.draw_fitted(scene, transform, (&embed.url, &plain), url, EMBED_URL);
+        }
         ObjectKind::Frame(frame) => {
             let b = data.bounds;
             scene.fill(Fill::NonZero, transform, color(style.fill), None, &b);

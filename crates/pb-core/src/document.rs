@@ -49,6 +49,10 @@ mod key {
     pub const OBJECT_TAGS: &str = "tags";
     /// Where an object links to: `url:<address>` or `obj:<object id>`.
     pub const LINK: &str = "link";
+    /// Web page cards: the address, description and site, besides the title in `text`.
+    pub const URL: &str = "url";
+    pub const DESCRIPTION: &str = "description";
+    pub const SITE: &str = "site";
 
     pub const ID: &str = "id";
     pub const KIND: &str = "kind";
@@ -680,6 +684,15 @@ impl Document {
                         }
                     }
                 }
+            }
+            Command::SetEmbed { id, embed } => {
+                if !matches!(
+                    self.get(id).map(|o| &o.data.kind),
+                    Some(ObjectKind::Embed(_))
+                ) {
+                    return Err(Error::UnknownObject(id));
+                }
+                write_embed(&self.tree.get_meta(self.nodes[&id])?, &embed)?;
             }
             Command::SetLink { ids, link } => {
                 if let Some(&id) = ids.iter().find(|&&id| self.get(id).is_none()) {
@@ -1483,6 +1496,7 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
             meta.insert(key::TEXT, &*doc.text)?;
             meta.insert(key::FONT_SIZE, doc.size)?;
         }
+        ObjectKind::Embed(embed) => write_embed(meta, embed)?,
         ObjectKind::Frame(frame) => meta.insert(key::TEXT, &*frame.title)?,
         ObjectKind::Table(table) => {
             meta.insert(key::ROWS, lines_to_string(&table.rows))?;
@@ -1655,6 +1669,15 @@ fn lines_from_string(s: &str) -> Vec<Line> {
             })
         })
         .collect()
+}
+
+/// Writes a web page card's fields.
+fn write_embed(meta: &LoroMap, embed: &crate::Embed) -> Result<()> {
+    meta.insert(key::URL, &*embed.url)?;
+    meta.insert(key::TEXT, &*embed.title)?;
+    meta.insert(key::DESCRIPTION, &*embed.description)?;
+    meta.insert(key::SITE, &*embed.site)?;
+    Ok(())
 }
 
 /// Writes an object's tags, or removes them when there are none.
@@ -2269,6 +2292,15 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
         }
         ValueOrContainer::Value(LoroValue::String(s)) if &**s == "mindmap" => {
             ObjectKind::MindMap(read_mindmap(meta)?)
+        }
+        ValueOrContainer::Value(LoroValue::String(s)) if &**s == "embed" => {
+            let get = |k| get_str(meta, k).unwrap_or_default();
+            ObjectKind::Embed(crate::Embed {
+                url: get(key::URL).into(),
+                title: get(key::TEXT).into(),
+                description: get(key::DESCRIPTION).into(),
+                site: get(key::SITE).into(),
+            })
         }
         ValueOrContainer::Value(LoroValue::String(s)) if &**s == "doc" => {
             let text = get_str(meta, key::TEXT).unwrap_or_default();
@@ -3390,6 +3422,34 @@ mod tests {
         // Copies do not take them along.
         let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
         assert_eq!(loaded.reactions(a).len(), 2);
+    }
+
+    #[test]
+    fn web_page_cards_keep_their_fields() {
+        let mut doc = Document::new();
+        let card = crate::Embed::new("https://www.example.com/docs/intro/");
+        assert_eq!(&*card.title, "example.com/docs/intro");
+        assert_eq!(&*card.site, "example.com");
+        let mut data = rect(0.0, 0.0, 340.0, 130.0);
+        data.kind = ObjectKind::Embed(card.clone());
+        let id = create(&mut doc, data);
+        let filled = crate::Embed {
+            title: "Intro".into(),
+            description: "How it works".into(),
+            site: "Example Docs".into(),
+            ..card
+        };
+        doc.apply(Command::SetEmbed {
+            id,
+            embed: filled.clone(),
+        })
+        .unwrap();
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(loaded.get(id).unwrap().data.kind, ObjectKind::Embed(filled));
+        assert_eq!(
+            crate::object::host("http://user@sub.site.org:80/x?y"),
+            "sub.site.org:80"
+        );
     }
 
     #[test]

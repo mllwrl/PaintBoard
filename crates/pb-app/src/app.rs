@@ -1183,12 +1183,39 @@ impl App {
             self.insert_files(&files, at);
             return;
         }
+        // A web address copied elsewhere becomes a card for the page. Copying on the board
+        // empties the system clipboard, so text there is newer than the board's own copy.
+        if let Some(Link::Url(url)) = clipboard::text().and_then(|t| Link::from_input(&t))
+            && !url.starts_with("mailto:")
+        {
+            self.insert_embed(&url, at);
+            return;
+        }
         for bytes in self.clipboard.assets().to_vec() {
             self.document.add_asset(bytes);
         }
         if let Some(command) = self.clipboard.paste(at) {
             self.apply(command);
         }
+    }
+
+    /// Adds a card for the web page at `url`, centered on `at` (world) or in the middle of
+    /// the view, linked to the page, and selects it.
+    fn insert_embed(&mut self, url: &str, at: Option<Point>) {
+        let zoom = self.camera.zoom();
+        let (w, h) = pb_core::Embed::SIZE;
+        let center = at.unwrap_or_else(|| self.camera.visible_world_rect(self.viewport()).center());
+        let data = ObjectData {
+            kind: ObjectKind::Embed(pb_core::Embed::new(url)),
+            bounds: pb_geom::kurbo::Rect::from_center_size(center, (w / zoom, h / zoom)),
+            rotation: 0.0,
+            style: pb_core::Embed::style(),
+            tags: Default::default(),
+            link: Some(Link::Url(url.into())),
+        };
+        self.finish_editing();
+        self.tools.set_active(ToolKind::Select);
+        self.apply(Command::Create(vec![data.into()]));
     }
 
     /// Copies the selection inside the app. The system clipboard is emptied, so an older
@@ -1584,6 +1611,7 @@ impl App {
                         | ObjectKind::Connector(_)
                         | ObjectKind::Table(_)
                         | ObjectKind::Doc(_)
+                        | ObjectKind::Embed(_)
                 )
             }),
             single_object: single.is_some(),

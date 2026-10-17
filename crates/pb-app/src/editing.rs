@@ -5,9 +5,9 @@
 //! the whole edit and autosave and sync see finished text only.
 
 use pb_core::{
-    Card, Cell, Command, Doc, Document, FrameData, Kanban, KanbanPart, Label, MindMap, MindMapPart,
-    Node, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Span, Sticky, Style, Table, Text, TextBox,
-    TextMarks,
+    Card, Cell, Command, Doc, Document, Embed, FrameData, Kanban, KanbanPart, Label, MindMap,
+    MindMapPart, Node, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Span, Sticky, Style, Table,
+    Text, TextBox, TextMarks,
 };
 use pb_geom::kurbo::{Point, Rect, Size, Vec2};
 use pb_geom::{Frame, ShapeKind};
@@ -105,6 +105,8 @@ enum Placement {
     /// The Markdown source of a document, shown as plain text from `origin` (world, inside
     /// the page's padding) and wrapped at `width`; the page fits the formatted text after.
     Markdown { origin: Point, width: f64 },
+    /// The title of a web page card with `bounds`, fitted into its title box.
+    EmbedTitle { bounds: Rect },
 }
 
 /// What of a kanban board is edited.
@@ -131,6 +133,7 @@ impl Placement {
             Self::Cell { text_box, .. } | Self::Board { text_box, .. } => Some(text_box),
             // Not fitted: the box grows with the text.
             Self::MindNode | Self::Markdown { .. } => None,
+            Self::EmbedTitle { bounds } => Some(Embed::boxes(bounds)[1]),
             Self::Free { .. } | Self::Label { .. } | Self::Title { .. } => None,
         }
     }
@@ -161,6 +164,8 @@ pub struct TextEdit {
     /// The mind map whose node this is, as it was, with its bounds, and the node as it was
     /// (or new).
     mindmap: Option<(MindMap, Rect, Node)>,
+    /// The web page card whose title this is.
+    embed: Option<Embed>,
 }
 
 impl TextEdit {
@@ -206,6 +211,7 @@ impl TextEdit {
             kanban: None,
             new_card: false,
             mindmap: None,
+            embed: None,
         }
     }
 
@@ -238,6 +244,7 @@ impl TextEdit {
             kanban: None,
             new_card: false,
             mindmap: None,
+            embed: None,
         }
     }
 
@@ -278,6 +285,7 @@ impl TextEdit {
             kanban: None,
             new_card: false,
             mindmap: None,
+            embed: None,
         };
         this.refit(engine);
         this
@@ -331,6 +339,7 @@ impl TextEdit {
                 kanban: None,
                 new_card: false,
                 mindmap: None,
+                embed: None,
             }),
             ObjectKind::Sticky(sticky) => Some(Self::fitted(
                 engine,
@@ -381,6 +390,7 @@ impl TextEdit {
                     kanban: None,
                     new_card: false,
                     mindmap: None,
+                    embed: None,
                 })
             }
             ObjectKind::Frame(frame) => Some(Self {
@@ -402,6 +412,7 @@ impl TextEdit {
                 kanban: None,
                 new_card: false,
                 mindmap: None,
+                embed: None,
             }),
             ObjectKind::Table(table) => {
                 let local = near.map(|p| data.frame().to_local(p));
@@ -418,6 +429,20 @@ impl TextEdit {
                     KanbanPart::Add(_) => return None,
                 };
                 Self::board(engine, target, data, kanban.clone(), part, false)
+            }
+            ObjectKind::Embed(embed) => {
+                let mut this = Self::fitted(
+                    engine,
+                    target,
+                    (&embed.title, &[]),
+                    Placement::EmbedTitle {
+                        bounds: data.bounds,
+                    },
+                    data.rotation,
+                    data.style,
+                );
+                this.embed = Some(embed.clone());
+                Some(this)
             }
             ObjectKind::Doc(doc) => {
                 let pad = doc.size * Doc::PADDING;
@@ -479,6 +504,7 @@ impl TextEdit {
             kanban: None,
             new_card: new,
             mindmap: Some((map.clone(), data.bounds, node)),
+            embed: None,
         }
     }
 
@@ -797,7 +823,7 @@ impl TextEdit {
                 let width = width.unwrap_or(layout.width.max(self.editor.size() * MIN_WIDTH));
                 Rect::from_origin_size(origin, (width, layout.height))
             }
-            Placement::Fitted { bounds, .. } => bounds,
+            Placement::Fitted { bounds, .. } | Placement::EmbedTitle { bounds } => bounds,
             Placement::Cell { rect, .. } | Placement::Board { rect, .. } => rect,
             Placement::Markdown { origin, width } => {
                 let layout = self.editor.layout(engine);
@@ -852,7 +878,10 @@ impl TextEdit {
                     area.center().y - layout.height / 2.0,
                 )
             }
-            Placement::Fitted { .. } | Placement::Cell { .. } | Placement::Board { .. } => {
+            Placement::Fitted { .. }
+            | Placement::Cell { .. }
+            | Placement::Board { .. }
+            | Placement::EmbedTitle { .. } => {
                 let text_box = self.placement.text_box(&self.style);
                 let text_box = text_box.expect("fitted placement");
                 let height = self.editor.layout(engine).height;
@@ -1195,6 +1224,13 @@ impl TextEdit {
                 Placement::MindNode => {
                     let map = self.live_map(engine).map(|(map, _, _)| map);
                     ObjectKind::MindMap(map.expect("node of a mind map"))
+                }
+                Placement::EmbedTitle { .. } => {
+                    let embed = self.embed.clone().expect("title of a card");
+                    ObjectKind::Embed(Embed {
+                        title: text,
+                        ..embed
+                    })
                 }
                 // The source as typed; it is formatted once editing ends.
                 Placement::Markdown { .. } => ObjectKind::Text(Text {

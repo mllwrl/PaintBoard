@@ -78,6 +78,8 @@ pub enum ObjectKind {
     MindMap(MindMap),
     /// A Markdown document on a page in the fill color, outlined in the outline color.
     Doc(Doc),
+    /// A card for a web page, in the fill color with its strip in the outline color.
+    Embed(Embed),
 }
 
 impl ObjectKind {
@@ -94,6 +96,7 @@ impl ObjectKind {
             Self::Kanban(_) => "kanban",
             Self::MindMap(_) => "mindmap",
             Self::Doc(_) => "doc",
+            Self::Embed(_) => "embed",
             Self::Shape(shape) => shape_name(shape.kind),
         }
     }
@@ -125,6 +128,7 @@ impl ObjectKind {
                 | Self::Kanban(_)
                 | Self::MindMap(_)
                 | Self::Doc(_)
+                | Self::Embed(_)
         )
     }
 
@@ -136,6 +140,7 @@ impl ObjectKind {
             Self::Shape(shape) => Some(&shape.text),
             Self::Frame(frame) => Some(&frame.title),
             Self::Doc(doc) => Some(&doc.text),
+            Self::Embed(embed) => Some(&embed.title),
             Self::Ink(_)
             | Self::Image(_)
             | Self::Connector(_)
@@ -158,7 +163,8 @@ impl ObjectKind {
             | Self::Table(_)
             | Self::Kanban(_)
             | Self::MindMap(_)
-            | Self::Doc(_) => &[],
+            | Self::Doc(_)
+            | Self::Embed(_) => &[],
         }
     }
 }
@@ -439,7 +445,10 @@ impl StyleChange {
         if !matches!(kind, ObjectKind::Shape(_) | ObjectKind::Table(_)) {
             if !matches!(
                 kind,
-                ObjectKind::Kanban(_) | ObjectKind::MindMap(_) | ObjectKind::Doc(_)
+                ObjectKind::Kanban(_)
+                    | ObjectKind::MindMap(_)
+                    | ObjectKind::Doc(_)
+                    | ObjectKind::Embed(_)
             ) {
                 self.text_color = None;
             }
@@ -461,6 +470,111 @@ pub struct Text {
     pub spans: Spans,
     /// Font size in world units.
     pub size: f64,
+}
+
+/// A card for a web page: its site, title, description and address. The object's link
+/// opens the page.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Embed {
+    pub url: Arc<str>,
+    pub title: Arc<str>,
+    pub description: Arc<str>,
+    /// The site's name, or its host when the page does not say.
+    pub site: Arc<str>,
+}
+
+impl Embed {
+    /// Size of a new card, in logical pixels at the zoom it is placed at.
+    pub const SIZE: (f64, f64) = (340.0, 130.0);
+    /// Space around the card's text and the colored strip at its left, relative to its
+    /// height at [`Self::SIZE`].
+    const PAD: f64 = 14.0;
+    const STRIP: f64 = 5.0;
+
+    /// A card for `url` before anything is known about the page: titled by its address.
+    pub fn new(url: &str) -> Self {
+        let host = host(url);
+        let rest = url
+            .split_once("://")
+            .map_or(url, |(_, r)| r)
+            .trim_start_matches("www.")
+            .trim_end_matches('/');
+        Self {
+            url: url.into(),
+            title: rest.into(),
+            description: "".into(),
+            site: host.into(),
+        }
+    }
+
+    /// The card's scale: its height over the height at [`Self::SIZE`].
+    fn unit(bounds: Rect) -> f64 {
+        bounds.height() / Self::SIZE.1
+    }
+
+    /// The colored strip along the card's left edge.
+    pub fn strip(bounds: Rect) -> Rect {
+        Rect::new(
+            bounds.x0,
+            bounds.y0,
+            bounds.x0 + Self::STRIP * Self::unit(bounds),
+            bounds.y1,
+        )
+    }
+
+    /// Where the site's name, title, description and address go: text boxes from the top.
+    pub fn boxes(bounds: Rect) -> [TextBox; 4] {
+        let u = Self::unit(bounds);
+        let (x0, x1) = (
+            bounds.x0 + (Self::STRIP + Self::PAD) * u,
+            (bounds.x1 - Self::PAD * u).max(bounds.x0 + (Self::STRIP + Self::PAD + 1.0) * u),
+        );
+        let mut y = bounds.y0 + Self::PAD * 0.8 * u;
+        let mut next = |height: f64, size: f64| {
+            let area = Rect::new(x0, y, x1, (y + height * u).min(bounds.y1));
+            y += height * u;
+            TextBox {
+                area,
+                max_size: size * u,
+                align: HAlign::Left,
+                valign: VAlign::Top,
+            }
+        };
+        let site = next(18.0, 12.0);
+        let title = next(42.0, 16.0);
+        let description = next(36.0, 13.0);
+        let url = TextBox {
+            area: Rect::new(
+                x0,
+                bounds.y1 - (Self::PAD * 0.8 + 15.0) * u,
+                x1,
+                bounds.y1 - Self::PAD * 0.6 * u,
+            ),
+            max_size: 11.0 * u,
+            align: HAlign::Left,
+            valign: VAlign::Bottom,
+        };
+        [site, title, description, url]
+    }
+
+    /// Default look: a white card with a light outline and a blue strip.
+    pub fn style() -> Style {
+        Style {
+            fill: Rgba::rgb(0xFF, 0xFF, 0xFF),
+            stroke: Rgba::rgb(0xD0, 0xD4, 0xDA),
+            stroke_width: 1.0,
+            text_color: Some(Rgba::rgb(0x1F, 0x29, 0x37)),
+            ..Style::default()
+        }
+    }
+}
+
+/// The host of `url`, without `www.`: `example.com` for `https://www.example.com/a`.
+pub fn host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let rest = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
+    rest.trim_start_matches("www.")
 }
 
 /// A Markdown document: its source, drawn formatted on a page over the object's bounds.
@@ -807,6 +921,7 @@ impl ObjectData {
             ObjectKind::Connector(_) | ObjectKind::Frame(_) => None,
             ObjectKind::Table(_) | ObjectKind::Kanban(_) | ObjectKind::MindMap(_) => None,
             ObjectKind::Doc(_) => None,
+            ObjectKind::Embed(_) => Some(Embed::boxes(self.bounds)[1]),
         }
     }
 
