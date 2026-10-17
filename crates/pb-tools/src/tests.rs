@@ -95,7 +95,11 @@ fn click_creates_default_size_centered() {
     tools.set_active(ToolKind::Shape(ShapeKind::Rectangle));
     let bounds = created_bounds(drag(&mut tools, &doc, at(0.0, 0.0), at(1.0, 1.0)));
     assert_eq!(bounds.center(), Point::ZERO);
-    assert_eq!(bounds.width(), DEFAULT_SHAPE_SIZE);
+    assert_eq!(bounds.width(), 100.0);
+    // Diagram shapes come in their own proportions.
+    tools.set_active(ToolKind::Shape(ShapeKind::Terminator));
+    let bounds = created_bounds(drag(&mut tools, &doc, at(0.0, 0.0), at(1.0, 1.0)));
+    assert_eq!(bounds.size(), ShapeKind::Terminator.default_size().into());
 }
 
 #[test]

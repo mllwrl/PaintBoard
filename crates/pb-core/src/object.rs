@@ -168,6 +168,23 @@ fn shape_name(kind: ShapeKind) -> &'static str {
         ShapeKind::Arrow => "arrow",
         ShapeKind::DoubleArrow => "doubleArrow",
         ShapeKind::Cloud => "cloud",
+        ShapeKind::Terminator => "terminator",
+        ShapeKind::Parallelogram => "parallelogram",
+        ShapeKind::Trapezoid => "trapezoid",
+        ShapeKind::Hexagon => "hexagon",
+        ShapeKind::Document => "document",
+        ShapeKind::PredefinedProcess => "predefinedProcess",
+        ShapeKind::ManualInput => "manualInput",
+        ShapeKind::Cylinder => "cylinder",
+        ShapeKind::Delay => "delay",
+        ShapeKind::OffPage => "offPage",
+        ShapeKind::Note => "note",
+        ShapeKind::Package => "package",
+        ShapeKind::UmlClass => "umlClass",
+        ShapeKind::Actor => "actor",
+        ShapeKind::Pool => "pool",
+        ShapeKind::Server => "server",
+        ShapeKind::Monitor => "monitor",
     }
 }
 

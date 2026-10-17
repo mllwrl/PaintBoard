@@ -716,36 +716,122 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
         connector_panel(ctx, model, ink_button, actions);
     }
 
-    // Like Miro, the shape tool shows its shapes next to the toolbar.
+    // Like Miro, the shape tool shows its shapes next to the toolbar, in sets.
     if let ToolKind::Shape(active) = model.tool {
         Area::new(Id::unique("shapes"))
             .fixed_pos(Pos2::new(
                 shapes_button.right() + 18.0,
                 shapes_button.top() - 8.0,
             ))
+            .constrain(true)
             .order(Order::Foreground)
             .show(ctx, |ui| {
                 panel().show(ui, |ui| {
-                    egui::Grid::new("shape grid")
-                        .spacing(Vec2::splat(2.0))
-                        .show(ui, |ui| {
-                            for (i, kind) in ShapeKind::ALL.into_iter().enumerate() {
-                                let button =
-                                    icon_button(ui, kind == active, kind.name(), |p, r, c| {
-                                        paint_shape(p, r, c, kind)
-                                    });
-                                if button.clicked() {
-                                    actions.push(Action::Tool(ToolKind::Shape(kind)));
+                    for (set, kinds) in SHAPE_SETS {
+                        ui.weak(*set);
+                        egui::Grid::new(*set)
+                            .spacing(Vec2::splat(2.0))
+                            .show(ui, |ui| {
+                                for (i, (kind, name)) in kinds.iter().enumerate() {
+                                    let kind = *kind;
+                                    let button =
+                                        icon_button(ui, kind == active, name, |p, r, c| {
+                                            paint_shape(p, r, c, kind)
+                                        });
+                                    if button.clicked() {
+                                        actions.push(Action::Tool(ToolKind::Shape(kind)));
+                                    }
+                                    if i % SHAPES_PER_ROW == SHAPES_PER_ROW - 1 {
+                                        ui.end_row();
+                                    }
                                 }
-                                if i % 3 == 2 {
-                                    ui.end_row();
-                                }
-                            }
-                        });
+                            });
+                        ui.add_space(4.0);
+                    }
                 });
             });
     }
 }
+
+/// Shapes offered by the shape tool, in sets, with what each is called there.
+const SHAPE_SETS: &[(&str, &[(ShapeKind, &str)])] = &[
+    (
+        "Basic",
+        &[
+            (ShapeKind::Rectangle, "Rectangle"),
+            (ShapeKind::RoundedRectangle, "Rounded rectangle"),
+            (ShapeKind::Ellipse, "Ellipse"),
+            (ShapeKind::Diamond, "Diamond"),
+            (ShapeKind::Triangle, "Triangle"),
+            (ShapeKind::Star, "Star"),
+            (ShapeKind::Arrow, "Arrow"),
+            (ShapeKind::DoubleArrow, "Double arrow"),
+            (ShapeKind::Cloud, "Cloud"),
+            (ShapeKind::Hexagon, "Hexagon"),
+            (ShapeKind::Parallelogram, "Parallelogram"),
+            (ShapeKind::Trapezoid, "Trapezoid"),
+        ],
+    ),
+    (
+        "Flowchart",
+        &[
+            (ShapeKind::Terminator, "Start / end"),
+            (ShapeKind::Rectangle, "Process"),
+            (ShapeKind::Diamond, "Decision"),
+            (ShapeKind::Parallelogram, "Data (input / output)"),
+            (ShapeKind::Document, "Document"),
+            (ShapeKind::PredefinedProcess, "Predefined process"),
+            (ShapeKind::ManualInput, "Manual input"),
+            (ShapeKind::Trapezoid, "Manual operation"),
+            (ShapeKind::Hexagon, "Preparation"),
+            (ShapeKind::Cylinder, "Database"),
+            (ShapeKind::Delay, "Delay"),
+            (ShapeKind::OffPage, "Off-page connector"),
+        ],
+    ),
+    (
+        "UML",
+        &[
+            (ShapeKind::UmlClass, "Class"),
+            (ShapeKind::Actor, "Actor"),
+            (ShapeKind::Ellipse, "Use case"),
+            (ShapeKind::RoundedRectangle, "State"),
+            (ShapeKind::Note, "Note"),
+            (ShapeKind::Package, "Package"),
+        ],
+    ),
+    (
+        "Entity relationship",
+        &[
+            (ShapeKind::Rectangle, "Entity"),
+            (ShapeKind::Diamond, "Relationship"),
+            (ShapeKind::Ellipse, "Attribute"),
+            (ShapeKind::UmlClass, "Table"),
+        ],
+    ),
+    (
+        "BPMN",
+        &[
+            (ShapeKind::RoundedRectangle, "Task"),
+            (ShapeKind::Ellipse, "Event"),
+            (ShapeKind::Diamond, "Gateway"),
+            (ShapeKind::Note, "Data object"),
+            (ShapeKind::Cylinder, "Data store"),
+            (ShapeKind::Pool, "Pool"),
+        ],
+    ),
+    (
+        "Network",
+        &[
+            (ShapeKind::Server, "Server"),
+            (ShapeKind::Monitor, "Computer"),
+            (ShapeKind::Cylinder, "Database"),
+            (ShapeKind::Cloud, "Cloud"),
+            (ShapeKind::Actor, "User"),
+        ],
+    ),
+];
+const SHAPES_PER_ROW: usize = 6;
 
 /// Width ranges of the pen and the marker, in logical pixels.
 const PEN_WIDTHS: std::ops::RangeInclusive<f64> = 1.0..=24.0;
@@ -2144,18 +2230,42 @@ fn paint_connector(painter: &Painter, rect: Rect, color: Color32) {
 }
 
 fn paint_shape(painter: &Painter, rect: Rect, color: Color32, kind: ShapeKind) {
-    let bounds = kurbo::Rect::new(
-        rect.left().into(),
-        rect.top().into(),
-        rect.right().into(),
-        rect.bottom().into(),
-    );
-    let mut points = Vec::new();
-    kurbo::flatten(kind.outline(bounds), 0.2, |el| match el {
-        PathEl::MoveTo(p) | PathEl::LineTo(p) => points.push(Pos2::new(p.x as f32, p.y as f32)),
-        _ => {}
-    });
-    painter.add(Shape::closed_line(points, Stroke::new(1.6, color)));
+    // In the shape's own proportions (a terminator is wide), within the icon's square.
+    let (w, h) = kind.default_size();
+    let side = f64::from(rect.width().min(rect.height()));
+    let fit = side / w.max(h);
+    let center = kurbo::Point::new(rect.center().x.into(), rect.center().y.into());
+    let bounds = kurbo::Rect::from_center_size(center, (w * fit, h * fit));
+    let stroke = Stroke::new(1.6, color);
+    // Each subpath on its own: the outline's closed, the details' open.
+    let draw = |path: kurbo::BezPath| {
+        let mut points: Vec<Pos2> = Vec::new();
+        let flush = |points: &mut Vec<Pos2>, closed: bool| {
+            if points.len() > 1 {
+                let line = std::mem::take(points);
+                painter.add(if closed {
+                    Shape::closed_line(line, stroke)
+                } else {
+                    Shape::line(line, stroke)
+                });
+            }
+            points.clear();
+        };
+        kurbo::flatten(path, 0.2, |el| match el {
+            PathEl::MoveTo(p) => {
+                flush(&mut points, false);
+                points.push(Pos2::new(p.x as f32, p.y as f32));
+            }
+            PathEl::LineTo(p) => points.push(Pos2::new(p.x as f32, p.y as f32)),
+            PathEl::ClosePath => flush(&mut points, true),
+            _ => {}
+        });
+        flush(&mut points, false);
+    };
+    draw(kind.outline(bounds));
+    if let Some(details) = kind.details(bounds) {
+        draw(details);
+    }
 }
 
 /// A curved arrow for undo (counter-clockwise) and redo.

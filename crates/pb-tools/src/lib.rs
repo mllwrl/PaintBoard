@@ -40,8 +40,6 @@ const CLICK_SLOP: f64 = 4.0;
 const HIT_SLOP: f64 = 3.0;
 /// Hit radius of resize and rotation handles, in logical pixels.
 const HANDLE_HIT_RADIUS: f64 = 7.0;
-/// Size of a shape created by a click instead of a drag, in world units.
-const DEFAULT_SHAPE_SIZE: f64 = 100.0;
 /// Dragged edges snap to other objects within this distance, in logical pixels.
 const SNAP_DISTANCE: f64 = 6.0;
 /// Rotation snaps to multiples of this with Shift held.
@@ -2048,7 +2046,7 @@ impl Tools {
         };
         if finished && current.screen_distance(*start) < CLICK_SLOP {
             let size = match kind {
-                Drawn::Shape(_) => (DEFAULT_SHAPE_SIZE, DEFAULT_SHAPE_SIZE),
+                Drawn::Shape(kind) => kind.default_size(),
                 Drawn::Frame => {
                     let (w, h) = FrameData::CLICK_SIZE;
                     (w / current.zoom, h / current.zoom)

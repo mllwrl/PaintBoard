@@ -207,13 +207,13 @@ pub(crate) fn draw_object(
             let path = shape.kind.outline(data.bounds);
             scene.fill(Fill::NonZero, transform, color(style.fill), None, &path);
             if style.stroke_width > 0.0 {
-                scene.stroke(
-                    &Stroke::new(style.stroke_width).with_join(Join::Round),
-                    transform,
-                    color(style.stroke),
-                    None,
-                    &path,
-                );
+                let stroke = Stroke::new(style.stroke_width)
+                    .with_join(Join::Round)
+                    .with_caps(Cap::Round);
+                scene.stroke(&stroke, transform, color(style.stroke), None, &path);
+                if let Some(details) = shape.kind.details(data.bounds) {
+                    scene.stroke(&stroke, transform, color(style.stroke), None, &details);
+                }
             }
             if let Some(text_box) = data.text_box() {
                 let brush = color(style.text_color());
