@@ -1,7 +1,8 @@
-//! Platform abstractions (filesystem, clipboard, time, file dialogs) with native and web
+//! Platform abstractions (filesystem, clipboard, time, file dialogs, sound) with native and web
 //! implementations. Everything else stays free of direct system calls, so the same code runs
 //! on the desktop and in the browser.
 
+pub mod audio;
 pub mod browser;
 pub mod clipboard;
 pub mod dialog;

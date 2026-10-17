@@ -5,6 +5,7 @@ mod editing;
 mod navigation;
 mod pictures;
 mod session;
+mod talktrack;
 mod templates;
 mod ui;
 

@@ -13,6 +13,7 @@ pub mod reaction;
 pub mod rich;
 pub mod search;
 pub mod table;
+pub mod talktrack;
 
 pub use asset::{AssetId, Assets};
 pub use command::{Applied, Command, ZOrder};
@@ -31,3 +32,4 @@ pub use pb_geom::ShapeKind;
 pub use reaction::Reaction;
 pub use rich::{Span, Spans, TextMarks};
 pub use table::{Cell, CellRange, Line, Merge, Table};
+pub use talktrack::Talktrack;

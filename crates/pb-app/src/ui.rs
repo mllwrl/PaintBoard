@@ -58,6 +58,20 @@ pub enum Action {
     ShowHidden,
     /// Protects the board from changes, or lifts that.
     ToggleReadOnly,
+    /// Starts recording a talktrack.
+    StartRecording,
+    /// Stops recording and keeps the talktrack.
+    StopRecording,
+    /// Stops recording and throws it away.
+    CancelRecording,
+    /// Plays the talktrack with this id.
+    PlayTalktrack(Arc<str>),
+    /// Pauses the talktrack playing, or plays on.
+    TogglePlayback,
+    /// Goes to this many seconds into the talktrack playing.
+    SeekPlayback(f64),
+    StopPlayback,
+    RemoveTalktrack(Arc<str>),
     /// Opens or closes the layers panel.
     ToggleLayers,
     /// Adds a layer on top and makes it the one new objects go to.
@@ -255,6 +269,12 @@ pub struct Model<'a> {
     pub read_only: bool,
     /// The layers panel, while open.
     pub layers: Option<LayersView>,
+    /// Recording a talktrack: seconds so far, and whether there is sound.
+    pub recording: Option<(u64, bool)>,
+    /// A talktrack playing.
+    pub playback: Option<PlaybackView>,
+    /// The board's talktracks: id, title and length in milliseconds.
+    pub talktracks: Vec<(Arc<str>, String, u32)>,
     /// The diagram-from-text window, when it is open, with the last error.
     pub diagram: Option<Option<String>>,
     /// The template gallery is open.
@@ -442,6 +462,15 @@ pub struct SelectionInfo {
     /// if it is all on one.
     pub layers: Vec<(Arc<str>, String)>,
     pub layer: Option<Arc<str>>,
+}
+
+/// A talktrack playing.
+pub struct PlaybackView {
+    pub title: String,
+    /// Seconds in, and how many there are.
+    pub position: f64,
+    pub length: f64,
+    pub paused: bool,
 }
 
 /// The layers panel: layers top first, each with how many objects are on it, and the
@@ -635,6 +664,15 @@ impl Ui {
             }
             if let Some(results) = &model.results {
                 results_window(ctx, results, &mut actions);
+            }
+            if let Some((seconds, sound)) = model.recording {
+                recording_pill(ctx, seconds, sound, &mut actions);
+            }
+            if let Some(playback) = &model.playback {
+                // Nothing but the board and the controls, like presenting.
+                *popup = None;
+                playback_bar(ctx, playback, &mut actions);
+                return;
             }
             if let Some((index, count, title)) = &model.presentation {
                 // Nothing but the board and the controls.
@@ -854,6 +892,7 @@ fn board_menu(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                     {
                         actions.push(Action::Present);
                     }
+                    ui.menu_button("Talktracks", |ui| talktracks_menu(ui, model, actions));
                     ui.menu_button("Vote", |ui| voting_menu(ui, model.voting, &mut *actions));
                     ui.menu_button("Timer", |ui| {
                         for minutes in [1, 3, 5, 10, 15, 30] {
@@ -2452,6 +2491,102 @@ fn layers_panel(
                             ui.end_row();
                         }
                     });
+            });
+        });
+}
+
+/// Minutes and seconds, like 1:05.
+fn clock(seconds: f64) -> String {
+    let s = seconds.max(0.0) as u64;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// Recording a talktrack, and the board's talktracks to play or remove.
+fn talktracks_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
+    let record = Button::new("● Record talktrack");
+    if ui
+        .add_enabled(model.recording.is_none(), record)
+        .on_hover_text("Record your voice while you move around the board")
+        .clicked()
+    {
+        actions.push(Action::StartRecording);
+        ui.close();
+    }
+    if !model.talktracks.is_empty() {
+        ui.separator();
+    }
+    for (id, title, length) in &model.talktracks {
+        ui.horizontal(|ui| {
+            let label = format!("▶  {title}  ({})", clock(f64::from(*length) / 1000.0));
+            if ui.add(Button::new(label).frame(false)).clicked() {
+                actions.push(Action::PlayTalktrack(id.clone()));
+                ui.close();
+            }
+            if ui.small_button("×").on_hover_text("Remove").clicked() {
+                actions.push(Action::RemoveTalktrack(id.clone()));
+            }
+        });
+    }
+}
+
+/// Shows that a talktrack is being recorded, with the time and the buttons to stop.
+fn recording_pill(ctx: &Context, seconds: u64, sound: bool, actions: &mut Vec<Action>) {
+    let screen = ctx.content_rect();
+    let red = Color32::from_rgb(0xDC, 0x26, 0x26);
+    Area::new(Id::unique("recording"))
+        .fixed_pos(Pos2::new(MARGIN, screen.bottom() - MARGIN))
+        .pivot(Align2::LEFT_BOTTOM)
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            panel().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("●").color(red).size(16.0));
+                    ui.strong(clock(seconds as f64));
+                    if !sound {
+                        ui.weak("no microphone");
+                    }
+                    if ui
+                        .button("Stop")
+                        .on_hover_text("Keep the talktrack")
+                        .clicked()
+                    {
+                        actions.push(Action::StopRecording);
+                    }
+                    if ui.button("Cancel").on_hover_text("Throw it away").clicked() {
+                        actions.push(Action::CancelRecording);
+                    }
+                });
+            });
+        });
+}
+
+/// The controls at the bottom while a talktrack plays.
+fn playback_bar(ctx: &Context, view: &PlaybackView, actions: &mut Vec<Action>) {
+    let screen = ctx.content_rect();
+    Area::new(Id::unique("playback"))
+        .fixed_pos(Pos2::new(screen.center().x, screen.bottom() - MARGIN))
+        .pivot(Align2::CENTER_BOTTOM)
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            panel().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let play = if view.paused { "Play" } else { "Pause" };
+                    if ui.button(play).on_hover_text("Space").clicked() {
+                        actions.push(Action::TogglePlayback);
+                    }
+                    let mut at = view.position;
+                    let slider =
+                        egui::Slider::new(&mut at, 0.0..=view.length.max(0.1)).show_value(false);
+                    if ui.add_sized([240.0, 18.0], slider).changed() {
+                        actions.push(Action::SeekPlayback(at));
+                    }
+                    ui.label(format!("{} / {}", clock(view.position), clock(view.length)));
+                    ui.separator();
+                    ui.label(&view.title);
+                    if ui.button("Exit").on_hover_text("Esc").clicked() {
+                        actions.push(Action::StopPlayback);
+                    }
+                });
             });
         });
 }

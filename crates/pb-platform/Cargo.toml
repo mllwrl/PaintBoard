@@ -18,6 +18,8 @@ rfd.workspace = true
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 # Fetching web pages for link previews, over the system's TLS and certificates.
 ureq = { version = "3.4", default-features = false, features = ["native-tls", "gzip"] }
+# Microphone and speakers for talktracks (WASAPI on Windows).
+cpal = "0.18"
 
 # Handwriting recognition through Windows Ink (part of the OS, works offline).
 [target.'cfg(windows)'.dependencies.windows]

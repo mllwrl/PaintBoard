@@ -28,9 +28,11 @@ use crate::editing::{self, KeyOutcome, NEW_TEXT_SIZE, TextEdit};
 use crate::navigation::Navigation;
 use crate::pictures::{self, Picture};
 use crate::session::Session;
+use crate::talktrack::{Playback, Recording};
 use crate::ui::{
-    Action, CommentView, ContextMenuInfo, LayersView, LinkInfo, Minimap, Model, STICKY_COLORS,
-    SearchInfo, SelectionInfo, ShapeText, TableInfo, TextFormat, ThreadView, Ui, VotingView,
+    Action, CommentView, ContextMenuInfo, LayersView, LinkInfo, Minimap, Model, PlaybackView,
+    STICKY_COLORS, SearchInfo, SelectionInfo, ShapeText, TableInfo, TextFormat, ThreadView, Ui,
+    VotingView,
 };
 
 pub enum UserEvent {
@@ -146,6 +148,10 @@ pub struct App {
     focus_saved: Option<Camera>,
     /// The layers panel is open.
     show_layers: bool,
+    /// A talktrack being recorded.
+    recording: Option<Recording>,
+    /// A talktrack being played back.
+    playback: Option<Playback>,
     /// The countdown timer, while shown.
     timer: Option<Timer>,
     /// The voting results window is open.
@@ -206,6 +212,8 @@ impl App {
             presentation: None,
             focus_saved: None,
             show_layers: false,
+            recording: None,
+            playback: None,
             camera_glide: None,
             timer: None,
             show_results: false,
@@ -275,6 +283,16 @@ impl App {
                 window.request_redraw();
             }
         }
+        let now = Instant::now();
+        if let Some(playback) = &self.playback {
+            if let Some((center, zoom, _)) = playback.view(now) {
+                self.camera
+                    .look_at(center, zoom, Size::new(size.width, size.height));
+            }
+            if !playback.is_paused() && !playback.is_over(now) {
+                window.request_redraw();
+            }
+        }
         let mut overlay = overlay(&self.document, &self.tools, &overrides, self.camera.zoom());
         overlay.link_badges = self.link_badges().into_iter().map(|(p, _)| p).collect();
         overlay.comment_pins = self
@@ -338,6 +356,14 @@ impl App {
                     .get(presentation.index)
                     .and_then(|&id| self.document.get(id))
                     .map(|o| o.data.bounds),
+                ..Overlay::default()
+            };
+        }
+        if let Some(playback) = &self.playback {
+            // Only the board and where the presenter pointed.
+            let pointer = playback.view(now).and_then(|(_, _, p)| p);
+            overlay = Overlay {
+                laser: pointer.map(|p| vec![(p, 0.0)]).unwrap_or_default(),
                 ..Overlay::default()
             };
         }
@@ -424,6 +450,22 @@ impl App {
             hidden: (self.document.hidden_count(), self.document.shows_hidden()),
             read_only: self.document.read_only(),
             layers: self.layers_view(),
+            recording: self
+                .recording
+                .as_ref()
+                .map(|r| (r.seconds(now), r.has_sound())),
+            playback: self.playback.as_ref().map(|p| PlaybackView {
+                title: p.track.title.to_string(),
+                position: p.position(now),
+                length: p.length(),
+                paused: p.is_paused(),
+            }),
+            talktracks: self
+                .document
+                .talktracks()
+                .iter()
+                .map(|t| (t.id.clone(), t.title.to_string(), t.duration))
+                .collect(),
             diagram: self.diagram.clone(),
             show_templates: self.show_templates,
             focus: self.focus_saved.is_some(),
@@ -1199,6 +1241,29 @@ impl App {
             Action::ToggleLock => self.apply_with(Tools::toggle_lock_selected),
             Action::ToggleHidden => self.toggle_hidden(),
             Action::ToggleLayers => self.show_layers = !self.show_layers,
+            Action::StartRecording => {
+                if self.recording.is_none() {
+                    self.recording = Some(Recording::start(Instant::now()));
+                }
+            }
+            Action::StopRecording => self.stop_recording(),
+            Action::CancelRecording => {
+                // Stops the microphone too.
+                self.recording = None;
+            }
+            Action::PlayTalktrack(id) => self.play_talktrack(&id),
+            Action::TogglePlayback => {
+                if let Some(p) = &mut self.playback {
+                    p.toggle(Instant::now());
+                }
+            }
+            Action::SeekPlayback(seconds) => {
+                if let Some(p) = &mut self.playback {
+                    p.seek(seconds, Instant::now());
+                }
+            }
+            Action::StopPlayback => self.stop_playback(),
+            Action::RemoveTalktrack(id) => self.apply(Command::RemoveTalktrack(id)),
             Action::AddLayer => {
                 let layers = self.document.layers();
                 let order = layers.iter().map(|l| l.order).fold(0.0, f64::max) + 1.0;
@@ -2079,6 +2144,87 @@ impl App {
         let mut target = self.camera;
         target.fit(area, viewport, FRAME_MARGIN);
         self.glide_to(&target);
+    }
+
+    /// Stops recording and keeps the talktrack on the board.
+    fn stop_recording(&mut self) {
+        let Some(recording) = self.recording.take() else {
+            return;
+        };
+        let id: Arc<str> = self.document.new_line_id().into();
+        let title = format!("Talktrack {}", self.document.talktracks().len() + 1);
+        let track = recording.finish(Instant::now(), &mut self.document, id, title);
+        self.apply(Command::SaveTalktrack(track));
+    }
+
+    /// Plays talktrack `id` back: the view follows it, the UI steps aside.
+    fn play_talktrack(&mut self, id: &str) {
+        let Some(track) = self
+            .document
+            .talktracks()
+            .iter()
+            .find(|t| &*t.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        if self.presentation.is_some() {
+            self.stop_presentation();
+        }
+        self.finish_editing();
+        self.tools.cancel();
+        self.tools.clear_selection();
+        self.context_menu = None;
+        self.camera_glide = None;
+        let saved = self.playback.take().map_or(self.camera, |p| p.saved);
+        self.playback = Some(Playback::start(
+            track,
+            &self.document,
+            saved,
+            Instant::now(),
+        ));
+        if let Some(window) = &self.window {
+            window.set_cursor_visible(true);
+        }
+    }
+
+    /// Ends playback, gliding back to where the board was.
+    fn stop_playback(&mut self) {
+        if let Some(p) = self.playback.take() {
+            self.glide_to(&p.saved);
+        }
+    }
+
+    /// A key while a talktrack plays. Returns true if the view needs a redraw.
+    fn playback_key(&mut self, event: &KeyEvent) -> bool {
+        if event.state != ElementState::Pressed {
+            return false;
+        }
+        let PhysicalKey::Code(code) = event.physical_key else {
+            return false;
+        };
+        let now = Instant::now();
+        match code {
+            KeyCode::Escape => self.stop_playback(),
+            KeyCode::Space | KeyCode::KeyK => {
+                if let Some(p) = &mut self.playback {
+                    p.toggle(now);
+                }
+            }
+            KeyCode::ArrowLeft | KeyCode::ArrowRight => {
+                if let Some(p) = &mut self.playback {
+                    let step = if code == KeyCode::ArrowLeft {
+                        -5.0
+                    } else {
+                        5.0
+                    };
+                    let at = p.position(now) + step;
+                    p.seek(at, now);
+                }
+            }
+            _ => return false,
+        }
+        true
     }
 
     /// Layers to move the selection to, top first, when there is more than one.
@@ -3281,6 +3427,8 @@ impl App {
     fn replace_document(&mut self, document: Document) {
         self.document = document;
         self.focus_saved = None;
+        self.recording = None;
+        self.playback = None;
         self.images.clear();
         self.tools.cancel();
         self.tools.clear_selection();
@@ -3531,6 +3679,23 @@ impl ApplicationHandler<UserEvent> for App {
         });
         // A running timer shows each second; a finished one blinks.
         let timer = self.timer.as_ref().and_then(|t| t.next_tick(now));
+        // Recording samples the view, and shows each second.
+        let viewport = self.viewport();
+        let center = self.camera.visible_world_rect(viewport).center();
+        let zoom = self.camera.zoom();
+        let pointer = self
+            .navigation
+            .cursor()
+            .map(|c| self.camera.screen_to_world(c));
+        let mut redraw = false;
+        let sampling = self.recording.as_mut().map(|recording| {
+            recording.sample(now, center, zoom, pointer);
+            redraw = recording.second_passed(now);
+            recording.next_key()
+        });
+        if redraw {
+            self.request_redraw();
+        }
         if timer.is_some_and(|at| at <= now) {
             self.request_redraw();
         }
@@ -3539,6 +3704,7 @@ impl ApplicationHandler<UserEvent> for App {
             ui_repaint.filter(|&at| at > now),
             blink,
             timer.filter(|&at| at > now),
+            sampling,
         ]
         .into_iter()
         .flatten()
@@ -3678,6 +3844,8 @@ impl App {
                 let typing = self.ui.as_ref().is_some_and(Ui::wants_keyboard);
                 if typing {
                     false
+                } else if self.playback.is_some() {
+                    self.playback_key(&event)
                 } else if self.presentation.is_some() {
                     self.presentation_key(&event)
                 } else if self.cropping.is_some() {
@@ -3769,7 +3937,8 @@ impl App {
                 // drag started on it ends even over a toolbar. While presenting the board
                 // can only be panned (middle button) and zoomed.
                 let ui_press = state == ElementState::Pressed && (ui_consumed || over_ui);
-                let presenting = self.presentation.is_some() && button != MouseButton::Middle;
+                let presenting = self.playback.is_some()
+                    || self.presentation.is_some() && button != MouseButton::Middle;
                 if ui_press || presenting {
                     false
                 } else {
@@ -3811,7 +3980,8 @@ impl App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                if ui_consumed || over_ui {
+                // A talktrack playing moves the view itself.
+                if ui_consumed || over_ui || self.playback.is_some() {
                     false
                 } else {
                     self.navigation.wheel(&mut self.camera, delta, scale);

@@ -200,6 +200,10 @@ pub enum Command {
     DefineLayer(Layer),
     /// Removes a layer with everything on it. The base layer stays.
     RemoveLayer(Arc<str>),
+    /// Adds a talktrack, or replaces the one with its id (e.g. renamed).
+    SaveTalktrack(crate::Talktrack),
+    /// Removes a talktrack.
+    RemoveTalktrack(Arc<str>),
     /// Moves top-level objects and groups to a layer.
     SetLayer {
         ids: Vec<ObjectId>,
@@ -209,7 +213,7 @@ pub enum Command {
 
 impl Command {
     /// Whether it may change a read-only board: it does not touch the content, like
-    /// comments, reactions and voting.
+    /// comments, reactions, voting and talktracks.
     pub fn allowed_read_only(&self) -> bool {
         matches!(
             self,
@@ -223,6 +227,8 @@ impl Command {
                 | Self::EndVoting
                 | Self::ClearVotes
                 | Self::Vote { .. }
+                | Self::SaveTalktrack(_)
+                | Self::RemoveTalktrack(_)
         )
     }
 }

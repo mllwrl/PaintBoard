@@ -51,6 +51,8 @@ mod key {
     /// Root map of voting: `limit` (votes per person) while there is a session, `open`
     /// while it runs, and `v|<object>|<author>` each person's votes on an object.
     pub const VOTING: &str = "voting";
+    /// Root map of talktracks: each in its stored form (see `Talktrack::to_bytes`) by id.
+    pub const TALKTRACKS: &str = "talktracks";
     /// Root map of layers: `order;flags;name` by layer id, see `Layer::to_value`.
     pub const LAYERS: &str = "layers";
     /// The layer of a top-level object or group, absent for the base layer.
@@ -240,6 +242,8 @@ pub struct Document {
     unit_layers: HashMap<ObjectId, Arc<str>>,
     /// Where new objects go. Not stored, like `focus`.
     active_layer: Arc<str>,
+    /// Recorded talktracks, oldest first; rebuilt with `objects`.
+    talktracks: Vec<crate::Talktrack>,
 }
 
 /// An object in the spatial index: its world bounds (outline included) and its place in
@@ -403,6 +407,7 @@ impl Document {
             layers: vec![Layer::base()],
             unit_layers: HashMap::new(),
             active_layer: Layer::BASE.into(),
+            talktracks: Vec::new(),
         };
         document.refresh();
         document
@@ -448,6 +453,7 @@ impl Document {
                 ObjectKind::Image(image) => Some(image.asset),
                 _ => None,
             })
+            .chain(self.talktracks.iter().filter_map(|t| t.audio))
             .collect();
         ids.sort();
         ids.dedup();
@@ -1109,6 +1115,17 @@ impl Document {
                 self.doc.get_map(key::META).insert(key::READ_ONLY, on)?;
                 self.doc.set_next_commit_origin(NOT_UNDONE);
             }
+            Command::SaveTalktrack(track) => {
+                self.doc
+                    .get_map(key::TALKTRACKS)
+                    .insert(&track.id, track.to_bytes())?;
+            }
+            Command::RemoveTalktrack(id) => {
+                let map = self.doc.get_map(key::TALKTRACKS);
+                if map.get(&id).is_some() {
+                    map.delete(&id)?;
+                }
+            }
             Command::DefineLayer(layer) => {
                 self.doc
                     .get_map(key::LAYERS)
@@ -1447,6 +1464,7 @@ impl Document {
         }
         self.roots = self.read_children(TreeParentId::Root, None);
         self.layers = read_layers(&self.doc.get_map(key::LAYERS));
+        self.talktracks = read_talktracks(&self.doc.get_map(key::TALKTRACKS));
         self.stack_layers();
         self.tags = read_tags(&self.doc.get_map(key::TAGS));
         self.reactions = read_reactions(&self.doc.get_map(key::REACTIONS));
@@ -1513,6 +1531,11 @@ impl Document {
             .map(|(i, o)| (o.id, i))
             .collect();
         self.roots = roots;
+    }
+
+    /// The board's talktracks, oldest first.
+    pub fn talktracks(&self) -> &[crate::Talktrack] {
+        &self.talktracks
     }
 
     /// The board's layers, bottom to top.
@@ -2205,6 +2228,20 @@ fn read_reactions(map: &LoroMap) -> HashMap<ObjectId, crate::reaction::Reactions
 }
 
 /// The board's tags from their root map, sorted by name (then id, for a stable order).
+/// The board's talktracks from their root map, oldest first.
+fn read_talktracks(map: &LoroMap) -> Vec<crate::Talktrack> {
+    let mut tracks = Vec::new();
+    map.for_each(|id, v| {
+        if let ValueOrContainer::Value(LoroValue::Binary(bytes)) = v
+            && let Some(track) = crate::Talktrack::from_bytes(id, &bytes)
+        {
+            tracks.push(track);
+        }
+    });
+    tracks.sort_by(|a, b| a.created.cmp(&b.created).then_with(|| a.id.cmp(&b.id)));
+    tracks
+}
+
 /// The board's layers from their root map, bottom to top, with the base layer whether
 /// stored or not.
 fn read_layers(map: &LoroMap) -> Vec<Layer> {
@@ -3323,6 +3360,29 @@ mod tests {
         doc.undo().unwrap();
         assert_eq!(order(&doc).len(), 3);
         assert_eq!(&*doc.layer_of(a).id, "top");
+    }
+
+    #[test]
+    fn talktracks_are_stored_and_keep_their_sound() {
+        let mut doc = Document::new();
+        let audio = doc.add_asset(&b"voice"[..]);
+        let track = crate::Talktrack {
+            id: "t1".into(),
+            title: "Tour".into(),
+            author: "me".into(),
+            created: 5,
+            duration: 1000,
+            audio: Some(audio),
+            keys: Vec::new().into(),
+        };
+        doc.apply(Command::SetReadOnly(true)).unwrap();
+        doc.apply(Command::SaveTalktrack(track.clone())).unwrap();
+        assert_eq!(doc.talktracks(), std::slice::from_ref(&track));
+        assert_eq!(doc.used_assets(), [audio]);
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(loaded.talktracks(), [track]);
+        doc.apply(Command::RemoveTalktrack("t1".into())).unwrap();
+        assert!(doc.talktracks().is_empty() && doc.used_assets().is_empty());
     }
 
     #[test]
