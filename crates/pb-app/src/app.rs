@@ -964,6 +964,10 @@ impl App {
                     });
                 }
             }
+            Action::Arrange(None) => {
+                self.apply_with(|tools, doc| pb_tools::arrange_grid(doc, tools.selection()));
+            }
+            Action::Arrange(Some(by)) => self.cluster(by),
             Action::FetchPreview => {
                 if let [id] = self.tools.selection().ids() {
                     self.fetch_preview(*id, true);
@@ -1719,6 +1723,58 @@ impl App {
             self.camera.fit(placed, viewport, FRAME_MARGIN);
         }
         Ok(())
+    }
+
+    /// Lays the selection out in clusters by `by`, each with a heading, as one undo step.
+    fn cluster(&mut self, by: pb_tools::ClusterBy) {
+        let Some((moves, labels)) = pb_tools::cluster(&self.document, self.tools.selection(), by)
+        else {
+            return;
+        };
+        let selected = self.tools.selection().ids().to_vec();
+        let engine = self.text.engine();
+        let headings: Vec<pb_core::Content> = labels
+            .iter()
+            .map(|label| {
+                let layout = engine.layout(&label.text, label.size, None);
+                let spans: pb_core::Spans = std::sync::Arc::new([pb_core::Span {
+                    start: 0,
+                    end: label.text.len(),
+                    marks: pb_core::TextMarks {
+                        bold: true,
+                        ..Default::default()
+                    },
+                }]);
+                ObjectData {
+                    kind: ObjectKind::Text(Text {
+                        text: label.text.as_str().into(),
+                        spans,
+                        size: label.size,
+                    }),
+                    bounds: pb_geom::kurbo::Rect::from_origin_size(
+                        label.at,
+                        (layout.width, layout.height),
+                    ),
+                    rotation: 0.0,
+                    style: Style {
+                        stroke: Rgba::rgb(0x1F, 0x29, 0x37),
+                        ..Style::default()
+                    },
+                    tags: Default::default(),
+                    link: None,
+                }
+                .into()
+            })
+            .collect();
+        self.document.begin_undo_group();
+        if let Some(moves) = moves {
+            self.apply(moves);
+        }
+        self.apply(Command::Create(headings));
+        self.document.end_undo_group();
+        // The clustered objects stay selected, not the headings.
+        self.tools.select_only(selected);
+        self.tools.sync(&self.document);
     }
 
     /// Adds template `i` in the middle of the view as one undo step, selects it, and shows
@@ -2666,6 +2722,9 @@ impl App {
             move |tools: &Tools, doc: &Document| pb_tools::distribute(doc, tools.selection(), axis)
         };
         match code {
+            KeyCode::KeyG => {
+                self.apply_with(|tools, doc| pb_tools::arrange_grid(doc, tools.selection()));
+            }
             KeyCode::KeyH if shift => self.apply_with(distribute(Axis::Horizontal)),
             KeyCode::KeyV if shift => self.apply_with(distribute(Axis::Vertical)),
             KeyCode::KeyA => self.apply_with(align(Align::Left)),

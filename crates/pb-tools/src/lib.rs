@@ -16,7 +16,9 @@ pub mod quick;
 mod selection;
 mod table;
 
-pub use arrange::{Align, Axis, align, distribute};
+pub use arrange::{
+    Align, Axis, ClusterBy, ClusterLabel, align, arrange_grid, cluster, color_name, distribute,
+};
 pub use clipboard::{Clipboard, duplicate};
 pub use connect::Which;
 pub use crop::Crop;

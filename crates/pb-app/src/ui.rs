@@ -133,6 +133,8 @@ pub enum Action {
     FollowLink,
     /// Fetches the selected web page card's page again to fill it in.
     FetchPreview,
+    /// Lays the selection out in a grid (`None`) or in clusters.
+    Arrange(Option<pb_tools::ClusterBy>),
     /// Puts your reaction on the selected object, or takes it off.
     React(pb_core::Reaction),
     /// Puts a tag on the selection, or takes it off if everything selected has it.
@@ -373,6 +375,7 @@ enum Popup {
     Tags,
     Link,
     React,
+    Arrange,
 }
 
 /// Font sizes offered for shape text, in logical pixels at 100% zoom.
@@ -1414,6 +1417,10 @@ fn selection_toolbar(
                     let opacity = ui.button(opacity).on_hover_text("Opacity");
                     toggle(popup, Popup::Opacity, opacity.clicked());
                     ui.separator();
+                    if selection.several {
+                        let arrange = ui.button("Arrange").on_hover_text("Lay out in a grid or in groups");
+                        toggle(popup, Popup::Arrange, arrange.clicked());
+                    }
                     if selection.several && ui.button("Group").on_hover_text("Ctrl+G").clicked() {
                         actions.push(Action::Group);
                     }
@@ -1611,6 +1618,28 @@ fn selection_toolbar(
                             .clicked()
                         {
                             actions.push(Action::CopyAnchor);
+                        }
+                    });
+                }
+                Popup::Arrange => {
+                    let choices = [
+                        ("Grid", "In a grid, in reading order (Alt+G)", None),
+                        (
+                            "By color",
+                            "In groups by fill color, with a heading each",
+                            Some(pb_tools::ClusterBy::Color),
+                        ),
+                        (
+                            "By tag",
+                            "In groups by tag, with a heading each",
+                            Some(pb_tools::ClusterBy::Tag),
+                        ),
+                    ];
+                    ui.horizontal(|ui| {
+                        for (label, tip, by) in choices {
+                            if ui.button(label).on_hover_text(tip).clicked() {
+                                actions.push(Action::Arrange(by));
+                            }
                         }
                     });
                 }
@@ -2059,6 +2088,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Alt+A / D / W / S", "Align left / right / top / bottom"),
             ("Alt+H / Alt+V", "Center horizontally / vertically"),
             ("Alt+Shift+H / V", "Distribute horizontally / vertically"),
+            ("Alt+G", "Arrange in a grid"),
         ],
     ),
     (
