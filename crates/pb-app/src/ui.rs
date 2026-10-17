@@ -79,6 +79,18 @@ pub enum Action {
     RemoveTableLines(bool),
     /// Merges the selected table cells (`true`), or splits the merged ones among them.
     MergeCells(bool),
+    /// Links the selected object to a typed or pasted address or anchor.
+    SetLink(String),
+    /// Links the selected object to another object.
+    LinkTo(ObjectId),
+    /// Removes the selected object's link.
+    RemoveLink,
+    /// Links the selected object to the next object clicked on the board.
+    PickLinkTarget,
+    /// Copies an anchor to the selected object, which other objects can link to.
+    CopyAnchor,
+    /// Opens the selected object's link.
+    FollowLink,
     /// Puts a tag on the selection, or takes it off if everything selected has it.
     ToggleTag(std::sync::Arc<str>),
     /// Adds a tag with this name to the board and puts it on the selection.
@@ -200,10 +212,22 @@ pub struct SelectionInfo {
     pub tags_on_some: Vec<std::sync::Arc<str>>,
     /// The board's tags, to offer.
     pub board_tags: Vec<pb_core::Tag>,
+    /// A single unlocked object (not a group) is selected, which can link somewhere.
+    pub link: Option<LinkInfo>,
     /// A single unlocked image is selected.
     pub can_crop: bool,
     pub several: bool,
     pub locked: bool,
+}
+
+/// The link of the selected object.
+pub struct LinkInfo {
+    /// What it links to now, described.
+    pub current: Option<String>,
+    /// Frames it can link to, with their titles.
+    pub frames: Vec<(ObjectId, String)>,
+    /// A target is being picked on the board.
+    pub picking: bool,
 }
 
 /// How a shape's text looks.
@@ -225,6 +249,7 @@ enum Popup {
     Text,
     Opacity,
     Tags,
+    Link,
 }
 
 /// Font sizes offered for shape text, in logical pixels at 100% zoom.
@@ -280,6 +305,8 @@ pub struct Ui {
     popup: Option<Popup>,
     /// Name typed for a new tag.
     new_tag: String,
+    /// Address typed for a link.
+    link_text: String,
     repaint_at: Option<Instant>,
 }
 
@@ -305,6 +332,7 @@ impl Ui {
             pixels_per_point: 1.0,
             popup: None,
             new_tag: String::new(),
+            link_text: String::new(),
             repaint_at: None,
         }
     }
@@ -348,6 +376,7 @@ impl Ui {
         let mut actions = Vec::new();
         let popup = &mut self.popup;
         let new_tag = &mut self.new_tag;
+        let link_text = &mut self.link_text;
         let output = self.ctx.run_pass(input, |ctx| {
             board_menu(ctx, model, &mut actions);
             toolbar(ctx, model, &mut actions);
@@ -356,7 +385,8 @@ impl Ui {
                 minimap(ctx, map, view, &mut actions);
             }
             if let Some(selection) = &model.selection {
-                selection_toolbar(ctx, selection, popup, new_tag, &mut actions);
+                let fields = Fields { new_tag, link_text };
+                selection_toolbar(ctx, selection, popup, fields, &mut actions);
             } else {
                 *popup = None;
             }
@@ -877,13 +907,20 @@ fn minimap(ctx: &Context, map: &Minimap, below: Rect, actions: &mut Vec<Action>)
 }
 
 /// Properties and actions for the selection, floating above it.
+/// Text typed into the selection popups, kept between frames.
+struct Fields<'a> {
+    new_tag: &'a mut String,
+    link_text: &'a mut String,
+}
+
 fn selection_toolbar(
     ctx: &Context,
     selection: &SelectionInfo,
     popup: &mut Option<Popup>,
-    new_tag: &mut String,
+    fields: Fields<'_>,
     actions: &mut Vec<Action>,
 ) {
+    let Fields { new_tag, link_text } = fields;
     let r = selection.screen;
     let center = r.center().x as f32;
     // Above the selection, or below it when there is no room at the top.
@@ -1020,6 +1057,10 @@ fn selection_toolbar(
                     {
                         actions.push(Action::Crop);
                     }
+                    if selection.link.is_some() {
+                        let link = ui.button("Link").on_hover_text("Link to a page or another object");
+                        toggle(popup, Popup::Link, link.clicked());
+                    }
                     let tags = ui.button("Tags").on_hover_text("Tags on the selection");
                     toggle(popup, Popup::Tags, tags.clicked());
                     let opacity = format!("{:.0}%", style.opacity * 100.0);
@@ -1155,6 +1196,74 @@ fn selection_toolbar(
                                     ..StyleChange::default()
                                 }));
                             }
+                        }
+                    });
+                }
+                Popup::Link => {
+                    let Some(link) = &selection.link else {
+                        return;
+                    };
+                    if let Some(current) = &link.current {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("→ {current}"));
+                            if ui.button("Open").clicked() {
+                                actions.push(Action::FollowLink);
+                            }
+                            if ui.button("Remove").clicked() {
+                                actions.push(Action::RemoveLink);
+                            }
+                        });
+                        ui.separator();
+                    }
+                    ui.horizontal(|ui| {
+                        let field = ui.add(
+                            egui::TextEdit::singleline(link_text)
+                                .hint_text("Web address or copied object link")
+                                .desired_width(220.0),
+                        );
+                        let valid = pb_core::Link::from_input(link_text).is_some();
+                        let entered =
+                            field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let set = ui.add_enabled(valid, Button::new("Set"));
+                        if valid && (entered || set.clicked()) {
+                            actions.push(Action::SetLink(std::mem::take(link_text)));
+                        }
+                    });
+                    if !link.frames.is_empty() {
+                        ui.weak("Link to a frame:");
+                        for (id, title) in &link.frames {
+                            let title = if title.trim().is_empty() {
+                                "Untitled frame"
+                            } else {
+                                title
+                            };
+                            if ui.button(title).clicked() {
+                                actions.push(Action::LinkTo(*id));
+                            }
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        let label = if link.picking {
+                            "Click an object…"
+                        } else {
+                            "Pick on board"
+                        };
+                        if ui
+                            .add_enabled(!link.picking, Button::new(label))
+                            .on_hover_text("Then click the object to link to; Esc cancels")
+                            .clicked()
+                        {
+                            actions.push(Action::PickLinkTarget);
+                            *popup = None;
+                        }
+                        if ui
+                            .button("Copy link")
+                            .on_hover_text(
+                                "Copy a link to this object, to paste into another one's Link",
+                            )
+                            .clicked()
+                        {
+                            actions.push(Action::CopyAnchor);
                         }
                     });
                 }

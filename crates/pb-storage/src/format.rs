@@ -151,6 +151,7 @@ mod tests {
             rotation: 0.5,
             style: Style::default(),
             tags: Default::default(),
+            link: None,
         };
         let ids = doc
             .apply(Command::Create(vec![data.clone().into(), data.into()]))
@@ -189,6 +190,7 @@ mod tests {
             rotation: 0.0,
             style: Style::default(),
             tags: Default::default(),
+            link: None,
         };
         doc.apply(Command::Create(vec![data.into()])).unwrap();
         let loaded = decode(&encode(&doc)).unwrap();

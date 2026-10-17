@@ -2,6 +2,7 @@
 //! implementations. Everything else stays free of direct system calls, so the same code runs
 //! on the desktop and in the browser.
 
+pub mod browser;
 pub mod clipboard;
 pub mod dialog;
 pub mod fs;

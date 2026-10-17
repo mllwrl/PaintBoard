@@ -598,7 +598,73 @@ pub struct ObjectData {
     /// Ids of the board's tags on it (see [`crate::Document::tags`]); unknown ones are
     /// ignored.
     pub tags: Tags,
+    /// Where clicking its link badge goes.
+    pub link: Option<Link>,
 }
+
+/// Where an object links to.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Link {
+    /// A web page or mail address: `http`, `https` or `mailto` only.
+    Url(Arc<str>),
+    /// Another object on the board, often a frame.
+    Object(ObjectId),
+}
+
+impl Link {
+    /// Text that links to object `id` when given to [`Link::from_input`], for the clipboard.
+    pub fn anchor(id: ObjectId) -> String {
+        format!("{ANCHOR_PREFIX}{id}")
+    }
+
+    /// A link from what someone typed or pasted: an anchor copied from an object, or a web
+    /// address (`https://` is added when there is no scheme). `None` for anything else.
+    pub fn from_input(text: &str) -> Option<Self> {
+        let text = text.trim();
+        if let Some(id) = text.strip_prefix(ANCHOR_PREFIX) {
+            return ObjectId::parse(id).map(Self::Object);
+        }
+        if text.is_empty() || text.chars().any(char::is_whitespace) {
+            return None;
+        }
+        let lower = text.to_ascii_lowercase();
+        if ["http://", "https://", "mailto:"]
+            .iter()
+            .any(|s| lower.starts_with(s))
+        {
+            return Some(Self::Url(text.into()));
+        }
+        // Something like `example.com/page` or `example.com:8080`, but not another scheme
+        // (`file:`, `javascript:`): the host needs a dot and only digits may follow a colon.
+        let host = text.split(['/', '?', '#']).next().unwrap_or("");
+        let (name, port) = host.split_once(':').unwrap_or((host, ""));
+        let plausible = name.contains('.')
+            && !name.starts_with('.')
+            && !name.ends_with('.')
+            && port.chars().all(|c| c.is_ascii_digit());
+        plausible.then(|| Self::Url(format!("https://{text}").into()))
+    }
+
+    /// The stored form: `url:` or `obj:` followed by the address or object id.
+    pub(crate) fn to_stored(&self) -> String {
+        match self {
+            Self::Url(url) => format!("url:{url}"),
+            Self::Object(id) => format!("obj:{id}"),
+        }
+    }
+
+    pub(crate) fn from_stored(s: &str) -> Option<Self> {
+        if let Some(url) = s.strip_prefix("url:") {
+            return Some(Self::Url(url.into()));
+        }
+        s.strip_prefix("obj:")
+            .and_then(ObjectId::parse)
+            .map(Self::Object)
+    }
+}
+
+/// How an anchor to an object starts.
+const ANCHOR_PREFIX: &str = "pboard://object/";
 
 /// Tag ids, in the order they were added.
 pub type Tags = Arc<[Arc<str>]>;

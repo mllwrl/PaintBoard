@@ -144,6 +144,7 @@ pub fn link(
         rotation: 0.0,
         style: pb_core::Style::default(),
         tags: Default::default(),
+        link: None,
     })
 }
 
@@ -165,6 +166,7 @@ mod tests {
             rotation: 0.0,
             style: pb_core::Style::default(),
             tags: Default::default(),
+            link: None,
         };
         let id = doc
             .apply(Command::Create(vec![data.into()]))
@@ -219,6 +221,7 @@ mod tests {
             rotation: 0.0,
             style: pb_core::Style::default(),
             tags: Default::default(),
+            link: None,
         };
         let id = doc
             .apply(Command::Create(vec![data.into()]))

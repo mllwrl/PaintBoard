@@ -111,6 +111,7 @@ mod tests {
             rotation: 0.0,
             style: Style::default(),
             tags: Default::default(),
+            link: None,
         }
         .into()
     }
@@ -171,6 +172,7 @@ mod tests {
             rotation: 0.0,
             style: Style::default(),
             tags: Default::default(),
+            link: None,
         };
         let ids = doc
             .apply(Command::Create(vec![data.into(), rect(50.0)]))

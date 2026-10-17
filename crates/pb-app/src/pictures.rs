@@ -109,6 +109,7 @@ pub fn image_object(asset: pb_core::AssetId, bounds: Rect) -> ObjectData {
             ..Style::default()
         },
         tags: Default::default(),
+        link: None,
     }
 }
 

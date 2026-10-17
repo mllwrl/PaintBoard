@@ -64,6 +64,7 @@ pub(crate) fn stroke(
             ..Style::default()
         },
         tags: Default::default(),
+        link: None,
     })
 }
 

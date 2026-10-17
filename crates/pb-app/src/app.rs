@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use pb_core::{
-    Command, Document, Object, ObjectData, ObjectId, ObjectKind, Rgba, ShapeKind, Sticky, Style,
-    Text, ZOrder,
+    Command, Document, Link, Object, ObjectData, ObjectId, ObjectKind, Rgba, ShapeKind, Sticky,
+    Style, Text, ZOrder,
 };
 use pb_geom::Camera;
 use pb_geom::kurbo::{Point, Size, Vec2};
@@ -29,7 +29,8 @@ use crate::navigation::Navigation;
 use crate::pictures::{self, Picture};
 use crate::session::Session;
 use crate::ui::{
-    Action, Minimap, Model, STICKY_COLORS, SelectionInfo, ShapeText, TableInfo, TextFormat, Ui,
+    Action, LinkInfo, Minimap, Model, STICKY_COLORS, SelectionInfo, ShapeText, TableInfo,
+    TextFormat, Ui,
 };
 
 pub enum UserEvent {
@@ -111,6 +112,8 @@ pub struct App {
     show_minimap: bool,
     /// Objects it does not let through are faded. Not saved with the board.
     filter: pb_core::Filter,
+    /// The object whose link target is being picked on the board, by clicking it.
+    picking_link: Option<ObjectId>,
     /// Time and screen position of the last left press, to detect double clicks.
     last_press: Option<(Instant, Point)>,
     recognition: Option<PendingRecognition>,
@@ -147,6 +150,7 @@ impl App {
             sticky_color: STICKY_COLORS[0],
             show_minimap: true,
             filter: pb_core::Filter::default(),
+            picking_link: None,
             last_press: None,
             recognition: None,
             next_request: 0,
@@ -195,6 +199,7 @@ impl App {
             }
         }
         let mut overlay = overlay(&self.document, &self.tools, &overrides, self.camera.zoom());
+        overlay.link_badges = self.link_badges().into_iter().map(|(p, _)| p).collect();
         if let Some(edit) = &mut self.editing {
             let engine = self.text.engine();
             // The edit box replaces the selection frame and handles.
@@ -345,6 +350,40 @@ impl App {
             objects: marks,
             view,
         })
+    }
+
+    /// What a link points at, for people.
+    fn describe_link(&self, link: &Link) -> String {
+        match link {
+            Link::Url(url) => url.to_string(),
+            Link::Object(id) => match self.document.get(*id).map(|o| &o.data.kind) {
+                Some(ObjectKind::Frame(f)) if !f.title.trim().is_empty() => {
+                    format!("Frame “{}”", f.title)
+                }
+                Some(ObjectKind::Frame(_)) => "Untitled frame".into(),
+                Some(kind) => match kind.text().filter(|t| !t.trim().is_empty()) {
+                    Some(text) => {
+                        let short: String = text.chars().take(30).collect();
+                        format!("“{}”", short.trim())
+                    }
+                    None => "An object on the board".into(),
+                },
+                None => "A deleted object".into(),
+            },
+        }
+    }
+
+    /// The board's frames with their titles, back to front, except `skip`.
+    fn frame_titles(&self, skip: Option<ObjectId>) -> Vec<(ObjectId, String)> {
+        self.document
+            .objects()
+            .iter()
+            .filter(|o| Some(o.id) != skip)
+            .filter_map(|o| match &o.data.kind {
+                ObjectKind::Frame(frame) => Some((o.id, frame.title.to_string())),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The board's tags with how many objects carry each.
@@ -588,6 +627,20 @@ impl App {
                 .map(|t| t.id.clone())
                 .collect(),
             board_tags: self.document.tags().to_vec(),
+            link: match ids {
+                [id] if self.document.get(*id).is_some()
+                    && !selection.has_locked(&self.document) =>
+                {
+                    Some(LinkInfo {
+                        current: self.document.get(*id).and_then(|o| {
+                            o.data.link.as_ref().map(|link| self.describe_link(link))
+                        }),
+                        frames: self.frame_titles(Some(*id)),
+                        picking: self.picking_link.is_some(),
+                    })
+                }
+                _ => None,
+            },
             can_crop: matches!(ids, [id] if Crop::new(&self.document, *id).is_some()),
             several: ids.len() > 1,
             locked: selection.has_locked(&self.document),
@@ -652,6 +705,53 @@ impl App {
             Action::RemoveTableLines(rows) => {
                 if let Some(command) = self.tools.remove_table_lines(&self.document, rows) {
                     self.apply(command);
+                }
+            }
+            Action::SetLink(text) => {
+                if let ([id], Some(link)) = (self.tools.selection().ids(), Link::from_input(&text))
+                {
+                    let id = *id;
+                    self.apply(Command::SetLink {
+                        ids: vec![id],
+                        link: Some(link),
+                    });
+                }
+            }
+            Action::LinkTo(target) => {
+                if let [id] = self.tools.selection().ids() {
+                    let id = *id;
+                    self.apply(Command::SetLink {
+                        ids: vec![id],
+                        link: Some(Link::Object(target)),
+                    });
+                }
+            }
+            Action::RemoveLink => {
+                if let [id] = self.tools.selection().ids() {
+                    let id = *id;
+                    self.apply(Command::SetLink {
+                        ids: vec![id],
+                        link: None,
+                    });
+                }
+            }
+            Action::PickLinkTarget => {
+                if let [id] = self.tools.selection().ids() {
+                    self.picking_link = Some(*id);
+                }
+            }
+            Action::CopyAnchor => {
+                if let [id] = self.tools.selection().ids() {
+                    pb_platform::clipboard::set_text(&Link::anchor(*id));
+                }
+            }
+            Action::FollowLink => {
+                let link = match self.tools.selection().ids() {
+                    [id] => self.document.get(*id).and_then(|o| o.data.link.clone()),
+                    _ => None,
+                };
+                if let Some(link) = link {
+                    self.follow(&link);
                 }
             }
             Action::ToggleTag(id) => self.toggle_tag(id),
@@ -899,6 +999,56 @@ impl App {
         }
     }
 
+    /// Objects on screen with links, with the top right corners their badges sit by.
+    fn link_badges(&self) -> Vec<(Point, Link)> {
+        let visible = self.camera.visible_world_rect(self.viewport());
+        self.document
+            .objects_in(visible)
+            .into_iter()
+            .filter_map(|o| {
+                let link = o.data.link.clone()?;
+                let corner = o.data.frame().corners()[1];
+                Some((corner, link))
+            })
+            .collect()
+    }
+
+    /// The link whose badge is at `screen` (logical pixels), if any.
+    fn link_at(&self, screen: Point) -> Option<Link> {
+        self.link_badges().into_iter().find_map(|(corner, link)| {
+            let corner = self.camera.world_to_screen(corner);
+            let center = pb_render::link_badge_center(corner, 1.0);
+            ((center - screen).hypot() <= pb_render::LINK_BADGE_RADIUS + 2.0).then_some(link)
+        })
+    }
+
+    /// Opens a web link, or shows and selects the linked object.
+    fn follow(&mut self, link: &Link) {
+        match link {
+            Link::Url(url) => {
+                if !pb_platform::browser::open_url(url) {
+                    dialog::show_error("Could not open the link", url);
+                }
+            }
+            Link::Object(id) => {
+                let Some(object) = self.document.get(*id) else {
+                    dialog::show_error(
+                        "Link target is gone",
+                        "The object this links to has been deleted.",
+                    );
+                    return;
+                };
+                let area = object.data.frame().aabb();
+                let viewport = self.viewport();
+                self.camera.fit(area, viewport, FRAME_MARGIN);
+                self.finish_editing();
+                self.tools.set_active(ToolKind::Select);
+                let unit = self.document.top_level(*id);
+                self.tools.select_only([unit]);
+            }
+        }
+    }
+
     /// Starts a new card below the one being edited.
     fn next_card(&mut self) {
         let Some((id, col, at)) = self.editing.as_ref().and_then(|e| e.next_card()) else {
@@ -992,6 +1142,24 @@ impl App {
                 && (pos - screen).hypot() <= DOUBLE_CLICK_DISTANCE
         });
         self.last_press = Some((now, screen));
+        if let Some(source) = self.picking_link.take() {
+            let target = self.tools.object_at(&self.document, pointer);
+            if let Some(target) = target.filter(|&t| t != source) {
+                self.apply(Command::SetLink {
+                    ids: vec![source],
+                    link: Some(Link::Object(target)),
+                });
+                self.tools.select_only([source]);
+            }
+            return true;
+        }
+        if self.editing.is_none()
+            && self.tools.active() == ToolKind::Select
+            && let Some(link) = self.link_at(screen)
+        {
+            self.follow(&link);
+            return true;
+        }
         if let Some(crop) = &mut self.cropping {
             if crop.press(pointer.world, pointer.zoom) {
                 return true;
@@ -1222,6 +1390,7 @@ impl App {
                 ..Style::default()
             },
             tags: Default::default(),
+            link: None,
         }
     }
 
@@ -1589,9 +1758,12 @@ impl App {
             KeyCode::ArrowRight => self.nudge(1.0, 0.0),
             KeyCode::ArrowUp => self.nudge(0.0, -1.0),
             KeyCode::ArrowDown => self.nudge(0.0, 1.0),
-            // Esc backs out one level: gesture, then tool, then cells, then selection.
+            // Esc backs out one level: picking a link target, gesture, tool, cells, selection.
             KeyCode::Escape => {
-                if !self.tools.cancel() && !self.tools.clear_cells() {
+                if self.picking_link.take().is_none()
+                    && !self.tools.cancel()
+                    && !self.tools.clear_cells()
+                {
                     if self.tools.active() != ToolKind::Select {
                         self.tools.set_active(ToolKind::Select);
                     } else {
@@ -2024,6 +2196,7 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
             Vec::new()
         },
         quick_dot_radius: pb_tools::quick::DOT_RADIUS,
+        link_badges: Vec::new(),
         lines,
         gaps,
         end_handles: end_handles.map(Vec::from).unwrap_or_default(),

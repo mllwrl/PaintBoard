@@ -4,8 +4,8 @@ use kurbo::{Rect, Vec2};
 use pb_geom::Frame;
 
 use crate::{
-    Card, Cell, Column, ConnectorChange, Content, Label, Line, Merge, ObjectId, Spans, StyleChange,
-    Tag,
+    Card, Cell, Column, ConnectorChange, Content, Label, Line, Link, Merge, ObjectId, Spans,
+    StyleChange, Tag,
 };
 
 /// A user-level edit. Each applied command is one undo step and, later, one unit of sync.
@@ -107,6 +107,11 @@ pub enum Command {
         ids: Vec<ObjectId>,
         add: Vec<Arc<str>>,
         remove: Vec<Arc<str>>,
+    },
+    /// Sets or (`None`) removes the link of objects; groups have none.
+    SetLink {
+        ids: Vec<ObjectId>,
+        link: Option<Link>,
     },
     /// Adds a tag to the board, or renames or recolors the tag with its id.
     DefineTag(Tag),

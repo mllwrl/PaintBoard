@@ -216,6 +216,7 @@ mod tests {
             rotation,
             style: Style::default(),
             tags: Default::default(),
+            link: None,
         };
         doc.apply(pb_core::Command::Create(vec![data.into()]))
             .unwrap()

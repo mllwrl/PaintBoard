@@ -288,6 +288,7 @@ mod tests {
             rotation: 0.0,
             style: Style::default(),
             tags: Default::default(),
+            link: None,
         }
     }
 

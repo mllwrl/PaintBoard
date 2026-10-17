@@ -25,6 +25,9 @@ features = [
     "Foundation_Numerics",
     "UI_Input_Inking",
     "Win32_System_WinRT",
+    # Opening links in the browser.
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
 ]
 
 [target.'cfg(windows)'.dependencies]

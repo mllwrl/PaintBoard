@@ -15,8 +15,9 @@ pub use connector::{Anchor, Cap, Connector, ConnectorChange, End, Label, Route};
 pub use document::{Document, Error, Result};
 pub use kanban::{Card, Column, Kanban, KanbanPart};
 pub use object::{
-    Content, Filter, FrameData, Group, HAlign, Image, Ink, InkPoint, Object, ObjectData, ObjectId,
-    ObjectKind, Rgba, Shape, Sticky, Style, StyleChange, Tag, Tags, Text, TextBox, VAlign,
+    Content, Filter, FrameData, Group, HAlign, Image, Ink, InkPoint, Link, Object, ObjectData,
+    ObjectId, ObjectKind, Rgba, Shape, Sticky, Style, StyleChange, Tag, Tags, Text, TextBox,
+    VAlign,
 };
 pub use pb_geom::ShapeKind;
 pub use rich::{Span, Spans, TextMarks};

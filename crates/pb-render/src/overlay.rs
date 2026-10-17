@@ -44,6 +44,8 @@ pub struct Overlay {
     pub connection_active: Option<Point>,
     /// Quick create's "+" dots (world) and their radius in logical pixels.
     pub quick_dots: Vec<Point>,
+    /// Top right corners of objects with links (world); their badges sit beside them.
+    pub link_badges: Vec<Point>,
     pub quick_dot_radius: f64,
 }
 
@@ -63,6 +65,17 @@ pub struct OverlayColors {
     pub handle_fill: Color,
     pub guide: Color,
     pub caret: Color,
+}
+
+/// Link badges: radius, and how far up and right of the object's corner they sit, in
+/// logical pixels.
+pub const LINK_BADGE_RADIUS: f64 = 9.0;
+pub const LINK_BADGE_OFFSET: f64 = 4.0;
+
+/// Where the badge of a corner at `corner` (physical pixels) is drawn, at display `scale`.
+pub fn link_badge_center(corner: Point, scale: f64) -> Point {
+    let d = (LINK_BADGE_OFFSET + LINK_BADGE_RADIUS) * scale;
+    corner + Vec2::new(d, -d)
 }
 
 /// Handle radius in logical pixels.
@@ -215,6 +228,22 @@ pub fn draw_overlay(
         for d in [Vec2::new(arm, 0.0), Vec2::new(0.0, arm)] {
             let line = Line::new(center - d, center + d);
             scene.stroke(&handle_stroke, id, colors.accent, None, &line);
+        }
+    }
+    for &corner in &overlay.link_badges {
+        let center = link_badge_center(to_px(corner), scale);
+        let r = LINK_BADGE_RADIUS * scale;
+        let badge = Circle::new(center, r);
+        scene.fill(Fill::NonZero, id, colors.handle_fill, None, &badge);
+        scene.stroke(&handle_stroke, id, colors.accent, None, &badge);
+        // Two links of a chain, across the badge.
+        let (w, h) = (r * 0.9, r * 0.5);
+        let link = RoundedRect::new(-w / 2.0, -h / 2.0, w / 2.0, h / 2.0, h / 2.0);
+        let along = Vec2::new(1.0, -1.0) * (r * 0.22);
+        for side in [-1.0, 1.0] {
+            let at = Affine::translate((center + along * side).to_vec2())
+                * Affine::rotate(-std::f64::consts::FRAC_PI_4);
+            scene.stroke(&handle_stroke, at, colors.accent, None, &link);
         }
     }
     if let Some(edit) = &overlay.text_edit {

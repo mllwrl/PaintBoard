@@ -21,6 +21,7 @@ fn shape(kind: ObjectKind, bounds: Rect) -> ObjectData {
         rotation: 0.0,
         style: Style::default(),
         tags: Default::default(),
+        link: None,
     }
 }
 

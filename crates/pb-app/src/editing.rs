@@ -954,6 +954,7 @@ impl TextEdit {
             rotation: frame.rotation,
             style: self.style,
             tags: Default::default(),
+            link: None,
         }
     }
 
@@ -1146,6 +1147,7 @@ mod tests {
             rotation: 0.0,
             style: Style::default(),
             tags: Default::default(),
+            link: None,
         };
         let id = doc
             .apply(Command::Create(vec![data.into()]))
@@ -1228,6 +1230,7 @@ mod tests {
             rotation: 0.0,
             style: sticky_style(),
             tags: Default::default(),
+            link: None,
         };
         let id = doc
             .apply(Command::Create(vec![data.into()]))
@@ -1272,6 +1275,7 @@ mod tests {
             rotation: 0.0,
             style: Style::default(),
             tags: Default::default(),
+            link: None,
         };
         let id = doc
             .apply(Command::Create(vec![data.into()]))
@@ -1317,6 +1321,7 @@ mod tests {
             rotation: 0.0,
             style,
             tags: Default::default(),
+            link: None,
         };
         let id = doc
             .apply(Command::Create(vec![data.into()]))
@@ -1398,6 +1403,7 @@ mod tests {
             rotation: 0.0,
             style: Style::default(),
             tags: Default::default(),
+            link: None,
         };
         let id = doc
             .apply(Command::Create(vec![data.into()]))
@@ -1449,6 +1455,7 @@ mod tests {
             rotation: 0.0,
             style: Table::style(),
             tags: Default::default(),
+            link: None,
         };
         let id = doc
             .apply(Command::Create(vec![data.into()]))
@@ -1494,6 +1501,7 @@ mod tests {
             rotation: 0.0,
             style: Kanban::style(),
             tags: Default::default(),
+            link: None,
         };
         let id = doc
             .apply(Command::Create(vec![data.into()]))
@@ -1570,6 +1578,7 @@ mod tests {
             rotation: 0.0,
             style: Style::default(),
             tags: Default::default(),
+            link: None,
         };
         let id = doc
             .apply(Command::Create(vec![line.into()]))

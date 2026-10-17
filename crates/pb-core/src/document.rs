@@ -23,8 +23,8 @@ use crate::rich::{self, Span, Spans};
 use crate::command::reorder;
 use crate::{
     Applied, AssetId, Assets, Command, Connector, Content, End, FrameData, Group, HAlign, Image,
-    Ink, Line, Object, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Sticky, Style, StyleChange,
-    Tag, Tags, Text, VAlign, ZOrder,
+    Ink, Line, Link, Object, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Sticky, Style,
+    StyleChange, Tag, Tags, Text, VAlign, ZOrder,
 };
 
 /// Font size of text objects stored without one.
@@ -42,6 +42,8 @@ mod key {
     pub const TAGS: &str = "tags";
     /// Ids of an object's tags, joined by `;`.
     pub const OBJECT_TAGS: &str = "tags";
+    /// Where an object links to: `url:<address>` or `obj:<object id>`.
+    pub const LINK: &str = "link";
 
     pub const ID: &str = "id";
     pub const KIND: &str = "kind";
@@ -629,6 +631,19 @@ impl Document {
                             let meta = self.tree.get_meta(self.nodes[&object.id])?;
                             write_tags(&meta, &tags)?;
                         }
+                    }
+                }
+            }
+            Command::SetLink { ids, link } => {
+                if let Some(&id) = ids.iter().find(|&&id| self.get(id).is_none()) {
+                    return Err(Error::UnknownObject(id));
+                }
+                for id in ids {
+                    let meta = self.tree.get_meta(self.nodes[&id])?;
+                    match &link {
+                        Some(link) => meta.insert(key::LINK, link.to_stored())?,
+                        None if meta.get(key::LINK).is_some() => meta.delete(key::LINK)?,
+                        None => {}
                     }
                 }
             }
@@ -1305,6 +1320,9 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
     meta.insert(key::KIND, data.kind.as_str())?;
     if !data.tags.is_empty() {
         write_tags(meta, &data.tags)?;
+    }
+    if let Some(link) = &data.link {
+        meta.insert(key::LINK, link.to_stored())?;
     }
     let spans = data.kind.spans();
     if !spans.is_empty() {
@@ -1994,6 +2012,7 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
                 .unwrap_or_default(),
         },
         tags: read_object_tags(meta),
+        link: get_str(meta, key::LINK).and_then(|s| Link::from_stored(&s)),
     })
 }
 
@@ -2010,6 +2029,7 @@ mod tests {
             rotation: 0.0,
             style: Style::default(),
             tags: Default::default(),
+            link: None,
         }
     }
 
@@ -2858,6 +2878,64 @@ mod tests {
     }
 
     #[test]
+    fn links_point_at_pages_or_objects() {
+        let mut doc = Document::new();
+        let a = create(&mut doc, rect(0.0, 0.0, 10.0, 10.0));
+        let b = create(&mut doc, rect(20.0, 0.0, 10.0, 10.0));
+        // An anchor copied from `b` links to it.
+        let link = Link::from_input(&Link::anchor(b)).unwrap();
+        assert_eq!(link, Link::Object(b));
+        doc.apply(Command::SetLink {
+            ids: vec![a],
+            link: Some(link.clone()),
+        })
+        .unwrap();
+        assert_eq!(doc.get(a).unwrap().data.link, Some(link.clone()));
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(loaded.get(a).unwrap().data.link, Some(link));
+        doc.apply(Command::SetLink {
+            ids: vec![a],
+            link: None,
+        })
+        .unwrap();
+        assert_eq!(doc.get(a).unwrap().data.link, None);
+        // Groups take no link.
+        doc.apply(Command::Group(vec![a, b])).unwrap();
+        let group = doc.roots()[0];
+        assert!(
+            doc.apply(Command::SetLink {
+                ids: vec![group],
+                link: None
+            })
+            .is_err()
+        );
+        // Web addresses, with or without a scheme; nothing else.
+        let url = |s: &str| match Link::from_input(s) {
+            Some(Link::Url(u)) => Some(u.to_string()),
+            _ => None,
+        };
+        assert_eq!(url("https://a.org/x"), Some("https://a.org/x".into()));
+        assert_eq!(
+            url("example.com/page"),
+            Some("https://example.com/page".into())
+        );
+        assert_eq!(
+            url("localhost.dev:8080"),
+            Some("https://localhost.dev:8080".into())
+        );
+        assert_eq!(url("mailto:me@a.org"), Some("mailto:me@a.org".into()));
+        for bad in [
+            "javascript:alert(1)",
+            "file:///c:/x",
+            "just words",
+            "",
+            "pboard://object/x",
+        ] {
+            assert_eq!(Link::from_input(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
     fn tags_are_defined_once_and_put_on_objects() {
         let mut doc = Document::new();
         let a = create(&mut doc, rect(0.0, 0.0, 10.0, 10.0));
@@ -3117,6 +3195,7 @@ mod tests {
             rotation: 0.0,
             style: Style::default(),
             tags: Default::default(),
+            link: None,
         }
     }
 
