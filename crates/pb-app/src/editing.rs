@@ -953,6 +953,7 @@ impl TextEdit {
             bounds,
             rotation: frame.rotation,
             style: self.style,
+            tags: Default::default(),
         }
     }
 
@@ -1144,6 +1145,7 @@ mod tests {
             bounds: Rect::new(10.0, 10.0, 60.0, 34.0),
             rotation: 0.0,
             style: Style::default(),
+            tags: Default::default(),
         };
         let id = doc
             .apply(Command::Create(vec![data.into()]))
@@ -1225,6 +1227,7 @@ mod tests {
             bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
             rotation: 0.0,
             style: sticky_style(),
+            tags: Default::default(),
         };
         let id = doc
             .apply(Command::Create(vec![data.into()]))
@@ -1268,6 +1271,7 @@ mod tests {
             bounds,
             rotation: 0.0,
             style: Style::default(),
+            tags: Default::default(),
         };
         let id = doc
             .apply(Command::Create(vec![data.into()]))
@@ -1312,6 +1316,7 @@ mod tests {
             bounds,
             rotation: 0.0,
             style,
+            tags: Default::default(),
         };
         let id = doc
             .apply(Command::Create(vec![data.into()]))
@@ -1392,6 +1397,7 @@ mod tests {
             bounds,
             rotation: 0.0,
             style: Style::default(),
+            tags: Default::default(),
         };
         let id = doc
             .apply(Command::Create(vec![data.into()]))
@@ -1442,6 +1448,7 @@ mod tests {
             bounds: Rect::new(0.0, 0.0, 200.0, 100.0),
             rotation: 0.0,
             style: Table::style(),
+            tags: Default::default(),
         };
         let id = doc
             .apply(Command::Create(vec![data.into()]))
@@ -1486,6 +1493,7 @@ mod tests {
             kind: ObjectKind::Kanban(kanban.clone()),
             rotation: 0.0,
             style: Kanban::style(),
+            tags: Default::default(),
         };
         let id = doc
             .apply(Command::Create(vec![data.into()]))
@@ -1561,6 +1569,7 @@ mod tests {
             bounds: Rect::ZERO,
             rotation: 0.0,
             style: Style::default(),
+            tags: Default::default(),
         };
         let id = doc
             .apply(Command::Create(vec![line.into()]))

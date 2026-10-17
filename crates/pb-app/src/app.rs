@@ -109,6 +109,8 @@ pub struct App {
     sticky_color: Rgba,
     /// Whether the minimap is shown.
     show_minimap: bool,
+    /// Objects it does not let through are faded. Not saved with the board.
+    filter: pb_core::Filter,
     /// Time and screen position of the last left press, to detect double clicks.
     last_press: Option<(Instant, Point)>,
     recognition: Option<PendingRecognition>,
@@ -144,6 +146,7 @@ impl App {
             cropping: None,
             sticky_color: STICKY_COLORS[0],
             show_minimap: true,
+            filter: pb_core::Filter::default(),
             last_press: None,
             recognition: None,
             next_request: 0,
@@ -234,6 +237,7 @@ impl App {
                 hidden: &hidden,
                 previews: &previews,
                 overlay: &overlay,
+                filter: &self.filter,
             },
             &mut self.text,
             &mut self.images,
@@ -267,6 +271,9 @@ impl App {
             selection: self.selection_info(),
             text_format: self.text_format(),
             minimap: self.minimap(),
+            tags: self.tag_counts(),
+            fill_colors: self.fill_colors(),
+            filter: &self.filter,
         };
         let actions = match &mut self.ui {
             Some(ui) => ui.run(&window, &model),
@@ -338,6 +345,104 @@ impl App {
             objects: marks,
             view,
         })
+    }
+
+    /// The board's tags with how many objects carry each.
+    fn tag_counts(&self) -> Vec<(pb_core::Tag, usize)> {
+        let objects = self.document.objects();
+        self.document
+            .tags()
+            .iter()
+            .map(|tag| {
+                let count = objects
+                    .iter()
+                    .filter(|o| o.data.tags.contains(&tag.id))
+                    .count();
+                (tag.clone(), count)
+            })
+            .collect()
+    }
+
+    /// Fill colors of sticky notes and shapes on the board, most used first, for the filter
+    /// menu.
+    fn fill_colors(&self) -> Vec<Rgba> {
+        let mut counts: Vec<(Rgba, usize)> = Vec::new();
+        for o in self.document.objects() {
+            let data = &o.data;
+            if !matches!(data.kind, ObjectKind::Sticky(_) | ObjectKind::Shape(_))
+                || data.style.fill.to_bytes()[3] == 0
+            {
+                continue;
+            }
+            match counts.iter_mut().find(|(c, _)| *c == data.style.fill) {
+                Some((_, n)) => *n += 1,
+                None => counts.push((data.style.fill, 1)),
+            }
+        }
+        counts.sort_by_key(|c| std::cmp::Reverse(c.1));
+        counts.into_iter().take(16).map(|(c, _)| c).collect()
+    }
+
+    /// Unlocked selected objects, groups expanded.
+    fn selected_leaves(&self) -> Vec<&pb_core::Object> {
+        self.tools
+            .selection()
+            .ids()
+            .iter()
+            .filter(|&&id| !self.document.is_locked(id))
+            .flat_map(|&id| self.document.leaves(id))
+            .collect()
+    }
+
+    /// Puts tag `id` on the unlocked selection, or takes it off if all of it has the tag.
+    fn toggle_tag(&mut self, id: std::sync::Arc<str>) {
+        let leaves = self.selected_leaves();
+        if leaves.is_empty() {
+            return;
+        }
+        let all = leaves.iter().all(|o| o.data.tags.contains(&id));
+        let ids = leaves.iter().map(|o| o.id).collect();
+        let (add, remove) = if all {
+            (Vec::new(), vec![id])
+        } else {
+            (vec![id], Vec::new())
+        };
+        self.apply(Command::SetTags { ids, add, remove });
+    }
+
+    /// Puts the tag called `name` on the selection, adding it to the board if there is no
+    /// such tag yet; one undo step.
+    fn new_tag(&mut self, name: String) {
+        let existing = self
+            .document
+            .tags()
+            .iter()
+            .find(|t| t.name.to_lowercase() == name.to_lowercase())
+            .map(|t| t.id.clone());
+        self.document.begin_undo_group();
+        let id = match existing {
+            Some(id) => id,
+            None => {
+                let colors = pb_core::Tag::COLORS;
+                let tag = pb_core::Tag {
+                    id: self.document.new_line_id().into(),
+                    name: name.into(),
+                    color: colors[self.document.tags().len() % colors.len()],
+                };
+                let id = tag.id.clone();
+                self.apply(Command::DefineTag(tag));
+                id
+            }
+        };
+        let ids: Vec<_> = self.selected_leaves().iter().map(|o| o.id).collect();
+        if !ids.is_empty() {
+            self.apply(Command::SetTags {
+                ids,
+                add: vec![id],
+                remove: Vec::new(),
+            });
+        }
+        self.document.end_undo_group();
     }
 
     /// What the formatting bar needs while text that takes styles is edited.
@@ -468,6 +573,21 @@ impl App {
                 .tools
                 .kanban_columns(&self.document)
                 .map(|n| (n, self.tools.selected_card(&self.document).is_some())),
+            tags_on_all: self
+                .document
+                .tags()
+                .iter()
+                .filter(|t| leaves.iter().all(|o| o.data.tags.contains(&t.id)))
+                .map(|t| t.id.clone())
+                .collect(),
+            tags_on_some: self
+                .document
+                .tags()
+                .iter()
+                .filter(|t| leaves.iter().any(|o| o.data.tags.contains(&t.id)))
+                .map(|t| t.id.clone())
+                .collect(),
+            board_tags: self.document.tags().to_vec(),
             can_crop: matches!(ids, [id] if Crop::new(&self.document, *id).is_some()),
             several: ids.len() > 1,
             locked: selection.has_locked(&self.document),
@@ -534,6 +654,29 @@ impl App {
                     self.apply(command);
                 }
             }
+            Action::ToggleTag(id) => self.toggle_tag(id),
+            Action::NewTag(name) => self.new_tag(name),
+            Action::RecolorTag(id) => {
+                if let Some(tag) = self.document.tag(&id) {
+                    let colors = pb_core::Tag::COLORS;
+                    let next = colors
+                        .iter()
+                        .position(|&c| c == tag.color)
+                        .map_or(0, |i| (i + 1) % colors.len());
+                    let tag = pb_core::Tag {
+                        color: colors[next],
+                        ..tag.clone()
+                    };
+                    self.apply(Command::DefineTag(tag));
+                }
+            }
+            Action::RemoveTag(id) => {
+                self.filter.tags.retain(|t| *t != id);
+                self.apply(Command::RemoveTag(id));
+            }
+            Action::FilterTag(id) => self.filter.toggle_tag(&id),
+            Action::FilterColor(color) => self.filter.toggle_color(color),
+            Action::ClearFilter => self.filter = pb_core::Filter::default(),
             Action::AddKanbanColumn => {
                 if let Some(command) = self.tools.add_kanban_column(&self.document) {
                     self.apply(command);
@@ -1078,6 +1221,7 @@ impl App {
                 opacity: 1.0,
                 ..Style::default()
             },
+            tags: Default::default(),
         }
     }
 

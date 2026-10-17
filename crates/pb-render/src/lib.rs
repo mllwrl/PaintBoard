@@ -65,7 +65,12 @@ pub struct View<'a> {
     /// Objects the active tool is about to create, shown on top.
     pub previews: &'a [ObjectData],
     pub overlay: &'a Overlay,
+    /// Objects it does not let through are faded.
+    pub filter: &'a pb_core::Filter,
 }
+
+/// Opacity of objects a filter hides, relative to their own.
+const FILTERED_OPACITY: f64 = 0.15;
 
 /// Ids of the objects that may show in `visible` at `zoom`, back to front: those the
 /// spatial index finds there (with room for frame titles and sticky shadows), the ones
@@ -147,6 +152,15 @@ pub fn build_scene(
     let frames = shown.iter().filter(|d| d.kind.is_frame());
     let others = shown.iter().filter(|d| !d.kind.is_frame());
     for data in frames.chain(others).copied().chain(view.previews) {
+        let faded;
+        let data = if view.filter.matches(data) {
+            data
+        } else {
+            let mut copy = data.clone();
+            copy.style.opacity *= FILTERED_OPACITY;
+            faded = copy;
+            &faded
+        };
         if let ObjectKind::Connector(c) = &data.kind {
             let width = data.style.stroke_width;
             let (_, _, path) = pb_core::connector::layout(c, width, current, obstacles_in);
@@ -172,6 +186,10 @@ pub fn build_scene(
             zoom,
         };
         objects::draw_object(scene, transform, data, resources);
+        let tags: Vec<_> = data.tags.iter().filter_map(|t| doc.tag(t)).collect();
+        if !tags.is_empty() {
+            objects::draw_tags(scene, transform, data, &tags, text);
+        }
     }
 
     overlay::draw_overlay(

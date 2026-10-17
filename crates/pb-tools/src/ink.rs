@@ -63,6 +63,7 @@ pub(crate) fn stroke(
             opacity: if marker { MARKER_OPACITY } else { 1.0 },
             ..Style::default()
         },
+        tags: Default::default(),
     })
 }
 

@@ -107,6 +107,15 @@ impl ObjectKind {
         matches!(self, Self::Frame(_))
     }
 
+    /// Whether the fill color shows: sticky notes, shapes, frames, tables and kanban
+    /// boards.
+    pub fn has_fill(&self) -> bool {
+        matches!(
+            self,
+            Self::Sticky(_) | Self::Shape(_) | Self::Frame(_) | Self::Table(_) | Self::Kanban(_)
+        )
+    }
+
     /// The text of a text object, sticky note or shape, or a frame's title.
     pub fn text(&self) -> Option<&str> {
         match self {
@@ -586,6 +595,75 @@ pub struct ObjectData {
     /// Rotation around the center of `bounds`, in radians, clockwise on screen.
     pub rotation: f64,
     pub style: Style,
+    /// Ids of the board's tags on it (see [`crate::Document::tags`]); unknown ones are
+    /// ignored.
+    pub tags: Tags,
+}
+
+/// Tag ids, in the order they were added.
+pub type Tags = Arc<[Arc<str>]>;
+
+/// A label objects can carry, defined once per board.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tag {
+    /// Unique across replicas (see [`crate::Document::new_line_id`]).
+    pub id: Arc<str>,
+    pub name: Arc<str>,
+    pub color: Rgba,
+}
+
+impl Tag {
+    /// Colors offered for new tags, in the order they are handed out.
+    pub const COLORS: [Rgba; 8] = [
+        Rgba::rgb(0xE5, 0x48, 0x4D),
+        Rgba::rgb(0xF5, 0x9E, 0x0B),
+        Rgba::rgb(0x22, 0xA0, 0x6B),
+        Rgba::rgb(0x3B, 0x82, 0xF6),
+        Rgba::rgb(0x8B, 0x5C, 0xF6),
+        Rgba::rgb(0xEC, 0x48, 0x99),
+        Rgba::rgb(0x14, 0xB8, 0xA6),
+        Rgba::rgb(0x6B, 0x72, 0x80),
+    ];
+}
+
+/// What a filter on the board lets through: objects with any of `tags`, or filled with
+/// any of `colors`. Empty, it lets everything through.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Filter {
+    pub tags: Vec<Arc<str>>,
+    pub colors: Vec<Rgba>,
+}
+
+impl Filter {
+    pub fn is_empty(&self) -> bool {
+        self.tags.is_empty() && self.colors.is_empty()
+    }
+
+    pub fn matches(&self, data: &ObjectData) -> bool {
+        self.is_empty()
+            || data.tags.iter().any(|t| self.tags.contains(t))
+            || (data.kind.has_fill() && self.colors.contains(&data.style.fill))
+    }
+
+    /// Turns `tag` on or off.
+    pub fn toggle_tag(&mut self, tag: &Arc<str>) {
+        match self.tags.iter().position(|t| t == tag) {
+            Some(i) => {
+                self.tags.remove(i);
+            }
+            None => self.tags.push(tag.clone()),
+        }
+    }
+
+    /// Turns `color` on or off.
+    pub fn toggle_color(&mut self, color: Rgba) {
+        match self.colors.iter().position(|&c| c == color) {
+            Some(i) => {
+                self.colors.remove(i);
+            }
+            None => self.colors.push(color),
+        }
+    }
 }
 
 impl ObjectData {

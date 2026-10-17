@@ -2026,6 +2026,7 @@ fn connector(start: End, end: End, route: Route) -> ObjectData {
         bounds: Rect::from_points(start.point(), end.point()),
         rotation: 0.0,
         style: Style::default(),
+        tags: Default::default(),
     }
 }
 
@@ -2037,6 +2038,7 @@ fn drawn(doc: &Document, kind: Drawn, bounds: Rect) -> ObjectData {
             bounds,
             rotation: 0.0,
             style: Style::default(),
+            tags: Default::default(),
         },
         Drawn::Kanban => {
             let kanban = Kanban::starter(|| doc.new_line_id());
@@ -2045,6 +2047,7 @@ fn drawn(doc: &Document, kind: Drawn, bounds: Rect) -> ObjectData {
                 kind: ObjectKind::Kanban(kanban),
                 rotation: 0.0,
                 style: Kanban::style(),
+                tags: Default::default(),
             }
         }
         Drawn::Table => ObjectData {
@@ -2052,6 +2055,7 @@ fn drawn(doc: &Document, kind: Drawn, bounds: Rect) -> ObjectData {
             bounds,
             rotation: 0.0,
             style: Table::style(),
+            tags: Default::default(),
         },
         Drawn::Frame => {
             let count = doc
@@ -2069,6 +2073,7 @@ fn drawn(doc: &Document, kind: Drawn, bounds: Rect) -> ObjectData {
                     stroke_width: 0.0,
                     ..Style::default()
                 },
+                tags: Default::default(),
             }
         }
     }

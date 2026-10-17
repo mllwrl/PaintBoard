@@ -76,6 +76,7 @@ mod tests {
             bounds: Rect::new(0.0, 0.0, 300.0, 100.0),
             rotation: 0.0,
             style: Style::default(),
+            tags: Default::default(),
         };
         (data, table)
     }

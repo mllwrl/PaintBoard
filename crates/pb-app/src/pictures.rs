@@ -108,6 +108,7 @@ pub fn image_object(asset: pb_core::AssetId, bounds: Rect) -> ObjectData {
             stroke_width: 0.0,
             ..Style::default()
         },
+        tags: Default::default(),
     }
 }
 

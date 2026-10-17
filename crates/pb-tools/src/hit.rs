@@ -182,6 +182,7 @@ mod tests {
                     bounds,
                     rotation: 0.0,
                     style: Style::default(),
+                    tags: Default::default(),
                 };
                 doc.apply(Command::Create(vec![data.into()]))
                     .unwrap()
@@ -218,6 +219,7 @@ mod tests {
             bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
             rotation: 0.0,
             style: Style::default(),
+            tags: Default::default(),
         };
         let id = doc
             .apply(Command::Create(vec![data.into()]))

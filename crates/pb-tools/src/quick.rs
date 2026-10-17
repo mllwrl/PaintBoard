@@ -143,6 +143,7 @@ pub fn link(
         bounds: Rect::from_points(start.point(), finish.point()),
         rotation: 0.0,
         style: pb_core::Style::default(),
+        tags: Default::default(),
     })
 }
 
@@ -163,6 +164,7 @@ mod tests {
             bounds: Rect::new(0.0, 0.0, 100.0, 60.0),
             rotation: 0.0,
             style: pb_core::Style::default(),
+            tags: Default::default(),
         };
         let id = doc
             .apply(Command::Create(vec![data.into()]))
@@ -216,6 +218,7 @@ mod tests {
             bounds: Rect::new(0.0, 0.0, 100.0, 60.0),
             rotation: 0.0,
             style: pb_core::Style::default(),
+            tags: Default::default(),
         };
         let id = doc
             .apply(Command::Create(vec![data.into()]))

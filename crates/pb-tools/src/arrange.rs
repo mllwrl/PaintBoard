@@ -109,6 +109,7 @@ mod tests {
                     bounds,
                     rotation: 0.0,
                     style: Style::default(),
+                    tags: Default::default(),
                 }
                 .into()
             })

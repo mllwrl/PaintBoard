@@ -158,6 +158,7 @@ mod tests {
             bounds: Rect::ZERO,
             rotation: 0.0,
             style: Style::default(),
+            tags: Default::default(),
         };
         doc.apply(Command::Create(vec![data.into()]))
             .unwrap()

@@ -21,7 +21,7 @@ use pb_tools::{InkStyle, ToolKind};
 use winit::window::Window;
 
 /// Something the user asked for through the UI.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     Tool(ToolKind),
     InkStyle {
@@ -79,6 +79,20 @@ pub enum Action {
     RemoveTableLines(bool),
     /// Merges the selected table cells (`true`), or splits the merged ones among them.
     MergeCells(bool),
+    /// Puts a tag on the selection, or takes it off if everything selected has it.
+    ToggleTag(std::sync::Arc<str>),
+    /// Adds a tag with this name to the board and puts it on the selection.
+    NewTag(String),
+    /// Gives a tag the next color.
+    RecolorTag(std::sync::Arc<str>),
+    /// Removes a tag from the board.
+    RemoveTag(std::sync::Arc<str>),
+    /// Turns filtering by a tag on or off.
+    FilterTag(std::sync::Arc<str>),
+    /// Turns filtering by a fill color on or off.
+    FilterColor(Rgba),
+    /// Shows everything again.
+    ClearFilter,
     /// Adds a column at the right of the selected kanban board.
     AddKanbanColumn,
     /// Removes the right column of the selected kanban board.
@@ -115,6 +129,11 @@ pub struct Model<'a> {
     pub text_format: Option<TextFormat>,
     /// The board in small; `None` when hidden.
     pub minimap: Option<Minimap>,
+    /// The board's tags with how many objects carry each, by name.
+    pub tags: Vec<(pb_core::Tag, usize)>,
+    /// Fill colors on the board, to filter by.
+    pub fill_colors: Vec<Rgba>,
+    pub filter: &'a pb_core::Filter,
 }
 
 /// What the minimap shows, in world coordinates.
@@ -176,6 +195,11 @@ pub struct SelectionInfo {
     /// A single kanban board is selected: its number of columns, and whether a card of it
     /// is selected.
     pub kanban: Option<(usize, bool)>,
+    /// Tags every selected object has, and tags only some have.
+    pub tags_on_all: Vec<std::sync::Arc<str>>,
+    pub tags_on_some: Vec<std::sync::Arc<str>>,
+    /// The board's tags, to offer.
+    pub board_tags: Vec<pb_core::Tag>,
     /// A single unlocked image is selected.
     pub can_crop: bool,
     pub several: bool,
@@ -200,6 +224,7 @@ enum Popup {
     Stroke,
     Text,
     Opacity,
+    Tags,
 }
 
 /// Font sizes offered for shape text, in logical pixels at 100% zoom.
@@ -253,6 +278,8 @@ pub struct Ui {
     paint_jobs: Vec<egui::ClippedPrimitive>,
     pixels_per_point: f32,
     popup: Option<Popup>,
+    /// Name typed for a new tag.
+    new_tag: String,
     repaint_at: Option<Instant>,
 }
 
@@ -277,6 +304,7 @@ impl Ui {
             paint_jobs: Vec::new(),
             pixels_per_point: 1.0,
             popup: None,
+            new_tag: String::new(),
             repaint_at: None,
         }
     }
@@ -319,6 +347,7 @@ impl Ui {
         let input = self.state.take_egui_input(window);
         let mut actions = Vec::new();
         let popup = &mut self.popup;
+        let new_tag = &mut self.new_tag;
         let output = self.ctx.run_pass(input, |ctx| {
             board_menu(ctx, model, &mut actions);
             toolbar(ctx, model, &mut actions);
@@ -327,7 +356,7 @@ impl Ui {
                 minimap(ctx, map, view, &mut actions);
             }
             if let Some(selection) = &model.selection {
-                selection_toolbar(ctx, selection, popup, &mut actions);
+                selection_toolbar(ctx, selection, popup, new_tag, &mut actions);
             } else {
                 *popup = None;
             }
@@ -467,6 +496,13 @@ fn board_menu(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                             }
                         }
                     });
+                    let filter = model.filter;
+                    let label = if filter.is_empty() {
+                        RichText::new("Filter")
+                    } else {
+                        RichText::new("Filter ●").color(Color32::from_rgb(0x3B, 0x82, 0xF6))
+                    };
+                    ui.menu_button(label, |ui| filter_menu(ui, model, actions));
                 });
             });
         });
@@ -845,6 +881,7 @@ fn selection_toolbar(
     ctx: &Context,
     selection: &SelectionInfo,
     popup: &mut Option<Popup>,
+    new_tag: &mut String,
     actions: &mut Vec<Action>,
 ) {
     let r = selection.screen;
@@ -983,6 +1020,8 @@ fn selection_toolbar(
                     {
                         actions.push(Action::Crop);
                     }
+                    let tags = ui.button("Tags").on_hover_text("Tags on the selection");
+                    toggle(popup, Popup::Tags, tags.clicked());
                     let opacity = format!("{:.0}%", style.opacity * 100.0);
                     let opacity = ui.button(opacity).on_hover_text("Opacity");
                     toggle(popup, Popup::Opacity, opacity.clicked());
@@ -1119,6 +1158,40 @@ fn selection_toolbar(
                         }
                     });
                 }
+                Popup::Tags => {
+                    for tag in &selection.board_tags {
+                        let all = selection.tags_on_all.contains(&tag.id);
+                        let some = selection.tags_on_some.contains(&tag.id);
+                        let mark = if all {
+                            "✔"
+                        } else if some {
+                            "–"
+                        } else {
+                            "  "
+                        };
+                        ui.horizontal(|ui| {
+                            tag_dot(ui, tag.color);
+                            let label = format!("{mark}  {}", tag.name);
+                            if ui.selectable_label(all, label).clicked() {
+                                actions.push(Action::ToggleTag(tag.id.clone()));
+                            }
+                        });
+                    }
+                    ui.horizontal(|ui| {
+                        let field = ui.add(
+                            egui::TextEdit::singleline(new_tag)
+                                .hint_text("New tag")
+                                .desired_width(140.0),
+                        );
+                        let entered =
+                            field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let add = ui.add_enabled(!new_tag.trim().is_empty(), Button::new("Add"));
+                        if (entered || add.clicked()) && !new_tag.trim().is_empty() {
+                            actions.push(Action::NewTag(new_tag.trim().to_owned()));
+                            new_tag.clear();
+                        }
+                    });
+                }
                 Popup::Opacity => {
                     let percent = selection.style.opacity * 100.0;
                     style_slider(ui, percent, 0.0..=100.0, "%", actions, |v| StyleChange {
@@ -1136,6 +1209,69 @@ fn selection_toolbar(
     {
         *popup = None;
     }
+}
+
+/// Tags and fill colors to show only some objects, and managing the board's tags.
+fn filter_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
+    let filter = model.filter;
+    ui.strong("Tags");
+    if model.tags.is_empty() {
+        ui.weak("No tags yet: select objects and use Tags");
+    }
+    for (tag, count) in &model.tags {
+        ui.horizontal(|ui| {
+            if tag_dot(ui, tag.color)
+                .on_hover_text("Change the color")
+                .clicked()
+            {
+                actions.push(Action::RecolorTag(tag.id.clone()));
+            }
+            let on = filter.tags.contains(&tag.id);
+            let label = format!("{} ({count})", tag.name);
+            if ui
+                .selectable_label(on, label)
+                .on_hover_text("Show objects with this tag")
+                .clicked()
+            {
+                actions.push(Action::FilterTag(tag.id.clone()));
+            }
+            if ui
+                .small_button("×")
+                .on_hover_text("Remove the tag from the board")
+                .clicked()
+            {
+                actions.push(Action::RemoveTag(tag.id.clone()));
+            }
+        });
+    }
+    if !model.fill_colors.is_empty() {
+        ui.separator();
+        ui.strong("Colors");
+        ui.horizontal_wrapped(|ui| {
+            for &color in &model.fill_colors {
+                let on = filter.colors.contains(&color);
+                let tip = "Show objects filled with this color";
+                if swatch_button(ui, color, on, tip).clicked() {
+                    actions.push(Action::FilterColor(color));
+                }
+            }
+        });
+    }
+    if !filter.is_empty() {
+        ui.separator();
+        if ui.button("Show everything").clicked() {
+            actions.push(Action::ClearFilter);
+            ui.close();
+        }
+    }
+}
+
+/// A small round button in a tag's color.
+fn tag_dot(ui: &mut egui::Ui, color: Rgba) -> Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click());
+    ui.painter()
+        .circle_filled(rect.center(), 6.0, to_color32(color));
+    response
 }
 
 /// Bold, italic, underline, strikethrough and colors for the text being edited, above it.

@@ -502,6 +502,65 @@ pub fn painted_bounds(data: &ObjectData) -> Rect {
 }
 
 /// How far an object paints outside its bounds: half its outline, or a sticky's shadow.
+/// Tag pills: font size relative to a sticky note's side, or in world units under other
+/// objects.
+const STICKY_TAG_FONT: f64 = 0.07;
+const TAG_FONT: f64 = 12.0;
+
+/// Draws the names of `tags` as colored pills: along the bottom inside a sticky note,
+/// under other objects. `transform` maps world to physical pixels.
+pub(crate) fn draw_tags(
+    scene: &mut Scene,
+    transform: Affine,
+    data: &ObjectData,
+    tags: &[&pb_core::Tag],
+    text: &mut TextRenderer,
+) {
+    let b = data.bounds;
+    let (size, inside) = match data.kind {
+        ObjectKind::Sticky(_) => (b.width().min(b.height()) * STICKY_TAG_FONT, true),
+        _ => (TAG_FONT, false),
+    };
+    let height = size * 1.6;
+    let pad = size * 0.6;
+    let gap = size * 0.4;
+    let y = if inside {
+        b.y1 - pad - height
+    } else {
+        b.y1 + gap * 1.5
+    };
+    let mut x = b.x0 + if inside { pad } else { 0.0 };
+    let right = if inside { b.x1 - pad } else { f64::INFINITY };
+    let transform = transform * data.frame().transform();
+    let alpha = data.style.opacity.clamp(0.0, 1.0) as f32;
+    for tag in tags {
+        let layout = text.engine.layout(&tag.name, size, None);
+        let width = layout.width + 2.0 * pad;
+        if x + width > right && x > b.x0 + pad {
+            break;
+        }
+        let pill = RoundedRect::new(x, y, x + width, y + height, height / 2.0);
+        let fill = color(tag.color).multiply_alpha(alpha);
+        scene.fill(Fill::NonZero, transform, fill, None, &pill);
+        let [r, g, bl, _] = tag.color.to_bytes();
+        let light = 0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(bl) > 160.0;
+        let ink = if light {
+            Color::from_rgb8(0x1F, 0x29, 0x37)
+        } else {
+            Color::from_rgb8(0xFF, 0xFF, 0xFF)
+        };
+        let top = y + (height - layout.height) / 2.0;
+        draw_text(
+            scene,
+            transform,
+            (x + pad, top),
+            &layout,
+            ink.multiply_alpha(alpha),
+        );
+        x += width + gap;
+    }
+}
+
 fn paint_padding(data: &ObjectData) -> f64 {
     match data.kind {
         ObjectKind::Sticky(_) => {

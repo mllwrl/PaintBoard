@@ -215,6 +215,7 @@ mod tests {
             bounds,
             rotation,
             style: Style::default(),
+            tags: Default::default(),
         };
         doc.apply(pb_core::Command::Create(vec![data.into()]))
             .unwrap()

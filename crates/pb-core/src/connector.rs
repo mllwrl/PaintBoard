@@ -287,6 +287,7 @@ mod tests {
             bounds: Rect::new(x, y, x + w, y + h),
             rotation: 0.0,
             style: Style::default(),
+            tags: Default::default(),
         }
     }
 

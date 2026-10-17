@@ -20,6 +20,7 @@ fn shape(kind: ObjectKind, bounds: Rect) -> ObjectData {
         bounds,
         rotation: 0.0,
         style: Style::default(),
+        tags: Default::default(),
     }
 }
 

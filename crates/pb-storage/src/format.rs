@@ -150,6 +150,7 @@ mod tests {
             bounds: Rect::new(1.0, 2.0, 30.0, 40.0),
             rotation: 0.5,
             style: Style::default(),
+            tags: Default::default(),
         };
         let ids = doc
             .apply(Command::Create(vec![data.clone().into(), data.into()]))
@@ -187,6 +188,7 @@ mod tests {
             bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
             rotation: 0.0,
             style: Style::default(),
+            tags: Default::default(),
         };
         doc.apply(Command::Create(vec![data.into()])).unwrap();
         let loaded = decode(&encode(&doc)).unwrap();

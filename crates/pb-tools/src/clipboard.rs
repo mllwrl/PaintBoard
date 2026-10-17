@@ -110,6 +110,7 @@ mod tests {
             bounds: Rect::new(x, 0.0, x + 10.0, 10.0),
             rotation: 0.0,
             style: Style::default(),
+            tags: Default::default(),
         }
         .into()
     }
@@ -169,6 +170,7 @@ mod tests {
             bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
             rotation: 0.0,
             style: Style::default(),
+            tags: Default::default(),
         };
         let ids = doc
             .apply(Command::Create(vec![data.into(), rect(50.0)]))

@@ -24,7 +24,7 @@ use crate::command::reorder;
 use crate::{
     Applied, AssetId, Assets, Command, Connector, Content, End, FrameData, Group, HAlign, Image,
     Ink, Line, Object, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Sticky, Style, StyleChange,
-    Text, VAlign, ZOrder,
+    Tag, Tags, Text, VAlign, ZOrder,
 };
 
 /// Font size of text objects stored without one.
@@ -38,6 +38,10 @@ mod key {
     pub const META: &str = "meta";
     pub const SCHEMA: &str = "schema";
     pub const OBJECTS: &str = "objects";
+    /// Root map of the board's tags: `RRGGBBAA;name` (hex color) by tag id.
+    pub const TAGS: &str = "tags";
+    /// Ids of an object's tags, joined by `;`.
+    pub const OBJECT_TAGS: &str = "tags";
 
     pub const ID: &str = "id";
     pub const KIND: &str = "kind";
@@ -174,6 +178,8 @@ pub struct Document {
     _events: Subscription,
     /// Ids handed out by `new_line_id`.
     line_ids: std::cell::Cell<u64>,
+    /// The board's tags, by name; rebuilt with `objects`.
+    tags: Vec<Tag>,
     /// Files used by images. They are not part of the CRDT and never removed while the board
     /// is open, so undoing the deletion of an image finds its file again.
     assets: Assets,
@@ -327,6 +333,7 @@ impl Document {
             changes,
             _events: events,
             line_ids: std::cell::Cell::new(0),
+            tags: Vec::new(),
         };
         document.refresh();
         document
@@ -474,6 +481,15 @@ impl Document {
         self.revision
     }
 
+    /// The board's tags, sorted by name.
+    pub fn tags(&self) -> &[Tag] {
+        &self.tags
+    }
+
+    pub fn tag(&self, id: &str) -> Option<&Tag> {
+        self.tags.iter().find(|t| &*t.id == id)
+    }
+
     pub fn apply(&mut self, command: Command) -> Result<Applied> {
         let mut applied = Applied::default();
         match command {
@@ -587,6 +603,45 @@ impl Document {
                             write_style_change(&meta, &change, object.data.style)?;
                         }
                     }
+                }
+            }
+            Command::SetTags { ids, add, remove } => {
+                self.check_exist(&ids)?;
+                let mut done = HashSet::new();
+                for &id in &ids {
+                    for object in self.leaves(id) {
+                        if !done.insert(object.id) {
+                            continue;
+                        }
+                        let mut tags: Vec<Arc<str>> = object
+                            .data
+                            .tags
+                            .iter()
+                            .filter(|t| !remove.contains(t))
+                            .cloned()
+                            .collect();
+                        for tag in &add {
+                            if !tags.contains(tag) {
+                                tags.push(tag.clone());
+                            }
+                        }
+                        if *tags != *object.data.tags {
+                            let meta = self.tree.get_meta(self.nodes[&object.id])?;
+                            write_tags(&meta, &tags)?;
+                        }
+                    }
+                }
+            }
+            Command::DefineTag(tag) => {
+                let color = format!("{:08X}", tag.color.0);
+                self.doc
+                    .get_map(key::TAGS)
+                    .insert(&tag.id, format!("{color};{}", tag.name))?;
+            }
+            Command::RemoveTag(id) => {
+                let tags = self.doc.get_map(key::TAGS);
+                if tags.get(&id).is_some() {
+                    tags.delete(&id)?;
                 }
             }
             Command::SetText {
@@ -995,6 +1050,7 @@ impl Document {
             }
         }
         self.roots = self.read_children(TreeParentId::Root, None);
+        self.tags = read_tags(&self.doc.get_map(key::TAGS));
         // Everything but connectors first: connectors route around it.
         let placed_objects = self
             .objects
@@ -1247,6 +1303,9 @@ fn read_spans(meta: &LoroMap, text: &str) -> Spans {
 
 fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
     meta.insert(key::KIND, data.kind.as_str())?;
+    if !data.tags.is_empty() {
+        write_tags(meta, &data.tags)?;
+    }
     let spans = data.kind.spans();
     if !spans.is_empty() {
         write_spans(meta, spans)?;
@@ -1425,6 +1484,54 @@ fn lines_from_string(s: &str) -> Vec<Line> {
             })
         })
         .collect()
+}
+
+/// Writes an object's tags, or removes them when there are none.
+fn write_tags(meta: &LoroMap, tags: &[Arc<str>]) -> Result<()> {
+    if tags.is_empty() {
+        if meta.get(key::OBJECT_TAGS).is_some() {
+            meta.delete(key::OBJECT_TAGS)?;
+        }
+        return Ok(());
+    }
+    let ids: Vec<&str> = tags.iter().map(|t| &**t).collect();
+    meta.insert(key::OBJECT_TAGS, ids.join(";"))?;
+    Ok(())
+}
+
+fn read_object_tags(meta: &LoroMap) -> Tags {
+    get_str(meta, key::OBJECT_TAGS)
+        .map(|s| {
+            s.split(';')
+                .filter(|t| !t.is_empty())
+                .map(Arc::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The board's tags from their root map, sorted by name (then id, for a stable order).
+fn read_tags(map: &LoroMap) -> Vec<Tag> {
+    let mut tags = Vec::new();
+    map.for_each(|id, v| {
+        if let ValueOrContainer::Value(LoroValue::String(value)) = v
+            && let Some((color, name)) = value.split_once(';')
+            && let Ok(color) = u32::from_str_radix(color, 16)
+        {
+            tags.push(Tag {
+                id: id.into(),
+                name: name.into(),
+                color: Rgba(color),
+            });
+        }
+    });
+    tags.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    tags
 }
 
 /// Writes a kanban board's columns: their order, and the titles that differ from `old`.
@@ -1886,6 +1993,7 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
                 .and_then(|s| VAlign::parse(&s))
                 .unwrap_or_default(),
         },
+        tags: read_object_tags(meta),
     })
 }
 
@@ -1901,6 +2009,7 @@ mod tests {
             bounds: Rect::new(x, y, x + w, y + h),
             rotation: 0.0,
             style: Style::default(),
+            tags: Default::default(),
         }
     }
 
@@ -2749,6 +2858,73 @@ mod tests {
     }
 
     #[test]
+    fn tags_are_defined_once_and_put_on_objects() {
+        let mut doc = Document::new();
+        let a = create(&mut doc, rect(0.0, 0.0, 10.0, 10.0));
+        let b = create(&mut doc, rect(20.0, 0.0, 10.0, 10.0));
+        let urgent = Tag {
+            id: doc.new_line_id().into(),
+            name: "urgent".into(),
+            color: Rgba::rgb(0xE5, 0x48, 0x4D),
+        };
+        let idea = Tag {
+            id: doc.new_line_id().into(),
+            name: "Idea".into(),
+            color: Rgba::rgb(0x3B, 0x82, 0xF6),
+        };
+        doc.apply(Command::DefineTag(urgent.clone())).unwrap();
+        doc.apply(Command::DefineTag(idea.clone())).unwrap();
+        // Sorted by name, whatever the case.
+        assert_eq!(doc.tags(), &[idea.clone(), urgent.clone()]);
+        doc.apply(Command::Group(vec![a, b])).unwrap();
+        let group = doc.roots()[0];
+        doc.apply(Command::SetTags {
+            ids: vec![group],
+            add: vec![urgent.id.clone(), idea.id.clone()],
+            remove: Vec::new(),
+        })
+        .unwrap();
+        let tags = |doc: &Document, id| doc.get(id).unwrap().data.tags.clone();
+        assert_eq!(&*tags(&doc, a), &[urgent.id.clone(), idea.id.clone()]);
+        doc.apply(Command::SetTags {
+            ids: vec![b],
+            add: Vec::new(),
+            remove: vec![urgent.id.clone()],
+        })
+        .unwrap();
+        assert_eq!(&*tags(&doc, b), std::slice::from_ref(&idea.id));
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(loaded.tags(), doc.tags());
+        assert_eq!(tags(&loaded, a), tags(&doc, a));
+        // Renames and new tags from another replica arrive.
+        let mut other = Document::from_snapshot(&doc.snapshot()).unwrap();
+        let renamed = Tag {
+            name: "Ideas".into(),
+            ..idea.clone()
+        };
+        other.apply(Command::DefineTag(renamed.clone())).unwrap();
+        doc.doc.import(&other.snapshot()).unwrap();
+        doc.refresh();
+        assert_eq!(doc.tag(&idea.id), Some(&renamed));
+        // A filter lets through objects with one of its tags or fills.
+        let mut filter = crate::Filter::default();
+        assert!(filter.matches(&doc.get(b).unwrap().data));
+        filter.toggle_tag(&urgent.id);
+        assert!(filter.matches(&doc.get(a).unwrap().data));
+        assert!(!filter.matches(&doc.get(b).unwrap().data));
+        filter.toggle_color(Style::default().fill);
+        assert!(filter.matches(&doc.get(b).unwrap().data));
+        filter.toggle_tag(&urgent.id);
+        filter.toggle_color(Style::default().fill);
+        assert!(filter.is_empty());
+        // Removing a tag hides it; undo brings it back.
+        doc.apply(Command::RemoveTag(urgent.id.clone())).unwrap();
+        assert_eq!(doc.tags().len(), 1);
+        doc.undo().unwrap();
+        assert_eq!(doc.tags().len(), 2);
+    }
+
+    #[test]
     fn kanban_cards_are_stored_one_by_one() {
         let mut doc = Document::new();
         let kanban = crate::Kanban::starter(|| doc.new_line_id());
@@ -2940,6 +3116,7 @@ mod tests {
             bounds: Rect::ZERO,
             rotation: 0.0,
             style: Style::default(),
+            tags: Default::default(),
         }
     }
 
