@@ -382,6 +382,14 @@ pub struct Style {
 }
 
 impl Style {
+    /// How new shapes look: an outline with no fill.
+    pub fn shape() -> Self {
+        Self {
+            fill: Rgba(0),
+            ..Self::default()
+        }
+    }
+
     /// Color of a shape's text.
     pub fn text_color(&self) -> Rgba {
         self.text_color.unwrap_or(self.stroke)

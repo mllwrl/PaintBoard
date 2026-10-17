@@ -1878,7 +1878,7 @@ impl App {
                     rotation: 0.0,
                     style: Style {
                         font_size: Some(DIAGRAM_FONT * scale),
-                        ..Style::default()
+                        ..Style::shape()
                     },
                     tags: Default::default(),
                     link: None,

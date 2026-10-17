@@ -2186,7 +2186,7 @@ fn drawn(doc: &Document, kind: Drawn, bounds: Rect) -> ObjectData {
             kind: shape.into(),
             bounds,
             rotation: 0.0,
-            style: Style::default(),
+            style: Style::shape(),
             tags: Default::default(),
             link: None,
         },
