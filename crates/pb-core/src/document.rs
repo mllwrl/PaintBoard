@@ -30,6 +30,9 @@ use crate::{
 /// Font size of text objects stored without one.
 const DEFAULT_FONT_SIZE: f64 = 24.0;
 
+/// Commit origin of changes undo leaves alone, such as making the board read-only.
+const NOT_UNDONE: &str = "pb-not-undone";
+
 /// Bump when the stored layout changes incompatibly, and add a migration.
 const SCHEMA_VERSION: i64 = 1;
 
@@ -37,6 +40,8 @@ const SCHEMA_VERSION: i64 = 1;
 mod key {
     pub const META: &str = "meta";
     pub const SCHEMA: &str = "schema";
+    /// In `META`: the board is protected from changes.
+    pub const READ_ONLY: &str = "readOnly";
     pub const OBJECTS: &str = "objects";
     /// Root map of the board's tags: `RRGGBBAA;name` (hex color) by tag id.
     pub const TAGS: &str = "tags";
@@ -144,6 +149,8 @@ pub enum Error {
     UnknownThread(Arc<str>),
     /// The board was saved by a newer version of the app.
     UnsupportedSchema(i64),
+    /// The board is read-only and the command would change it.
+    ReadOnly,
     Crdt(LoroError),
 }
 
@@ -158,6 +165,7 @@ impl fmt::Display for Error {
                     "board schema v{v} is newer than supported v{SCHEMA_VERSION}"
                 )
             }
+            Self::ReadOnly => write!(f, "the board is read-only"),
             Self::Crdt(err) => write!(f, "document error: {err}"),
         }
     }
@@ -220,6 +228,8 @@ pub struct Document {
     focus: Option<Rect>,
     /// Hidden objects are shown faded instead of left out. Not stored, like `focus`.
     show_hidden: bool,
+    /// The board is protected from changes; rebuilt with `objects`.
+    read_only: bool,
 }
 
 /// An object in the spatial index: its world bounds (outline included) and its place in
@@ -342,7 +352,8 @@ impl Document {
     fn from_loro(doc: LoroDoc) -> Self {
         let tree = doc.get_tree(key::OBJECTS);
         tree.enable_fractional_index(0);
-        let undo = UndoManager::new(&doc);
+        let mut undo = UndoManager::new(&doc);
+        undo.add_exclude_origin_prefix(NOT_UNDONE);
         let changes = Arc::new(Mutex::new(Changes {
             all: true,
             ..Changes::default()
@@ -376,6 +387,7 @@ impl Document {
             voting: None,
             focus: None,
             show_hidden: false,
+            read_only: false,
         };
         document.refresh();
         document
@@ -512,13 +524,13 @@ impl Document {
             .reduce(|a, b| a.union(b))
     }
 
-    /// Whether `id` or any group around it is locked.
+    /// Whether `id` or any group around it is locked, or the whole board is read-only.
     pub fn is_locked(&self, id: ObjectId) -> bool {
         let own = match self.get(id) {
             Some(object) => object.locked,
             None => self.groups.get(&id).is_some_and(|g| g.locked),
         };
-        own || self.parent(id).is_some_and(|p| self.is_locked(p))
+        self.read_only || own || self.parent(id).is_some_and(|p| self.is_locked(p))
     }
 
     /// Whether `id` or any group around it is hidden.
@@ -623,6 +635,9 @@ impl Document {
     }
 
     pub fn apply(&mut self, command: Command) -> Result<Applied> {
+        if self.read_only && !command.allowed_read_only() {
+            return Err(Error::ReadOnly);
+        }
         let mut applied = Applied::default();
         match command {
             Command::Create(contents) => {
@@ -1058,6 +1073,10 @@ impl Document {
                         .insert(key::LOCKED, locked)?;
                 }
             }
+            Command::SetReadOnly(on) => {
+                self.doc.get_map(key::META).insert(key::READ_ONLY, on)?;
+                self.doc.set_next_commit_origin(NOT_UNDONE);
+            }
             Command::SetHidden { ids, hidden } => {
                 self.check_exist(&ids)?;
                 for id in ids {
@@ -1073,11 +1092,16 @@ impl Document {
     }
 
     pub fn can_undo(&self) -> bool {
-        self.undo.can_undo()
+        !self.read_only && self.undo.can_undo()
     }
 
     pub fn can_redo(&self) -> bool {
-        self.undo.can_redo()
+        !self.read_only && self.undo.can_redo()
+    }
+
+    /// Whether the board is protected from changes (see [`Command::allowed_read_only`]).
+    pub fn read_only(&self) -> bool {
+        self.read_only
     }
 
     /// Starts merging the following commands into one undo step, e.g. while a slider is
@@ -1095,6 +1119,9 @@ impl Document {
 
     /// Reverts the last local command. Returns false if there was nothing to undo.
     pub fn undo(&mut self) -> Result<bool> {
+        if self.read_only {
+            return Ok(false);
+        }
         let done = self.undo.undo()?;
         if done {
             self.refresh();
@@ -1104,6 +1131,9 @@ impl Document {
 
     /// Re-applies the last undone command. Returns false if there was nothing to redo.
     pub fn redo(&mut self) -> Result<bool> {
+        if self.read_only {
+            return Ok(false);
+        }
         let done = self.undo.redo()?;
         if done {
             self.refresh();
@@ -1343,6 +1373,10 @@ impl Document {
         self.reactions = read_reactions(&self.doc.get_map(key::REACTIONS));
         self.threads = read_threads(&self.doc.get_map(key::COMMENTS));
         self.voting = read_voting(&self.doc.get_map(key::VOTING));
+        self.read_only = matches!(
+            self.doc.get_map(key::META).get(key::READ_ONLY),
+            Some(ValueOrContainer::Value(LoroValue::Bool(true)))
+        );
         // Everything but connectors first: connectors route around it.
         let placed_objects = self
             .objects
@@ -3017,6 +3051,34 @@ mod tests {
         doc.redo().unwrap();
         let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
         assert!(loaded.is_hidden(c) && !loaded.shows_hidden());
+    }
+
+    #[test]
+    fn read_only_board_takes_no_edits_and_is_not_undone() {
+        let mut doc = Document::new();
+        let [a, ..] = four(&mut doc);
+        doc.apply(Command::SetReadOnly(true)).unwrap();
+        assert!(doc.read_only() && doc.is_locked(a) && !doc.can_undo());
+        assert!(matches!(
+            doc.apply(Command::Delete(vec![a])),
+            Err(Error::ReadOnly)
+        ));
+        assert!(!doc.undo().unwrap());
+        // Comments and reactions do not change the content.
+        doc.apply(Command::React {
+            id: a,
+            reaction: crate::Reaction::ALL[0],
+            author: "me".into(),
+            on: true,
+        })
+        .unwrap();
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert!(loaded.read_only());
+        doc.apply(Command::SetReadOnly(false)).unwrap();
+        // Undo skips the switch and takes back the reaction.
+        doc.undo().unwrap();
+        assert!(!doc.read_only() && doc.reactions(a).is_empty());
+        doc.apply(Command::Delete(vec![a])).unwrap();
     }
 
     #[test]

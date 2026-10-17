@@ -194,6 +194,28 @@ pub enum Command {
         ids: Vec<ObjectId>,
         hidden: bool,
     },
+    /// Protects the board from changes, or lifts that. Not undoable.
+    SetReadOnly(bool),
+}
+
+impl Command {
+    /// Whether it may change a read-only board: it does not touch the content, like
+    /// comments, reactions and voting.
+    pub fn allowed_read_only(&self) -> bool {
+        matches!(
+            self,
+            Self::SetReadOnly(_)
+                | Self::AddComment { .. }
+                | Self::RemoveComment { .. }
+                | Self::SetResolved { .. }
+                | Self::RemoveThread(_)
+                | Self::React { .. }
+                | Self::StartVoting { .. }
+                | Self::EndVoting
+                | Self::ClearVotes
+                | Self::Vote { .. }
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

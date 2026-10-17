@@ -238,6 +238,13 @@ impl App {
         if self.gpu.is_none() {
             return;
         }
+        // A read-only board can be looked at and commented on, nothing more.
+        if self.document.read_only()
+            && !matches!(self.tools.active(), ToolKind::Select | ToolKind::Comment)
+        {
+            self.tools.cancel();
+            self.tools.set_active(ToolKind::Select);
+        }
         let scale = window.scale_factor();
         let size = window.inner_size().to_logical::<f64>(scale);
         let mut overrides = self.tools.overrides(&self.document);
@@ -412,6 +419,7 @@ impl App {
                 .map(|(screen, _)| self.context_menu_info(screen)),
             show_shortcuts: self.show_shortcuts,
             hidden: (self.document.hidden_count(), self.document.shows_hidden()),
+            read_only: self.document.read_only(),
             diagram: self.diagram.clone(),
             show_templates: self.show_templates,
             focus: self.focus_saved.is_some(),
@@ -838,6 +846,7 @@ impl App {
             several: ids.len() > 1,
             locked: selection.has_locked(&self.document),
             hidden: ids.iter().all(|&id| self.document.is_hidden(id)),
+            read_only: self.document.read_only(),
         })
     }
 
@@ -1179,6 +1188,12 @@ impl App {
             Action::Ungroup => self.apply_with(Tools::ungroup_selected),
             Action::ToggleLock => self.apply_with(Tools::toggle_lock_selected),
             Action::ToggleHidden => self.toggle_hidden(),
+            Action::ToggleReadOnly => {
+                self.finish_editing();
+                self.tools.cancel();
+                let on = !self.document.read_only();
+                self.apply(Command::SetReadOnly(on));
+            }
             Action::ShowHidden => {
                 let show = !self.document.shows_hidden();
                 self.document.set_show_hidden(show);
@@ -1211,6 +1226,9 @@ impl App {
     }
 
     fn start_editing(&mut self, edit: TextEdit) {
+        if self.document.read_only() {
+            return;
+        }
         self.finish_editing();
         self.tools.cancel();
         if let editing::Target::Existing(id) = edit.target {
@@ -2235,6 +2253,7 @@ impl App {
             single_object: single.is_some(),
             focus: self.focus_saved.is_some(),
             hidden: !ids.is_empty() && ids.iter().all(|&id| self.document.is_hidden(id)),
+            read_only: self.document.read_only(),
         }
     }
 

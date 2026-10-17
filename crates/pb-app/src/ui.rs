@@ -56,6 +56,8 @@ pub enum Action {
     ToggleHidden,
     /// Shows hidden objects faded, or leaves them out again.
     ShowHidden,
+    /// Protects the board from changes, or lifts that.
+    ToggleReadOnly,
     Duplicate,
     Delete,
     Reorder(ZOrder),
@@ -235,6 +237,8 @@ pub struct Model<'a> {
     pub show_shortcuts: bool,
     /// How many objects are hidden, and whether they are shown faded.
     pub hidden: (usize, bool),
+    /// The board is read-only: only looking and commenting.
+    pub read_only: bool,
     /// The diagram-from-text window, when it is open, with the last error.
     pub diagram: Option<Option<String>>,
     /// The template gallery is open.
@@ -300,6 +304,8 @@ pub struct ContextMenuInfo {
     pub focus: bool,
     /// Everything selected is hidden.
     pub hidden: bool,
+    /// The board is read-only.
+    pub read_only: bool,
 }
 
 /// A voting session, for the person using the app.
@@ -414,6 +420,8 @@ pub struct SelectionInfo {
     pub locked: bool,
     /// Everything selected is hidden (they are being shown faded).
     pub hidden: bool,
+    /// The board is read-only.
+    pub read_only: bool,
 }
 
 /// The link of the selected object.
@@ -608,7 +616,11 @@ impl Ui {
             } else {
                 board_menu(ctx, model, &mut actions);
             }
-            toolbar(ctx, model, &mut actions);
+            if model.read_only {
+                read_only_toolbar(ctx, model, &mut actions);
+            } else {
+                toolbar(ctx, model, &mut actions);
+            }
             let view = view_controls(ctx, model, &mut actions);
             if let Some(map) = model.minimap.as_ref().filter(|_| !model.focus) {
                 minimap(ctx, map, view, &mut actions);
@@ -743,6 +755,9 @@ fn board_menu(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                 ui.horizontal(|ui| {
                     ui.add_space(4.0);
                     ui.strong(model.board);
+                    if model.read_only {
+                        ui.weak("read-only");
+                    }
                     ui.separator();
                     ui.menu_button("File", |ui| {
                         let items = [
@@ -754,10 +769,23 @@ fn board_menu(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                             ("Diagram from text…", "", Action::OpenDiagram),
                         ];
                         for (label, shortcut, action) in items {
-                            if ui.add(Button::new(label).shortcut_text(shortcut)).clicked() {
+                            // Inserting changes the board.
+                            let on = !model.read_only
+                                || !matches!(action, Action::InsertImage | Action::OpenDiagram);
+                            let button = Button::new(label).shortcut_text(shortcut);
+                            if ui.add_enabled(on, button).clicked() {
                                 actions.push(action);
                                 ui.close();
                             }
+                        }
+                        ui.separator();
+                        if ui
+                            .add(Button::selectable(model.read_only, "Read-only"))
+                            .on_hover_text("Protect the board: only looking and commenting")
+                            .clicked()
+                        {
+                            actions.push(Action::ToggleReadOnly);
+                            ui.close();
                         }
                     });
                     ui.menu_button("Frames", |ui| {
@@ -801,7 +829,7 @@ fn board_menu(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         }
                     });
                     if ui
-                        .button("Templates")
+                        .add_enabled(!model.read_only, Button::new("Templates"))
                         .on_hover_text("Start from a ready-made layout")
                         .clicked()
                     {
@@ -829,6 +857,33 @@ fn board_menu(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         actions.push(Action::ToggleShortcuts);
                     }
                 });
+            });
+        });
+}
+
+/// The toolbar of a read-only board: selecting and commenting.
+fn read_only_toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
+    let screen = ctx.content_rect();
+    Area::new(Id::unique("tools"))
+        .fixed_pos(Pos2::new(MARGIN, screen.center().y))
+        .pivot(Align2::LEFT_CENTER)
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            panel().show(ui, |ui| {
+                ui.spacing_mut().item_spacing = Vec2::splat(2.0);
+                let tools = [
+                    (
+                        ToolKind::Select,
+                        "Select (V)",
+                        paint_cursor as fn(&Painter, Rect, Color32),
+                    ),
+                    (ToolKind::Comment, "Comment (C)", paint_comment),
+                ];
+                for (tool, tooltip, paint) in tools {
+                    if icon_button(ui, model.tool == tool, tooltip, paint).clicked() {
+                        actions.push(Action::Tool(tool));
+                    }
+                }
             });
         });
 }
@@ -1379,6 +1434,12 @@ fn selection_toolbar(
         .show(ctx, |ui| {
             panel().show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    if selection.read_only {
+                        if ui.button("Copy").on_hover_text("Ctrl+C").clicked() {
+                            actions.push(Action::Copy);
+                        }
+                        return;
+                    }
                     if selection.locked {
                         if ui.button("Unlock").on_hover_text("Ctrl+Shift+L").clicked() {
                             actions.push(Action::ToggleLock);
@@ -1850,6 +1911,17 @@ fn context_menu(ctx: &Context, info: ContextMenuInfo, actions: &mut Vec<Action>)
                             actions.push(Action::CloseContextMenu);
                         }
                     };
+                if info.read_only {
+                    if info.selection {
+                        item(ui, "Copy", "Ctrl+C", Action::Copy, true);
+                    } else {
+                        item(ui, "Select all", "Ctrl+A", Action::SelectAll, true);
+                    }
+                    if info.single_object {
+                        item(ui, "Copy link to object", "", Action::CopyAnchor, true);
+                    }
+                    return;
+                }
                 if !info.selection {
                     item(ui, "Paste here", "Ctrl+V", Action::Paste, true);
                     item(ui, "Add sticky note here", "", Action::AddStickyHere, true);
