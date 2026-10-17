@@ -121,6 +121,9 @@ pub struct App {
     context_menu: Option<(Point, Point)>,
     /// The keyboard shortcuts window is open.
     show_shortcuts: bool,
+    /// The window for making a diagram from text is open, with what was wrong with the
+    /// last try.
+    diagram: Option<Option<String>>,
     /// The search field should take the keyboard on the next frame.
     focus_search: bool,
     /// Time and screen position of the last left press, to detect double clicks.
@@ -164,6 +167,7 @@ impl App {
             focus_search: false,
             context_menu: None,
             show_shortcuts: false,
+            diagram: None,
             last_press: None,
             recognition: None,
             next_request: 0,
@@ -301,6 +305,7 @@ impl App {
                 .context_menu
                 .map(|(screen, _)| self.context_menu_info(screen)),
             show_shortcuts: self.show_shortcuts,
+            diagram: self.diagram.clone(),
             search: self.search.as_ref().map(|s| SearchInfo {
                 count: s.hits.len(),
                 current: s.current,
@@ -770,6 +775,15 @@ impl App {
             }
             Action::CloseContextMenu => self.context_menu = None,
             Action::ToggleShortcuts => self.show_shortcuts = !self.show_shortcuts,
+            Action::OpenDiagram => {
+                self.finish_editing();
+                self.diagram = Some(None);
+            }
+            Action::CloseDiagram => self.diagram = None,
+            Action::InsertDiagram(source) => match self.insert_diagram(&source) {
+                Ok(()) => self.diagram = None,
+                Err(err) => self.diagram = Some(Some(err.to_string())),
+            },
             Action::OpenSearch => self.open_search(),
             Action::Search(query) => self.search_for(query),
             Action::SearchStep(forward) => self.search_step(forward),
@@ -1173,6 +1187,180 @@ impl App {
         if let Some(edit) = TextEdit::new_node(engine, &self.document, id, &parent, order, left) {
             self.start_editing(edit);
         }
+    }
+
+    /// Adds a Mermaid flowchart in the middle of the view, at a size that reads like
+    /// normal text there, as one undo step, and selects it.
+    fn insert_diagram(&mut self, source: &str) -> Result<(), pb_io::mermaid::ParseError> {
+        use pb_core::{Anchor, Cap, Connector, End, Label, Route, Shape};
+        use pb_geom::kurbo::{Rect, Size};
+        use pb_io::mermaid::{self, LineStyle, NodeShape};
+
+        let chart = mermaid::parse(source)?;
+        let engine = self.text.engine();
+        // Sized in world units at 100%, then scaled for the current zoom.
+        let sizes: Vec<Size> = chart
+            .nodes
+            .iter()
+            .map(|node| {
+                let layout = engine.layout(&node.text, DIAGRAM_FONT, Some(DIAGRAM_WRAP));
+                let (w, h) = (
+                    (layout.width + 40.0).max(120.0),
+                    (layout.height + 28.0).max(56.0),
+                );
+                let (w, h) = match node.shape {
+                    NodeShape::Decision => (w * 1.6, h * 1.6),
+                    NodeShape::Circle => {
+                        let side = w.max(h) * 1.2;
+                        (side, side)
+                    }
+                    NodeShape::Database => (w, h + 30.0),
+                    NodeShape::Stadium => (w + h * 0.5, h),
+                    NodeShape::Hexagon | NodeShape::Data => (w + 50.0, h),
+                    NodeShape::Flag => (w * 1.2, h * 1.3),
+                    NodeShape::Box | NodeShape::Rounded => (w, h),
+                };
+                Size::new(w, h)
+            })
+            .collect();
+        let centers = mermaid::layout(&chart, &sizes);
+        let scale = 1.0 / self.camera.zoom();
+        let rects: Vec<Rect> = centers
+            .iter()
+            .zip(&sizes)
+            .map(|(&c, &s)| Rect::from_center_size(c, s))
+            .collect();
+        let all = rects
+            .iter()
+            .copied()
+            .reduce(|a, b| a.union(b))
+            .unwrap_or_default();
+        let view = self.camera.visible_world_rect(self.viewport()).center();
+        let place = |r: Rect| {
+            let origin = view + (r.origin() - all.center()) * scale;
+            Rect::from_origin_size(origin, r.size() * scale)
+        };
+        let shapes: Vec<pb_core::Content> = chart
+            .nodes
+            .iter()
+            .zip(&rects)
+            .map(|(node, &r)| {
+                ObjectData {
+                    kind: ObjectKind::Shape(Shape {
+                        kind: node.shape.kind(),
+                        text: node.text.as_str().into(),
+                        spans: Default::default(),
+                    }),
+                    bounds: place(r),
+                    rotation: 0.0,
+                    style: Style {
+                        font_size: Some(DIAGRAM_FONT * scale),
+                        ..Style::default()
+                    },
+                    tags: Default::default(),
+                    link: None,
+                }
+                .into()
+            })
+            .collect();
+        self.finish_editing();
+        self.tools.set_active(ToolKind::Select);
+        self.document.begin_undo_group();
+        let ids = match self.document.apply(Command::Create(shapes)) {
+            Ok(applied) => applied.created,
+            Err(err) => {
+                log::error!("diagram shapes failed: {err}");
+                self.document.end_undo_group();
+                return Ok(());
+            }
+        };
+        let engine = self.text.engine();
+        let connectors: Vec<pb_core::Content> = chart
+            .edges
+            .iter()
+            .filter_map(|edge| {
+                let (from, to) = (*ids.get(edge.from)?, *ids.get(edge.to)?);
+                // A line going back against the flow leaves and enters from the side, so it
+                // runs around the shapes rather than over the line going forward.
+                let back = match chart.direction {
+                    mermaid::Direction::Down => centers[edge.to].y < centers[edge.from].y,
+                    mermaid::Direction::Up => centers[edge.to].y > centers[edge.from].y,
+                    mermaid::Direction::Right => centers[edge.to].x < centers[edge.from].x,
+                    mermaid::Direction::Left => centers[edge.to].x > centers[edge.from].x,
+                };
+                let anchor = match (back, chart.direction) {
+                    (false, _) => Anchor::Auto,
+                    (true, mermaid::Direction::Down | mermaid::Direction::Up) => {
+                        Anchor::Fixed(pb_geom::kurbo::Point::new(1.0, 0.5))
+                    }
+                    (true, _) => Anchor::Fixed(pb_geom::kurbo::Point::new(0.5, 1.0)),
+                };
+                let end = |object, rect: Rect| End::Attached {
+                    object,
+                    anchor,
+                    at: place(rect).center(),
+                };
+                let label = match &edge.label {
+                    Some(text) => {
+                        let layout = engine.layout(text, Label::FONT_SIZE, None);
+                        Label {
+                            text: text.as_str().into(),
+                            at: 0.5,
+                            size: Size::new(layout.width, layout.height),
+                        }
+                    }
+                    None => Label::default(),
+                };
+                let (start, end) = (end(from, rects[edge.from]), end(to, rects[edge.to]));
+                let style = Style::default();
+                Some(
+                    ObjectData {
+                        kind: ObjectKind::Connector(Connector {
+                            start,
+                            end,
+                            route: Route::Elbow,
+                            start_cap: Cap::None,
+                            end_cap: if edge.arrow { Cap::Arrow } else { Cap::None },
+                            label,
+                            bends: Default::default(),
+                        }),
+                        bounds: Rect::from_points(start.point(), end.point()),
+                        rotation: 0.0,
+                        style: Style {
+                            stroke_width: match edge.line {
+                                LineStyle::Thick => style.stroke_width * 2.0,
+                                LineStyle::Solid | LineStyle::Dotted => style.stroke_width,
+                            },
+                            ..style
+                        },
+                        tags: Default::default(),
+                        link: None,
+                    }
+                    .into(),
+                )
+            })
+            .collect();
+        let mut created = ids;
+        if !connectors.is_empty() {
+            match self.document.apply(Command::Create(connectors)) {
+                Ok(applied) => created.extend(applied.created),
+                Err(err) => log::error!("diagram connectors failed: {err}"),
+            }
+        }
+        self.document.end_undo_group();
+        self.tools.sync(&self.document);
+        self.tools.select_only(created);
+        // Show all of it.
+        let placed = place(all);
+        let viewport = self.viewport();
+        let room = self
+            .camera
+            .visible_world_rect(viewport)
+            .inset(-FRAME_MARGIN / self.camera.zoom());
+        if placed.width() > room.width() || placed.height() > room.height() {
+            self.camera.fit(placed, viewport, FRAME_MARGIN);
+        }
+        Ok(())
     }
 
     /// Opens the right-click menu at the pointer. Like elsewhere, the object under it gets
@@ -2479,6 +2667,10 @@ impl App {
         }
     }
 }
+
+/// Font size and wrap width of diagram text made from Mermaid, in world units at 100%.
+const DIAGRAM_FONT: f64 = 16.0;
+const DIAGRAM_WRAP: f64 = 200.0;
 
 /// Searching the board.
 #[derive(Default)]

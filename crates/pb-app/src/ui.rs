@@ -92,6 +92,11 @@ pub enum Action {
     CloseContextMenu,
     /// Opens or closes the keyboard shortcuts window.
     ToggleShortcuts,
+    /// Opens the window for making a diagram from text.
+    OpenDiagram,
+    /// Makes a diagram from this Mermaid text.
+    InsertDiagram(String),
+    CloseDiagram,
     /// Opens the search bar (Ctrl+F).
     OpenSearch,
     /// Searches the board for this text.
@@ -177,6 +182,8 @@ pub struct Model<'a> {
     /// The right-click menu, when it is open.
     pub context_menu: Option<ContextMenuInfo>,
     pub show_shortcuts: bool,
+    /// The diagram-from-text window, when it is open, with the last error.
+    pub diagram: Option<Option<String>>,
 }
 
 /// What the right-click menu offers.
@@ -370,6 +377,8 @@ pub struct Ui {
     link_text: String,
     /// Text typed into the search bar.
     search_text: String,
+    /// Mermaid text in the diagram window, kept between openings.
+    diagram_text: String,
     repaint_at: Option<Instant>,
 }
 
@@ -397,6 +406,7 @@ impl Ui {
             new_tag: String::new(),
             link_text: String::new(),
             search_text: String::new(),
+            diagram_text: DIAGRAM_EXAMPLE.to_owned(),
             repaint_at: None,
         }
     }
@@ -442,6 +452,7 @@ impl Ui {
         let new_tag = &mut self.new_tag;
         let link_text = &mut self.link_text;
         let search_text = &mut self.search_text;
+        let diagram_text = &mut self.diagram_text;
         let output = self.ctx.run_pass(input, |ctx| {
             board_menu(ctx, model, &mut actions);
             toolbar(ctx, model, &mut actions);
@@ -467,6 +478,9 @@ impl Ui {
             }
             if model.show_shortcuts {
                 shortcuts_window(ctx, &mut actions);
+            }
+            if let Some(error) = &model.diagram {
+                diagram_window(ctx, error.as_deref(), diagram_text, &mut actions);
             }
         });
         self.state
@@ -577,6 +591,7 @@ fn board_menu(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                             ("Save", "Ctrl+S", Action::Save),
                             ("Save as…", "Ctrl+Shift+S", Action::SaveAs),
                             ("Insert image…", "", Action::InsertImage),
+                            ("Diagram from text…", "", Action::OpenDiagram),
                         ];
                         for (label, shortcut, action) in items {
                             if ui.add(Button::new(label).shortcut_text(shortcut)).clicked() {
@@ -1584,6 +1599,62 @@ fn context_menu(ctx: &Context, info: ContextMenuInfo, actions: &mut Vec<Action>)
             .is_some_and(|p| !area.response.rect.contains(p));
     if pressed_elsewhere {
         actions.push(Action::CloseContextMenu);
+    }
+}
+
+/// What the diagram window starts with.
+const DIAGRAM_EXAMPLE: &str = "flowchart TD
+    A([Start]) --> B[Write the plan]
+    B --> C{Looks good?}
+    C -->|yes| D[Build it]
+    C -->|no| B
+    D --> E[(Save)]
+";
+
+/// A Mermaid flowchart to turn into shapes and connectors.
+fn diagram_window(
+    ctx: &Context,
+    error: Option<&str>,
+    text: &mut String,
+    actions: &mut Vec<Action>,
+) {
+    let mut open = true;
+    let shown = egui::Window::new("Diagram from text")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .order(Order::Foreground)
+        .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.label("A Mermaid flowchart: nodes like A[Box], B{Decision}, C((Circle)); edges like A --> B or A -->|label| B.");
+            ui.add(
+                egui::TextEdit::multiline(text)
+                    .code_editor()
+                    .desired_rows(12)
+                    .desired_width(460.0),
+            );
+            if let Some(error) = error {
+                ui.colored_label(Color32::from_rgb(0xD0, 0x30, 0x30), error);
+            }
+            ui.horizontal(|ui| {
+                if ui.button("Insert").clicked() {
+                    actions.push(Action::InsertDiagram(text.clone()));
+                }
+                if ui.button("Cancel").clicked() {
+                    actions.push(Action::CloseDiagram);
+                }
+            });
+        });
+    if let Some(shown) = shown {
+        let layer = shown.response.layer_id;
+        let on_top = ctx.memory(|m| m.areas().top_layer_id(Order::Foreground)) == Some(layer);
+        if !on_top {
+            ctx.move_to_top(layer);
+            ctx.request_repaint();
+        }
+    }
+    if !open {
+        actions.push(Action::CloseDiagram);
     }
 }
 
