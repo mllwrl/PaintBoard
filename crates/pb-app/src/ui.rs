@@ -92,6 +92,13 @@ pub enum Action {
     CloseContextMenu,
     /// Opens or closes the keyboard shortcuts window.
     ToggleShortcuts,
+    /// Starts a countdown of this many minutes.
+    StartTimer(u64),
+    /// Pauses the countdown, or runs it on.
+    PauseTimer,
+    /// Starts the countdown over.
+    ResetTimer,
+    CloseTimer,
     /// Presents the board frame by frame (F5).
     Present,
     /// Moves through the presentation by this many frames (`i64::MIN`/`MAX`: first/last).
@@ -216,6 +223,8 @@ pub struct Model<'a> {
     pub show_templates: bool,
     /// Presenting: the frame shown, how many there are, and its title.
     pub presentation: Option<(usize, usize, String)>,
+    /// The countdown, while shown.
+    pub timer: Option<TimerView>,
     /// The board has frames to present.
     pub can_present: bool,
     /// The comment thread shown.
@@ -261,6 +270,18 @@ pub struct ContextMenuInfo {
     pub has_text: bool,
     /// A single object (not a group) is selected.
     pub single_object: bool,
+}
+
+/// What the countdown shows.
+#[derive(Clone, Debug)]
+pub struct TimerView {
+    /// Time left, like `4:32`.
+    pub text: String,
+    pub running: bool,
+    /// Time is up.
+    pub done: bool,
+    /// Drawn highlighted now, to blink when time is up.
+    pub flash: bool,
 }
 
 /// What the search bar shows.
@@ -525,6 +546,9 @@ impl Ui {
         let diagram_text = &mut self.diagram_text;
         let comment_text = &mut self.comment_text;
         let output = self.ctx.run_pass(input, |ctx| {
+            if let Some(timer) = &model.timer {
+                timer_pill(ctx, timer, &mut actions);
+            }
             if let Some((index, count, title)) = &model.presentation {
                 // Nothing but the board and the controls.
                 *popup = None;
@@ -715,6 +739,14 @@ fn board_menu(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                     {
                         actions.push(Action::Present);
                     }
+                    ui.menu_button("Timer", |ui| {
+                        for minutes in [1, 3, 5, 10, 15, 30] {
+                            if ui.button(format!("{minutes} min")).clicked() {
+                                actions.push(Action::StartTimer(minutes));
+                                ui.close();
+                            }
+                        }
+                    });
                     if ui
                         .button("Templates")
                         .on_hover_text("Start from a ready-made layout")
@@ -1944,6 +1976,55 @@ fn mention_job(ui: &egui::Ui, text: &str, accent: Color32) -> egui::text::Layout
     job.append(&text[at..], 0.0, normal);
     job.wrap.max_width = 290.0;
     job
+}
+
+/// How far below the top of the window the countdown sits, in logical pixels.
+const TIMER_DROP: f32 = 52.0;
+
+/// The countdown at the top middle, with its controls.
+fn timer_pill(ctx: &Context, timer: &TimerView, actions: &mut Vec<Action>) {
+    let screen = ctx.content_rect();
+    let alert = Color32::from_rgb(0xDC, 0x26, 0x26);
+    // Under the board menu, which can reach the middle of narrow windows.
+    Area::new(Id::unique("timer"))
+        .fixed_pos(Pos2::new(screen.center().x, MARGIN + TIMER_DROP))
+        .pivot(Align2::CENTER_TOP)
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            let frame = if timer.flash {
+                panel().fill(alert)
+            } else {
+                panel()
+            };
+            frame.show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let (text, color) = if timer.done {
+                        let color = if timer.flash { Color32::WHITE } else { alert };
+                        ("Time's up".to_owned(), color)
+                    } else {
+                        (timer.text.clone(), ui.visuals().strong_text_color())
+                    };
+                    ui.label(RichText::new(text).size(20.0).color(color).strong());
+                    if !timer.done {
+                        let label = if timer.running { "Pause" } else { "Resume" };
+                        let tip = if timer.running {
+                            "Stop the clock"
+                        } else {
+                            "Run the clock on"
+                        };
+                        if ui.button(label).on_hover_text(tip).clicked() {
+                            actions.push(Action::PauseTimer);
+                        }
+                    }
+                    if ui.button("↺").on_hover_text("Start over").clicked() {
+                        actions.push(Action::ResetTimer);
+                    }
+                    if ui.button("×").on_hover_text("Close").clicked() {
+                        actions.push(Action::CloseTimer);
+                    }
+                });
+            });
+        });
 }
 
 /// The controls at the bottom while presenting.

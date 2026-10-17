@@ -142,6 +142,8 @@ pub struct App {
     show_templates: bool,
     /// Presenting the board frame by frame.
     presentation: Option<Presentation>,
+    /// The countdown timer, while shown.
+    timer: Option<Timer>,
     /// The camera gliding to a new place.
     camera_glide: Option<Glide>,
     /// The window for making a diagram from text is open, with what was wrong with the
@@ -197,6 +199,7 @@ impl App {
             show_templates: false,
             presentation: None,
             camera_glide: None,
+            timer: None,
             diagram: None,
             last_press: None,
             recognition: None,
@@ -392,6 +395,7 @@ impl App {
                     .unwrap_or_default();
                 (p.index, p.frames.len(), title)
             }),
+            timer: self.timer.as_ref().map(|t| t.view(Instant::now())),
             can_present: self
                 .document
                 .objects()
@@ -887,6 +891,20 @@ impl App {
             }
             Action::CloseContextMenu => self.context_menu = None,
             Action::ToggleShortcuts => self.show_shortcuts = !self.show_shortcuts,
+            Action::StartTimer(minutes) => {
+                self.timer = Some(Timer::new(pb_platform::Duration::from_secs(minutes * 60)));
+            }
+            Action::PauseTimer => {
+                if let Some(timer) = &mut self.timer {
+                    timer.toggle(Instant::now());
+                }
+            }
+            Action::ResetTimer => {
+                if let Some(timer) = &mut self.timer {
+                    *timer = Timer::new(timer.duration);
+                }
+            }
+            Action::CloseTimer => self.timer = None,
             Action::Present => self.start_presentation(),
             Action::PresentStep(step) => self.present_step(step),
             Action::StopPresenting => self.stop_presentation(),
@@ -3166,10 +3184,16 @@ impl ApplicationHandler<UserEvent> for App {
             }
             edit.next_blink(now)
         });
+        // A running timer shows each second; a finished one blinks.
+        let timer = self.timer.as_ref().and_then(|t| t.next_tick(now));
+        if timer.is_some_and(|at| at <= now) {
+            self.request_redraw();
+        }
         let wake = [
             self.session.deadline(),
             ui_repaint.filter(|&at| at > now),
             blink,
+            timer.filter(|&at| at > now),
         ]
         .into_iter()
         .flatten()
@@ -3469,6 +3493,72 @@ impl App {
     }
 }
 
+/// A countdown.
+struct Timer {
+    duration: pb_platform::Duration,
+    /// When it last started running; `None` while paused.
+    started: Option<Instant>,
+    /// Time run before the last start.
+    run: pb_platform::Duration,
+}
+
+impl Timer {
+    /// A countdown of `duration`, running from now.
+    fn new(duration: pb_platform::Duration) -> Self {
+        Self {
+            duration,
+            started: Some(Instant::now()),
+            run: pb_platform::Duration::ZERO,
+        }
+    }
+
+    fn elapsed(&self, now: Instant) -> pb_platform::Duration {
+        self.run
+            + self
+                .started
+                .map_or(pb_platform::Duration::ZERO, |s| now.duration_since(s))
+    }
+
+    /// Pauses it, or runs it on.
+    fn toggle(&mut self, now: Instant) {
+        match self.started.take() {
+            Some(start) => self.run += now.duration_since(start),
+            None => self.started = Some(now),
+        }
+    }
+
+    /// What it shows at `now`.
+    fn view(&self, now: Instant) -> crate::ui::TimerView {
+        let elapsed = self.elapsed(now);
+        let left = self.duration.saturating_sub(elapsed);
+        // Rounded up, so it reads 0:00 only when time is up.
+        let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+        let done = left.is_zero();
+        let over = elapsed.saturating_sub(self.duration);
+        crate::ui::TimerView {
+            text: format!("{}:{:02}", secs / 60, secs % 60),
+            running: self.started.is_some(),
+            done,
+            // Blinks twice a second once time is up.
+            flash: done && over.subsec_millis() < 500,
+        }
+    }
+
+    /// When it next needs drawing: at the next whole second while running, every half
+    /// second once time is up; `None` while paused.
+    fn next_tick(&self, now: Instant) -> Option<Instant> {
+        self.started?;
+        let elapsed = self.elapsed(now);
+        let step = if elapsed >= self.duration {
+            pb_platform::Duration::from_millis(500)
+        } else {
+            pb_platform::Duration::from_secs(1)
+        };
+        let into = pb_platform::Duration::from_nanos((elapsed.as_nanos() % step.as_nanos()) as u64);
+        Some(now + (step - into))
+    }
+}
+
 /// Margin around a presented frame, in logical pixels.
 const PRESENT_MARGIN: f64 = 24.0;
 /// How long the camera takes to glide to a new place.
@@ -3665,6 +3755,36 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timers_count_down_pause_and_run_out() {
+        use pb_platform::Duration;
+        let t0 = Instant::now();
+        let secs = |s: u64| t0 + Duration::from_secs(s);
+        let mut timer = Timer {
+            duration: Duration::from_secs(90),
+            started: Some(t0),
+            run: Duration::ZERO,
+        };
+        assert_eq!(timer.view(t0).text, "1:30");
+        assert_eq!(timer.view(t0 + Duration::from_millis(500)).text, "1:30");
+        assert_eq!(timer.view(secs(31)).text, "0:59");
+        // Paused for a minute, it does not move.
+        timer.toggle(secs(31));
+        assert!(!timer.view(secs(91)).running);
+        assert_eq!(timer.view(secs(91)).text, "0:59");
+        assert_eq!(timer.next_tick(secs(91)), None);
+        timer.toggle(secs(91));
+        assert_eq!(timer.view(secs(100)).text, "0:50");
+        // Next tick on the next whole second of running time.
+        assert_eq!(
+            timer.next_tick(secs(100) + Duration::from_millis(300)),
+            Some(secs(101))
+        );
+        let up = timer.view(secs(150) + Duration::from_millis(100));
+        assert!(up.done && up.flash);
+        assert!(!timer.view(secs(150) + Duration::from_millis(600)).flash);
+    }
 
     #[test]
     fn times_read_like_people_say_them() {
