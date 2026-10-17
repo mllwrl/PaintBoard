@@ -4,7 +4,7 @@ use kurbo::{Rect, Vec2};
 use pb_geom::Frame;
 
 use crate::{
-    Card, Cell, Column, ConnectorChange, Content, Label, Line, Link, Merge, ObjectId, Spans,
+    Card, Cell, Column, ConnectorChange, Content, Label, Line, Link, Merge, Node, ObjectId, Spans,
     StyleChange, Tag,
 };
 
@@ -117,6 +117,19 @@ pub enum Command {
     DefineTag(Tag),
     /// Removes a tag from the board. Objects keep its id, unseen, so undo brings it back.
     RemoveTag(Arc<str>),
+    /// Adds a node to a mind map, or changes the node with its id (text, size, parent,
+    /// place, collapsing), and sets the map's bounds. Takes a mind map only.
+    SetNode {
+        id: ObjectId,
+        node: Node,
+        bounds: Rect,
+    },
+    /// Removes nodes from a mind map and sets its bounds.
+    RemoveNodes {
+        id: ObjectId,
+        nodes: Vec<Arc<str>>,
+        bounds: Rect,
+    },
     /// Replaces a connector's label. Takes a connector only.
     SetLabel {
         id: ObjectId,

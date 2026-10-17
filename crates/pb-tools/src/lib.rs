@@ -27,8 +27,8 @@ pub use selection::{Selection, selection_frame, unit_frame};
 use bend::BendGrip;
 use pb_core::{
     Cap, CellRange, Column, Command, Connector, ConnectorChange, Content, Document, End, FrameData,
-    Kanban, KanbanPart, Label, Object, ObjectData, ObjectId, ObjectKind, Route, ShapeKind, Style,
-    Table,
+    Kanban, KanbanPart, Label, MindMap, MindMapPart, Object, ObjectData, ObjectId, ObjectKind,
+    Route, ShapeKind, Style, Table,
 };
 use pb_geom::kurbo::{Line, Point, Rect, Vec2};
 use pb_geom::{Frame, GridLevel, Snapper, xs_of, ys_of};
@@ -69,6 +69,9 @@ pub enum ToolKind {
     Table,
     /// Drag out a kanban board, or click to place one with three columns.
     Kanban,
+    /// Click to place a mind map and type its central topic; run by the app like
+    /// [`Self::Text`].
+    MindMap,
 }
 
 impl ToolKind {
@@ -85,6 +88,7 @@ impl ToolKind {
             Self::Frame => "Frame",
             Self::Table => "Table",
             Self::Kanban => "Kanban",
+            Self::MindMap => "Mind map",
         }
     }
 
@@ -181,6 +185,8 @@ enum Gesture {
     },
     /// Dragging over the cells of the selected table to select a block of them.
     SelectCells,
+    /// Pressed on the collapse toggle of this node of the selected mind map.
+    ToggleNode(usize),
     /// Pressed on card `card` of the selected kanban board `id`: a click selects it, a drag
     /// moves it to where its middle is dropped.
     MoveCard {
@@ -283,6 +289,8 @@ pub struct Tools {
     cells: Option<CellSelection>,
     /// The selected card of the selected kanban board: the board and the card's id.
     card: Option<(ObjectId, std::sync::Arc<str>)>,
+    /// The selected node of the selected mind map: the map and the node's id.
+    node: Option<(ObjectId, std::sync::Arc<str>)>,
 }
 
 /// A block of cells of table `id`, from the cell first picked to the one picked last.
@@ -311,6 +319,7 @@ impl Default for Tools {
             connect_hover: None,
             cells: None,
             card: None,
+            node: None,
         }
     }
 }
@@ -397,6 +406,93 @@ impl Tools {
         self.selection.set(ids);
         self.cells = None;
         self.card = None;
+        self.node = None;
+    }
+
+    /// Selects mind map `id` and its node `node`.
+    pub fn select_node(&mut self, id: ObjectId, node: std::sync::Arc<str>) {
+        self.select_only([id]);
+        self.node = Some((id, node));
+    }
+
+    /// The selected node: its map and index, if a node of the single selected map is
+    /// selected and shown.
+    pub fn selected_node(&self, doc: &Document) -> Option<(ObjectId, usize)> {
+        let (id, node) = self.node.as_ref()?;
+        let (map_id, _, map) = self.single_mindmap(doc)?;
+        let i = map.index(node).filter(|_| map_id == *id)?;
+        map.layout().find(i).map(|_| (map_id, i))
+    }
+
+    /// Where the selected node is (world).
+    fn node_frame(&self, doc: &Document) -> Option<Frame> {
+        let (_, i) = self.selected_node(doc)?;
+        let (_, data, map) = self.single_mindmap(doc)?;
+        let rect = map.node_rect(data.bounds, i)?;
+        Some(Frame::axis_aligned(rect).rotated_about(data.bounds.center(), data.rotation))
+    }
+
+    /// The single selected unlocked mind map, with its data.
+    fn single_mindmap<'a>(
+        &self,
+        doc: &'a Document,
+    ) -> Option<(ObjectId, &'a ObjectData, &'a MindMap)> {
+        let [id] = self.selection.ids() else {
+            return None;
+        };
+        let object = doc.get(*id).filter(|_| !doc.is_locked(*id))?;
+        match &object.data.kind {
+            ObjectKind::MindMap(map) => Some((*id, &object.data, map)),
+            _ => None,
+        }
+    }
+
+    /// The selected node's map and the node: whether it has children and is collapsed.
+    pub fn node_state(&self, doc: &Document) -> Option<(bool, bool)> {
+        let (_, i) = self.selected_node(doc)?;
+        let (_, _, map) = self.single_mindmap(doc)?;
+        Some((!map.children(i).is_empty(), map.nodes[i].collapsed))
+    }
+
+    /// Collapses or expands node `i` of the selected mind map, or the selected node.
+    pub fn toggle_node(&self, doc: &Document, i: Option<usize>) -> Option<Command> {
+        let (id, data, map) = self.single_mindmap(doc)?;
+        let i = match i {
+            Some(i) => i,
+            None => self.selected_node(doc)?.1,
+        };
+        if map.children(i).is_empty() {
+            return None;
+        }
+        let node = pb_core::Node {
+            collapsed: !map.nodes[i].collapsed,
+            ..map.nodes[i].clone()
+        };
+        let bounds = map.with_node(node.clone()).refit(map, data.bounds);
+        Some(Command::SetNode { id, node, bounds })
+    }
+
+    /// Removes the selected node and everything under it, and selects its parent; the
+    /// central topic takes the whole map with it.
+    pub fn remove_selected_node(&mut self, doc: &Document) -> Option<Command> {
+        let (id, i) = self.selected_node(doc)?;
+        let (_, data, map) = self.single_mindmap(doc)?;
+        let Some(parent) = map.nodes[i].parent.clone() else {
+            self.node = None;
+            return Some(Command::Delete(vec![id]));
+        };
+        let gone: Vec<_> = map
+            .subtree(i)
+            .iter()
+            .map(|&n| map.nodes[n].id.clone())
+            .collect();
+        let bounds = map.without(&gone).refit(map, data.bounds);
+        self.node = Some((id, parent));
+        Some(Command::RemoveNodes {
+            id,
+            nodes: gone,
+            bounds,
+        })
     }
 
     /// Selects kanban board `id` and its card `card`.
@@ -443,7 +539,7 @@ impl Tools {
 
     /// Where the selected cells or card are (world), following the object's rotation.
     pub fn cells_frame(&self, doc: &Document) -> Option<Frame> {
-        if let Some(frame) = self.card_frame(doc) {
+        if let Some(frame) = self.card_frame(doc).or_else(|| self.node_frame(doc)) {
             return Some(frame);
         }
         let (_, range) = self.table_cells(doc)?;
@@ -455,7 +551,7 @@ impl Tools {
     /// Deselects the cells or card but keeps their table or board selected. Returns true if
     /// any were selected.
     pub fn clear_cells(&mut self) -> bool {
-        self.cells.take().is_some() | self.card.take().is_some()
+        self.cells.take().is_some() | self.card.take().is_some() | self.node.take().is_some()
     }
 
     /// Selects everything that is not locked.
@@ -465,6 +561,7 @@ impl Tools {
         self.selection.set(ids.copied());
         self.cells = None;
         self.card = None;
+        self.node = None;
     }
 
     /// Returns true if something was selected.
@@ -473,6 +570,7 @@ impl Tools {
         self.selection.clear();
         self.cells = None;
         self.card = None;
+        self.node = None;
         had
     }
 
@@ -484,6 +582,9 @@ impl Tools {
         }
         if self.card.is_some() && self.selected_card(doc).is_none() {
             self.card = None;
+        }
+        if self.node.is_some() && self.selected_node(doc).is_none() {
+            self.node = None;
         }
         if self.hover.is_some_and(|id| !doc.contains(id)) {
             self.hover = None;
@@ -555,7 +656,7 @@ impl Tools {
                 return true;
             }
             // Text editing is handled by the app.
-            ToolKind::Text | ToolKind::Sticky => return false,
+            ToolKind::Text | ToolKind::Sticky | ToolKind::MindMap => return false,
             ToolKind::Connector => {
                 let start = connect::end_at(doc, &pointer, None);
                 self.gesture = Some(Gesture::Connect {
@@ -687,6 +788,26 @@ impl Tools {
                     _ => None,
                 }
             });
+        let part = self
+            .single_mindmap(doc)
+            .filter(|(id, ..)| under == Some(*id) && !toggle)
+            .and_then(|(id, data, map)| {
+                let local = data.frame().to_local(p);
+                Some((id, map.part_at(data.bounds, local)?))
+            });
+        match part {
+            Some((_, MindMapPart::Toggle(i))) => {
+                self.gesture = Some(Gesture::ToggleNode(i));
+                self.hover = None;
+                return true;
+            }
+            Some((id, MindMapPart::Node(i))) => {
+                if let Some((_, _, map)) = self.single_mindmap(doc) {
+                    self.node = Some((id, map.nodes[i].id.clone()));
+                }
+            }
+            None => self.node = None,
+        }
         if let Some((id, card, offset)) = card {
             self.cells = None;
             self.gesture = Some(Gesture::MoveCard {
@@ -795,6 +916,7 @@ impl Tools {
                 *dragging |= pointer.screen_distance(*start) >= CLICK_SLOP;
                 *dragging
             }
+            Some(Gesture::ToggleNode(_)) => false,
             Some(Gesture::SelectCells) => {
                 let Some((id, data, table)) = self.single_table(doc) else {
                     return false;
@@ -973,6 +1095,7 @@ impl Tools {
                 None
             }
             Gesture::SelectCells => None,
+            Gesture::ToggleNode(i) => self.toggle_node(doc, Some(*i)),
             Gesture::MoveCard {
                 id,
                 card,

@@ -125,6 +125,12 @@ pub enum Action {
     FilterColor(Rgba),
     /// Shows everything again.
     ClearFilter,
+    /// Starts a new child (`true`) or sibling of the selected mind map node.
+    AddNode(bool),
+    /// Collapses or expands the selected mind map node.
+    ToggleNode,
+    /// Removes the selected mind map node and everything under it.
+    DeleteNode,
     /// Adds a column at the right of the selected kanban board.
     AddKanbanColumn,
     /// Removes the right column of the selected kanban board.
@@ -260,6 +266,8 @@ pub struct SelectionInfo {
     /// A single kanban board is selected: its number of columns, and whether a card of it
     /// is selected.
     pub kanban: Option<(usize, bool)>,
+    /// A node of a mind map is selected: whether it has children, and is collapsed.
+    pub mind_node: Option<(bool, bool)>,
     /// Tags every selected object has, and tags only some have.
     pub tags_on_all: Vec<std::sync::Arc<str>>,
     pub tags_on_some: Vec<std::sync::Arc<str>>,
@@ -658,6 +666,7 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         (ToolKind::Frame, "Frame (F)", paint_frame),
                         (ToolKind::Table, "Table", paint_table),
                         (ToolKind::Kanban, "Kanban (K)", paint_kanban),
+                        (ToolKind::MindMap, "Mind map", paint_mindmap),
                     ];
                     let mut ink_button = shapes.rect;
                     for (tool, tooltip, paint) in ink_tools {
@@ -1111,6 +1120,24 @@ fn selection_toolbar(
                         }
                         ui.separator();
                     }
+                    if let Some((children, collapsed)) = selection.mind_node {
+                        if ui.button("+ Child").on_hover_text("Add a subtopic (Tab)").clicked() {
+                            actions.push(Action::AddNode(true));
+                        }
+                        if ui.button("+ Sibling").on_hover_text("Add a topic after this one (Enter)").clicked() {
+                            actions.push(Action::AddNode(false));
+                        }
+                        if children {
+                            let label = if collapsed { "Expand" } else { "Collapse" };
+                            if ui.button(label).on_hover_text("Show or hide the subtopics").clicked() {
+                                actions.push(Action::ToggleNode);
+                            }
+                        }
+                        if ui.button("Delete topic").on_hover_text("Delete it with its subtopics (Delete)").clicked() {
+                            actions.push(Action::DeleteNode);
+                        }
+                        ui.separator();
+                    }
                     if let Some((columns, card)) = selection.kanban {
                         let mut buttons = vec![
                             ("+ Column", "Add a column at the right", Action::AddKanbanColumn, true),
@@ -1486,6 +1513,8 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("L", "Connector"),
             ("F", "Frame"),
             ("K", "Kanban board"),
+            ("Tab / Enter", "Mind map: add a subtopic / topic"),
+            ("F2", "Edit the selected topic"),
             ("P / M / E", "Pen / marker / eraser"),
         ],
     ),
@@ -1987,6 +2016,23 @@ fn paint_kanban(painter: &Painter, rect: Rect, color: Color32) {
                 stroke,
                 egui::StrokeKind::Middle,
             );
+        }
+    }
+}
+
+/// A mind map: a central topic with branches to both sides.
+fn paint_mindmap(painter: &Painter, rect: Rect, color: Color32) {
+    let at = |x: f32, y: f32| rect.min + Vec2::new(x, y) * rect.width();
+    let stroke = Stroke::new(1.6, color);
+    painter.rect_stroke(
+        Rect::from_center_size(at(0.5, 0.5), Vec2::new(0.34, 0.22) * rect.width()),
+        3,
+        stroke,
+        egui::StrokeKind::Middle,
+    );
+    for (x0, x1) in [(0.67, 0.95), (0.33, 0.05)] {
+        for y in [0.2, 0.8] {
+            painter.line_segment([at(x0, 0.5), at(x1, y)], stroke);
         }
     }
 }

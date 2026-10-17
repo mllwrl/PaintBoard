@@ -6,7 +6,7 @@ use kurbo::{Point, Rect, Vec2};
 use loro::TreeID;
 use pb_geom::{Frame, ShapeKind};
 
-use crate::{AssetId, Connector, Kanban, Span, Spans, Table};
+use crate::{AssetId, Connector, Kanban, MindMap, Span, Spans, Table};
 
 /// Stable identifier of a board object, unique across replicas.
 ///
@@ -74,6 +74,8 @@ pub enum ObjectKind {
     Table(Table),
     /// Columns of cards: columns in the fill color, cards outlined in the outline color.
     Kanban(Kanban),
+    /// A tree of topics around a central one, laid out automatically over the bounds.
+    MindMap(MindMap),
 }
 
 impl ObjectKind {
@@ -88,6 +90,7 @@ impl ObjectKind {
             Self::Frame(_) => "frame",
             Self::Table(_) => "table",
             Self::Kanban(_) => "kanban",
+            Self::MindMap(_) => "mindmap",
             Self::Shape(shape) => shape_name(shape.kind),
         }
     }
@@ -112,7 +115,12 @@ impl ObjectKind {
     pub fn has_fill(&self) -> bool {
         matches!(
             self,
-            Self::Sticky(_) | Self::Shape(_) | Self::Frame(_) | Self::Table(_) | Self::Kanban(_)
+            Self::Sticky(_)
+                | Self::Shape(_)
+                | Self::Frame(_)
+                | Self::Table(_)
+                | Self::Kanban(_)
+                | Self::MindMap(_)
         )
     }
 
@@ -127,7 +135,8 @@ impl ObjectKind {
             | Self::Image(_)
             | Self::Connector(_)
             | Self::Table(_)
-            | Self::Kanban(_) => None,
+            | Self::Kanban(_)
+            | Self::MindMap(_) => None,
         }
     }
 
@@ -142,7 +151,8 @@ impl ObjectKind {
             | Self::Image(_)
             | Self::Connector(_)
             | Self::Table(_)
-            | Self::Kanban(_) => &[],
+            | Self::Kanban(_)
+            | Self::MindMap(_) => &[],
         }
     }
 }
@@ -404,7 +414,7 @@ impl StyleChange {
     /// have text styles; kanban boards have a text color only, their layout is fixed.
     pub fn for_kind(mut self, kind: &ObjectKind) -> Self {
         if !matches!(kind, ObjectKind::Shape(_) | ObjectKind::Table(_)) {
-            if !matches!(kind, ObjectKind::Kanban(_)) {
+            if !matches!(kind, ObjectKind::Kanban(_) | ObjectKind::MindMap(_)) {
                 self.text_color = None;
             }
             self.font_size = None;
@@ -741,7 +751,7 @@ impl ObjectData {
             ObjectKind::Shape(shape) => Some(Shape::text_box(shape.kind, self.bounds, &self.style)),
             ObjectKind::Text(_) | ObjectKind::Ink(_) | ObjectKind::Image(_) => None,
             ObjectKind::Connector(_) | ObjectKind::Frame(_) => None,
-            ObjectKind::Table(_) | ObjectKind::Kanban(_) => None,
+            ObjectKind::Table(_) | ObjectKind::Kanban(_) | ObjectKind::MindMap(_) => None,
         }
     }
 

@@ -111,6 +111,14 @@ mod key {
     pub const CARD: &str = "card:";
     pub const CARD_MARKS: &str = "cardMarks:";
     pub const CARD_AT: &str = "cardAt:";
+    /// Mind maps: each node's text, inline styles, `parent;order` (no parent for the
+    /// central topic), measured text size `w;h` and flags (`c` collapsed, `l` left) under
+    /// these prefixes and its id. A node exists while it has a place.
+    pub const NODE: &str = "node:";
+    pub const NODE_MARKS: &str = "nodeMarks:";
+    pub const NODE_AT: &str = "nodeAt:";
+    pub const NODE_SIZE: &str = "nodeSize:";
+    pub const NODE_FLAGS: &str = "nodeFlags:";
 
     /// `kind` of group nodes.
     pub const GROUP: &str = "group";
@@ -759,6 +767,39 @@ impl Document {
                 }
                 write_bounds(&meta, bounds.abs())?;
             }
+            Command::SetNode { id, node, bounds } => {
+                let Some(ObjectKind::MindMap(map)) = self.get(id).map(|o| &o.data.kind) else {
+                    return Err(Error::UnknownObject(id));
+                };
+                let old = map.index(&node.id).map(|i| map.nodes[i].clone());
+                let meta = self.tree.get_meta(self.nodes[&id])?;
+                write_node(&meta, &node, old.as_ref())?;
+                write_bounds(&meta, bounds.abs())?;
+            }
+            Command::RemoveNodes { id, nodes, bounds } => {
+                if !matches!(
+                    self.get(id).map(|o| &o.data.kind),
+                    Some(ObjectKind::MindMap(_))
+                ) {
+                    return Err(Error::UnknownObject(id));
+                }
+                let meta = self.tree.get_meta(self.nodes[&id])?;
+                for node in &nodes {
+                    for prefix in [
+                        key::NODE,
+                        key::NODE_MARKS,
+                        key::NODE_AT,
+                        key::NODE_SIZE,
+                        key::NODE_FLAGS,
+                    ] {
+                        let k = format!("{prefix}{node}");
+                        if meta.get(&k).is_some() {
+                            meta.delete(&k)?;
+                        }
+                    }
+                }
+                write_bounds(&meta, bounds.abs())?;
+            }
             Command::SetColumns {
                 id,
                 columns,
@@ -1344,6 +1385,11 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
                 write_cell(meta, row, col, cell)?;
             }
         }
+        ObjectKind::MindMap(map) => {
+            for node in map.nodes.iter() {
+                write_node(meta, node, None)?;
+            }
+        }
         ObjectKind::Kanban(kanban) => {
             write_columns(meta, &kanban.columns, &[])?;
             for card in kanban.cards.iter() {
@@ -1595,6 +1641,95 @@ fn write_card(meta: &LoroMap, card: &crate::Card, old: Option<&crate::Card>) -> 
         }
     }
     Ok(())
+}
+
+/// Writes the parts of a mind map node that differ from `old`.
+fn write_node(meta: &LoroMap, node: &crate::Node, old: Option<&crate::Node>) -> Result<()> {
+    let id = &node.id;
+    if old.is_none_or(|o| o.parent != node.parent || o.order != node.order) {
+        let parent = node.parent.as_deref().unwrap_or("");
+        meta.insert(
+            &format!("{}{id}", key::NODE_AT),
+            format!("{parent};{}", node.order),
+        )?;
+    }
+    if old.is_none_or(|o| o.text_size != node.text_size) {
+        let size = format!("{};{}", node.text_size.width, node.text_size.height);
+        meta.insert(&format!("{}{id}", key::NODE_SIZE), size)?;
+    }
+    if old.is_none_or(|o| o.collapsed != node.collapsed || o.left != node.left) {
+        let mut flags = String::new();
+        if node.collapsed {
+            flags.push('c');
+        }
+        if node.left {
+            flags.push('l');
+        }
+        meta.insert(&format!("{}{id}", key::NODE_FLAGS), flags)?;
+    }
+    if old.is_none_or(|o| o.text != node.text) {
+        meta.insert(&format!("{}{id}", key::NODE), &*node.text)?;
+    }
+    let spans = rich::fit_to(&node.spans, &node.text);
+    if old.is_none_or(|o| *o.spans != *spans) {
+        let k = format!("{}{id}", key::NODE_MARKS);
+        if spans.is_empty() {
+            if meta.get(&k).is_some() {
+                meta.delete(&k)?;
+            }
+        } else {
+            meta.insert(&k, rich::to_bytes(&spans))?;
+        }
+    }
+    Ok(())
+}
+
+fn read_mindmap(meta: &LoroMap) -> Option<crate::MindMap> {
+    let mut places = Vec::new();
+    meta.for_each(|k, v| {
+        if let (Some(id), ValueOrContainer::Value(LoroValue::String(at))) =
+            (k.strip_prefix(key::NODE_AT), v)
+            && let Some((parent, order)) = at.split_once(';')
+            && let Ok(order) = order.parse::<f64>()
+            && order.is_finite()
+        {
+            places.push((id.to_owned(), parent.to_owned(), order));
+        }
+    });
+    let nodes: Vec<crate::Node> = places
+        .into_iter()
+        .map(|(id, parent, order)| {
+            let text = get_str(meta, &format!("{}{id}", key::NODE)).unwrap_or_default();
+            let spans: Spans = match meta.get(&format!("{}{id}", key::NODE_MARKS)) {
+                Some(ValueOrContainer::Value(LoroValue::Binary(bytes))) => {
+                    rich::fit_to(&rich::from_bytes(&bytes), &text).into()
+                }
+                _ => Spans::default(),
+            };
+            let text_size = get_str(meta, &format!("{}{id}", key::NODE_SIZE))
+                .and_then(|s| {
+                    let (w, h) = s.split_once(';')?;
+                    Some(kurbo::Size::new(w.parse().ok()?, h.parse().ok()?))
+                })
+                .filter(|s| s.width.is_finite() && s.height.is_finite())
+                .unwrap_or_default();
+            let flags = get_str(meta, &format!("{}{id}", key::NODE_FLAGS)).unwrap_or_default();
+            crate::Node {
+                id: id.into(),
+                parent: (!parent.is_empty()).then(|| parent.into()),
+                order,
+                text: text.into(),
+                spans,
+                text_size,
+                collapsed: flags.contains('c'),
+                left: flags.contains('l'),
+            }
+        })
+        .collect();
+    let map = crate::MindMap {
+        nodes: nodes.into(),
+    };
+    map.root().map(|_| map)
 }
 
 fn read_kanban(meta: &LoroMap) -> Option<crate::Kanban> {
@@ -1941,6 +2076,9 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
         }
         ValueOrContainer::Value(LoroValue::String(s)) if &**s == "kanban" => {
             ObjectKind::Kanban(read_kanban(meta)?)
+        }
+        ValueOrContainer::Value(LoroValue::String(s)) if &**s == "mindmap" => {
+            ObjectKind::MindMap(read_mindmap(meta)?)
         }
         ValueOrContainer::Value(LoroValue::String(s)) if &**s == "frame" => {
             let title = get_str(meta, key::TEXT).unwrap_or_default();
@@ -2875,6 +3013,77 @@ mod tests {
         })
         .unwrap();
         eprintln!("one move: {:?}", t.elapsed());
+    }
+
+    #[test]
+    fn mind_map_nodes_are_stored_one_by_one() {
+        let mut doc = Document::new();
+        let size = kurbo::Size::new(80.0, 24.0);
+        let map = crate::MindMap::new(doc.new_line_id(), "Plan", size);
+        let root = map.nodes[0].id.clone();
+        let mut data = rect(0.0, 0.0, 200.0, 100.0);
+        data.kind = ObjectKind::MindMap(map.clone());
+        let id = create(&mut doc, data);
+        let current = |doc: &Document| match &doc.get(id).unwrap().data.kind {
+            ObjectKind::MindMap(m) => m.clone(),
+            _ => panic!("not a mind map"),
+        };
+        let node = crate::Node {
+            id: doc.new_line_id().into(),
+            parent: Some(root.clone()),
+            order: 0.0,
+            text: "Step".into(),
+            spans: Spans::default(),
+            text_size: size,
+            collapsed: false,
+            left: true,
+        };
+        let bounds = Rect::new(-100.0, 0.0, 200.0, 100.0);
+        doc.apply(Command::SetNode {
+            id,
+            node: node.clone(),
+            bounds,
+        })
+        .unwrap();
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(current(&loaded), current(&doc));
+        assert_eq!(current(&doc).nodes.len(), 2);
+        // One replica collapses the node while another renames it.
+        let mut other = Document::from_snapshot(&doc.snapshot()).unwrap();
+        doc.apply(Command::SetNode {
+            id,
+            node: crate::Node {
+                collapsed: true,
+                ..node.clone()
+            },
+            bounds,
+        })
+        .unwrap();
+        other
+            .apply(Command::SetNode {
+                id,
+                node: crate::Node {
+                    text: "First step".into(),
+                    ..node.clone()
+                },
+                bounds,
+            })
+            .unwrap();
+        doc.doc.import(&other.snapshot()).unwrap();
+        doc.refresh();
+        let m = current(&doc);
+        let n = &m.nodes[m.index(&node.id).unwrap()];
+        assert!(n.collapsed && n.left);
+        assert_eq!(&*n.text, "First step");
+        doc.apply(Command::RemoveNodes {
+            id,
+            nodes: vec![node.id.clone()],
+            bounds,
+        })
+        .unwrap();
+        assert_eq!(current(&doc).nodes.len(), 1);
+        doc.undo().unwrap();
+        assert_eq!(current(&doc).nodes.len(), 2);
     }
 
     #[test]

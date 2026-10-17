@@ -595,6 +595,7 @@ impl App {
                         | ObjectKind::Frame(_)
                         | ObjectKind::Table(_)
                         | ObjectKind::Kanban(_)
+                        | ObjectKind::MindMap(_)
                 )
             }),
             has_width: leaves.iter().any(|o| {
@@ -610,10 +611,12 @@ impl App {
             has_stroke: leaves
                 .iter()
                 .any(|o| !matches!(o.data.kind, ObjectKind::Image(_) | ObjectKind::Frame(_))),
-            stroke_label: if leaves
-                .iter()
-                .any(|o| matches!(o.data.kind, ObjectKind::Shape(_) | ObjectKind::Kanban(_)))
-            {
+            stroke_label: if leaves.iter().any(|o| {
+                matches!(
+                    o.data.kind,
+                    ObjectKind::Shape(_) | ObjectKind::Kanban(_) | ObjectKind::MindMap(_)
+                )
+            }) {
                 "Outline"
             } else if leaves
                 .iter()
@@ -637,6 +640,7 @@ impl App {
                 }),
                 _ => None,
             },
+            mind_node: self.tools.node_state(&self.document),
             kanban: self
                 .tools
                 .kanban_columns(&self.document)
@@ -840,6 +844,17 @@ impl App {
             Action::FilterTag(id) => self.filter.toggle_tag(&id),
             Action::FilterColor(color) => self.filter.toggle_color(color),
             Action::ClearFilter => self.filter = pb_core::Filter::default(),
+            Action::AddNode(child) => self.add_node(child),
+            Action::ToggleNode => {
+                if let Some(command) = self.tools.toggle_node(&self.document, None) {
+                    self.apply(command);
+                }
+            }
+            Action::DeleteNode => {
+                if let Some(command) = self.tools.remove_selected_node(&self.document) {
+                    self.apply(command);
+                }
+            }
             Action::AddKanbanColumn => {
                 if let Some(command) = self.tools.add_kanban_column(&self.document) {
                     self.apply(command);
@@ -1092,6 +1107,74 @@ impl App {
         self.start_editing(edit);
     }
 
+    /// Places a mind map with its central topic on `at` (world) and starts typing it.
+    fn add_mindmap_at(&mut self, at: Point) {
+        self.finish_editing();
+        self.tools.set_active(ToolKind::Select);
+        const TOPIC: &str = "Central topic";
+        let probe = pb_core::MindMap::new("probe", TOPIC, pb_geom::kurbo::Size::ZERO);
+        let size = probe.font_size(0);
+        let layout = self
+            .text
+            .engine()
+            .layout(TOPIC, size, Some(pb_core::MindMap::WRAP_WIDTH));
+        let text_size = pb_geom::kurbo::Size::new(layout.width, layout.height);
+        let map = pb_core::MindMap::new(self.document.new_line_id(), TOPIC, text_size);
+        let root = map.nodes[0].id.clone();
+        let natural = map.layout().bounds.size();
+        let zoom = self.camera.zoom();
+        let bounds = pb_geom::kurbo::Rect::from_center_size(at, natural / zoom);
+        let data = ObjectData {
+            kind: ObjectKind::MindMap(map),
+            bounds,
+            rotation: 0.0,
+            style: pb_core::MindMap::style(),
+            tags: Default::default(),
+            link: None,
+        };
+        self.apply(Command::Create(vec![data.into()]));
+        if let [id] = self.tools.selection().ids() {
+            let id = *id;
+            let engine = self.text.engine();
+            if let Some(mut edit) = TextEdit::node(engine, &self.document, id, &root) {
+                edit.select_all(engine);
+                self.start_editing(edit);
+            }
+        }
+    }
+
+    /// Tab or Enter while typing a node: keeps it and starts a new child or sibling.
+    fn next_node(&mut self, child: bool) {
+        let Some((id, parent, order, left)) =
+            self.editing.as_ref().and_then(|e| e.next_node(child))
+        else {
+            return;
+        };
+        self.finish_editing();
+        let engine = self.text.engine();
+        if let Some(edit) = TextEdit::new_node(engine, &self.document, id, &parent, order, left) {
+            self.start_editing(edit);
+        }
+    }
+
+    /// Tab or Enter on the selected node: starts typing a new child or sibling of it.
+    fn add_node(&mut self, child: bool) {
+        let Some((id, i)) = self.tools.selected_node(&self.document) else {
+            return;
+        };
+        let place = match self.document.get(id).map(|o| &o.data.kind) {
+            Some(ObjectKind::MindMap(map)) => map.new_node_place(i, child),
+            _ => None,
+        };
+        let Some((parent, order, left)) = place else {
+            return;
+        };
+        let engine = self.text.engine();
+        if let Some(edit) = TextEdit::new_node(engine, &self.document, id, &parent, order, left) {
+            self.start_editing(edit);
+        }
+    }
+
     /// Opens the right-click menu at the pointer. Like elsewhere, the object under it gets
     /// selected unless it already is; on empty board the selection is dropped.
     fn open_context_menu(&mut self) {
@@ -1327,6 +1410,19 @@ impl App {
         let zoom = self.camera.zoom();
         let engine = self.text.engine();
         let card = self.tools.selected_card(&self.document);
+        if let Some((_, i)) = self.tools.selected_node(&self.document) {
+            let node = match self.document.get(id).map(|o| &o.data.kind) {
+                Some(ObjectKind::MindMap(map)) => map.nodes[i].id.clone(),
+                _ => return false,
+            };
+            let engine = self.text.engine();
+            let Some(mut edit) = TextEdit::node(engine, &self.document, id, &node) else {
+                return false;
+            };
+            edit.select_all(engine);
+            self.start_editing(edit);
+            return true;
+        }
         let edit = match (self.tools.table_cells(&self.document), card) {
             (Some((_, range)), _) => {
                 TextEdit::table_cell(engine, &self.document, id, (range.row0, range.col0))
@@ -1399,6 +1495,10 @@ impl App {
         }
         if self.tools.active() == ToolKind::Sticky {
             self.add_sticky_at(pointer.world);
+            return true;
+        }
+        if self.tools.active() == ToolKind::MindMap {
+            self.add_mindmap_at(pointer.world);
             return true;
         }
         if self.tools.active() == ToolKind::Select
@@ -1944,6 +2044,22 @@ impl App {
             } else {
                 ZOrder::Backward
             }),
+            KeyCode::Tab if self.tools.selected_node(&self.document).is_some() => {
+                self.add_node(true);
+            }
+            KeyCode::Enter | KeyCode::NumpadEnter
+                if !ctrl && self.tools.selected_node(&self.document).is_some() =>
+            {
+                self.add_node(false);
+            }
+            KeyCode::F2 => return self.edit_selected_text(),
+            KeyCode::Delete | KeyCode::Backspace
+                if self.tools.selected_node(&self.document).is_some() =>
+            {
+                if let Some(command) = self.tools.remove_selected_node(&self.document) {
+                    self.apply(command);
+                }
+            }
             KeyCode::Delete | KeyCode::Backspace
                 if self.tools.selected_card(&self.document).is_some() =>
             {
@@ -2157,11 +2273,21 @@ impl App {
         let scale = self.scale();
         let mut ui_consumed = false;
         // Typing on the canvas is not for egui, which would take Tab to move its focus.
-        let canvas_typing = self.editing.is_some()
+        // Nor is Tab anywhere else unless a text field has focus: on the board it adds
+        // sticky notes, cells and topics.
+        let ui_typing = self.ui.as_ref().is_some_and(Ui::wants_keyboard);
+        let board_tab = !ui_typing
             && matches!(
-                event,
-                WindowEvent::KeyboardInput { .. } | WindowEvent::Ime(_)
+                &event,
+                WindowEvent::KeyboardInput { event, .. }
+                    if event.logical_key == Key::Named(NamedKey::Tab)
             );
+        let canvas_typing = board_tab
+            || self.editing.is_some()
+                && matches!(
+                    event,
+                    WindowEvent::KeyboardInput { .. } | WindowEvent::Ime(_)
+                );
         if feed_ui
             && !canvas_typing
             && let (Some(ui), Some(window)) = (&mut self.ui, &self.window)
@@ -2209,12 +2335,17 @@ impl App {
                             // Escape from a cell or card leaves it selected.
                             let cell = edit.edited_cell();
                             let card = edit.edited_card();
+                            let node = edit.edited_node();
                             self.finish_editing();
                             if let Some((id, cell)) = cell {
                                 self.tools.select_cell(id, cell);
                             }
                             if let Some((id, card)) = card {
                                 self.tools.select_card(id, card);
+                                self.tools.sync(&self.document);
+                            }
+                            if let Some((id, node)) = node {
+                                self.tools.select_node(id, node);
                                 self.tools.sync(&self.document);
                             }
                         }
@@ -2225,6 +2356,7 @@ impl App {
                         KeyOutcome::NextSticky { below } => self.next_sticky(below),
                         KeyOutcome::NextCell { back } => self.next_cell(back),
                         KeyOutcome::NextCard => self.next_card(),
+                        KeyOutcome::NextNode { child } => self.next_node(child),
                     }
                     true
                 } else {

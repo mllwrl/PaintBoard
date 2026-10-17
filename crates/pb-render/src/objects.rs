@@ -336,6 +336,7 @@ pub(crate) fn draw_object(
                 }
             }
         }
+        ObjectKind::MindMap(map) => draw_mindmap(scene, transform, data, map, text),
         ObjectKind::Frame(frame) => {
             let b = data.bounds;
             scene.fill(Fill::NonZero, transform, color(style.fill), None, &b);
@@ -502,6 +503,98 @@ pub fn painted_bounds(data: &ObjectData) -> Rect {
 }
 
 /// How far an object paints outside its bounds: half its outline, or a sticky's shadow.
+/// Draws a mind map over `data`'s bounds; `transform` maps its unrotated coordinates to
+/// physical pixels.
+fn draw_mindmap(
+    scene: &mut Scene,
+    transform: Affine,
+    data: &ObjectData,
+    map: &pb_core::MindMap,
+    text: &mut TextRenderer,
+) {
+    let style = &data.style;
+    let b = data.bounds;
+    let layout = map.layout();
+    let (scale, _) = map.transform(&layout, b);
+    let world = |r: Rect| map.to_world(&layout, b, r);
+    let branch =
+        |p: &pb_core::mindmap::Placed| color(pb_core::MindMap::branch_color(p.branch, style));
+    for &(from, to) in &layout.edges {
+        let (parent, child) = (&layout.placed[from], &layout.placed[to]);
+        let (pr, cr) = (world(parent.rect), world(child.rect));
+        let (start, end) = if child.left {
+            ((pr.x0, pr.center().y), (cr.x1, cr.center().y))
+        } else {
+            ((pr.x1, pr.center().y), (cr.x0, cr.center().y))
+        };
+        let mid = (start.0 + end.0) / 2.0;
+        let mut path = BezPath::new();
+        path.move_to(start);
+        path.curve_to((mid, start.1), (mid, end.1), end);
+        let width = if parent.depth == 0 { 3.0 } else { 2.0 } * scale;
+        let stroke = Stroke::new(width).with_caps(Cap::Round);
+        scene.stroke(&stroke, transform, branch(child), None, &path);
+    }
+    let ink = color(style.text_color());
+    let [r, g, bl, _] = style.fill.to_bytes();
+    let dark_root = 0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(bl) < 140.0;
+    for placed in &layout.placed {
+        let rect = world(placed.rect);
+        let node = &map.nodes[placed.index];
+        let radius = (rect.height() / 2.0).min(10.0 * scale);
+        let shape = RoundedRect::from_rect(rect, radius);
+        let brush = if placed.depth == 0 {
+            scene.fill(Fill::NonZero, transform, color(style.fill), None, &shape);
+            if dark_root {
+                Color::from_rgb8(0xFF, 0xFF, 0xFF)
+            } else {
+                ink
+            }
+        } else {
+            scene.fill(Fill::NonZero, transform, CARD_FILL, None, &shape);
+            let width = if placed.depth == 1 { 2.0 } else { 1.0 } * scale;
+            scene.stroke(&Stroke::new(width), transform, branch(placed), None, &shape);
+            ink
+        };
+        let text_box = map.placed_text_box(&layout, b, placed);
+        text.draw_fitted(scene, transform, (&node.text, &node.spans), text_box, brush);
+        let Some(at) = map.toggle_at(placed) else {
+            continue;
+        };
+        let center = world(Rect::from_center_size(at, (0.0, 0.0))).center();
+        let r = pb_core::MindMap::toggle_radius() * scale;
+        let dot = vello::kurbo::Circle::new(center, r);
+        scene.fill(Fill::NonZero, transform, CARD_FILL, None, &dot);
+        scene.stroke(
+            &Stroke::new(1.5 * scale),
+            transform,
+            branch(placed),
+            None,
+            &dot,
+        );
+        if placed.hidden > 0 {
+            let label: Arc<str> = placed.hidden.to_string().into();
+            let size = r * 1.1;
+            let layout = text.engine.layout(&label, size, None);
+            let origin = (
+                center.x - layout.width / 2.0,
+                center.y - layout.height / 2.0,
+            );
+            draw_text(scene, transform, origin, &layout, branch(placed));
+        } else {
+            let arm = r * 0.5;
+            let line = Line::new((center.x - arm, center.y), (center.x + arm, center.y));
+            scene.stroke(
+                &Stroke::new(1.5 * scale),
+                transform,
+                branch(placed),
+                None,
+                &line,
+            );
+        }
+    }
+}
+
 /// Tag pills: font size relative to a sticky note's side, or in world units under other
 /// objects.
 const STICKY_TAG_FONT: f64 = 0.07;

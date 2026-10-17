@@ -5,8 +5,9 @@
 //! the whole edit and autosave and sync see finished text only.
 
 use pb_core::{
-    Card, Cell, Command, Document, FrameData, Kanban, KanbanPart, Label, ObjectData, ObjectId,
-    ObjectKind, Rgba, Shape, Span, Sticky, Style, Table, Text, TextBox, TextMarks,
+    Card, Cell, Command, Document, FrameData, Kanban, KanbanPart, Label, MindMap, MindMapPart,
+    Node, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Span, Sticky, Style, Table, Text, TextBox,
+    TextMarks,
 };
 use pb_geom::kurbo::{Point, Rect, Size, Vec2};
 use pb_geom::{Frame, ShapeKind};
@@ -51,6 +52,11 @@ pub enum KeyOutcome {
     },
     /// Tab on a kanban card: stop editing and start a new card below it.
     NextCard,
+    /// Tab (`child`) or Enter on a mind map node: stop editing and start a new child, or a
+    /// new sibling after it.
+    NextNode {
+        child: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,6 +99,9 @@ enum Placement {
         part: BoardPart,
         text_box: TextBox,
     },
+    /// A node of a mind map (see `TextEdit::mindmap`): its box grows with the text and the
+    /// map is laid out again as it is typed.
+    MindNode,
 }
 
 /// What of a kanban board is edited.
@@ -117,6 +126,8 @@ impl Placement {
                 shape: None,
             } => Some(Sticky::text_box(bounds)),
             Self::Cell { text_box, .. } | Self::Board { text_box, .. } => Some(text_box),
+            // Not fitted: the box grows with the text.
+            Self::MindNode => None,
             Self::Free { .. } | Self::Label { .. } | Self::Title { .. } => None,
         }
     }
@@ -142,8 +153,11 @@ pub struct TextEdit {
     table: Option<Table>,
     /// The kanban board whose card or title this is, with the card if it is new.
     kanban: Option<Kanban>,
-    /// The card is not on the board yet: it is added only if it gets some text.
+    /// The card or node is not on the board yet: it is added only if it gets some text.
     new_card: bool,
+    /// The mind map whose node this is, as it was, with its bounds, and the node as it was
+    /// (or new).
+    mindmap: Option<(MindMap, Rect, Node)>,
 }
 
 impl TextEdit {
@@ -175,6 +189,7 @@ impl TextEdit {
             table: None,
             kanban: None,
             new_card: false,
+            mindmap: None,
         }
     }
 
@@ -214,6 +229,7 @@ impl TextEdit {
             table: None,
             kanban: None,
             new_card: false,
+            mindmap: None,
         };
         this.refit(engine);
         this
@@ -266,6 +282,7 @@ impl TextEdit {
                 table: None,
                 kanban: None,
                 new_card: false,
+                mindmap: None,
             }),
             ObjectKind::Sticky(sticky) => Some(Self::fitted(
                 engine,
@@ -315,6 +332,7 @@ impl TextEdit {
                     table: None,
                     kanban: None,
                     new_card: false,
+                    mindmap: None,
                 })
             }
             ObjectKind::Frame(frame) => Some(Self {
@@ -335,6 +353,7 @@ impl TextEdit {
                 table: None,
                 kanban: None,
                 new_card: false,
+                mindmap: None,
             }),
             ObjectKind::Table(table) => {
                 let local = near.map(|p| data.frame().to_local(p));
@@ -352,8 +371,148 @@ impl TextEdit {
                 };
                 Self::board(engine, target, data, kanban.clone(), part, false)
             }
+            ObjectKind::MindMap(map) => {
+                let local = data.frame().to_local(near?);
+                let MindMapPart::Node(i) = map.part_at(data.bounds, local)? else {
+                    return None;
+                };
+                Some(Self::mind_node(
+                    engine,
+                    target,
+                    data,
+                    map,
+                    map.nodes[i].clone(),
+                    false,
+                ))
+            }
             ObjectKind::Ink(_) | ObjectKind::Image(_) => None,
         }
+    }
+
+    /// Edits `node` of the mind map object `data` (with `map`); a `new` node is added only
+    /// if it gets some text.
+    fn mind_node(
+        engine: &mut TextEngine,
+        target: Target,
+        data: &ObjectData,
+        map: &MindMap,
+        node: Node,
+        new: bool,
+    ) -> Self {
+        let layout = map.layout();
+        let (scale, _) = map.transform(&layout, data.bounds);
+        let size = map_font_size(map, &node) * scale;
+        let mut editor = TextEditor::with_spans(engine, &node.text, &node.spans, size);
+        editor.set_wrap(Some(MindMap::WRAP_WIDTH * scale), TextAlign::Start);
+        Self {
+            target,
+            editor,
+            placement: Placement::MindNode,
+            rotation: data.rotation,
+            style: data.style,
+            original: node.text.to_string(),
+            original_spans: node.spans.to_vec(),
+            selecting: false,
+            active_at: Instant::now(),
+            caret_drawn: false,
+            connector: None,
+            table: None,
+            kanban: None,
+            new_card: new,
+            mindmap: Some((map.clone(), data.bounds, node)),
+        }
+    }
+
+    /// Edits a new, empty node of mind map `id`: a child of node `parent` with `order`,
+    /// on the left if `left`.
+    pub fn new_node(
+        engine: &mut TextEngine,
+        doc: &Document,
+        id: ObjectId,
+        parent: &str,
+        order: f64,
+        left: bool,
+    ) -> Option<Self> {
+        let data = &doc.get(id)?.data;
+        let ObjectKind::MindMap(map) = &data.kind else {
+            return None;
+        };
+        map.index(parent)?;
+        let node = Node {
+            id: doc.new_line_id().into(),
+            parent: Some(parent.into()),
+            order,
+            text: "".into(),
+            spans: Default::default(),
+            text_size: pb_geom::kurbo::Size::ZERO,
+            collapsed: false,
+            left,
+        };
+        Some(Self::mind_node(
+            engine,
+            Target::Existing(id),
+            data,
+            map,
+            node,
+            true,
+        ))
+    }
+
+    /// Edits node `node` (by id) of mind map `id`.
+    pub fn node(engine: &mut TextEngine, doc: &Document, id: ObjectId, node: &str) -> Option<Self> {
+        let data = &doc.get(id)?.data;
+        let ObjectKind::MindMap(map) = &data.kind else {
+            return None;
+        };
+        let node = map.nodes[map.index(node)?].clone();
+        Some(Self::mind_node(
+            engine,
+            Target::Existing(id),
+            data,
+            map,
+            node,
+            false,
+        ))
+    }
+
+    /// The map and the id of the node being edited, when editing a mind map node.
+    pub fn edited_node(&self) -> Option<(ObjectId, std::sync::Arc<str>)> {
+        match (self.target, &self.mindmap) {
+            (Target::Existing(id), Some((_, _, node))) => Some((id, node.id.clone())),
+            _ => None,
+        }
+    }
+
+    /// Where a node added after the edited one goes: a child of it (`child`), or its next
+    /// sibling; the map, parent, order and side.
+    pub fn next_node(&self, child: bool) -> Option<(ObjectId, std::sync::Arc<str>, f64, bool)> {
+        let (id, _) = self.edited_node()?;
+        let (map, _, node) = self.mindmap.as_ref()?;
+        let map = map.with_node(node.clone());
+        let (parent, order, left) = map.new_node_place(map.index(&node.id)?, child)?;
+        Some((id, parent, order, left))
+    }
+
+    /// The mind map as it is now, with the edited node's text measured, and its bounds,
+    /// which keep the central topic in place.
+    fn live_map(&mut self, engine: &mut TextEngine) -> Option<(MindMap, Rect, usize)> {
+        let (base, base_bounds, node) = self.mindmap.clone()?;
+        let layout = base.layout();
+        let (scale, _) = base.transform(&layout, base_bounds);
+        let text_layout = self.editor.layout(engine);
+        let node = Node {
+            text: self.editor.display_text().into(),
+            spans: self.editor.display_spans().into(),
+            text_size: pb_geom::kurbo::Size::new(
+                text_layout.width / scale,
+                text_layout.height / scale,
+            ),
+            ..node
+        };
+        let live = base.with_node(node.clone());
+        let bounds = live.refit(&base, base_bounds);
+        let i = live.index(&node.id)?;
+        Some((live, bounds, i))
     }
 
     /// Edits a card or column title of the kanban board object `data`, laid out as in
@@ -581,6 +740,10 @@ impl TextEdit {
             }
             Placement::Fitted { bounds, .. } => bounds,
             Placement::Cell { rect, .. } | Placement::Board { rect, .. } => rect,
+            Placement::MindNode => self
+                .live_map(engine)
+                .and_then(|(map, bounds, i)| map.text_box(bounds, i))
+                .map_or(Rect::ZERO, |b| b.area),
             Placement::Label { center, .. } => {
                 let layout = self.editor.layout(engine);
                 let width = layout.width.max(self.editor.size() * MIN_WIDTH);
@@ -603,6 +766,7 @@ impl TextEdit {
             Placement::Title { bounds, .. }
             | Placement::Cell { bounds, .. }
             | Placement::Board { bounds, .. } => bounds,
+            Placement::MindNode => self.live_map(engine).map_or(Rect::ZERO, |(_, b, _)| b),
             _ => self.frame(engine).rect,
         }
     }
@@ -612,6 +776,15 @@ impl TextEdit {
         match self.placement {
             Placement::Free { origin, .. } => origin,
             Placement::Title { .. } => self.frame(engine).rect.origin(),
+            // The box is as big as the text, or wider for short text: centered there.
+            Placement::MindNode => {
+                let area = self.frame(engine).rect;
+                let layout = self.editor.layout(engine);
+                Point::new(
+                    area.center().x - layout.width / 2.0,
+                    area.center().y - layout.height / 2.0,
+                )
+            }
             Placement::Fitted { .. } | Placement::Cell { .. } | Placement::Board { .. } => {
                 let text_box = self.placement.text_box(&self.style);
                 let text_box = text_box.expect("fitted placement");
@@ -653,6 +826,7 @@ impl TextEdit {
                     part: BoardPart::Card(_),
                     ..
                 }
+                | Placement::MindNode
         )
     }
 
@@ -749,6 +923,7 @@ impl TextEdit {
         let ctrl = modifiers.control_key();
         let shift = modifiers.shift_key();
         let card = self.edited_card().is_some();
+        let node = self.mindmap.is_some();
         let ed = &mut self.editor;
         // Board shortcuts by physical key, like elsewhere.
         if ctrl && let PhysicalKey::Code(code) = event.physical_key {
@@ -816,6 +991,13 @@ impl TextEdit {
             }
             Key::Named(NamedKey::Tab) if card && !ctrl && !shift && !ed.is_composing() => {
                 return KeyOutcome::NextCard;
+            }
+            Key::Named(NamedKey::Tab) if node && !ctrl && !shift && !ed.is_composing() => {
+                return KeyOutcome::NextNode { child: true };
+            }
+            // Enter adds a sibling; Shift+Enter breaks the line.
+            Key::Named(NamedKey::Enter) if node && !shift && !ed.is_composing() => {
+                return KeyOutcome::NextNode { child: false };
             }
             Key::Named(NamedKey::Backspace) => ed.backspace(engine, word),
             Key::Named(NamedKey::Delete) => ed.delete(engine, word),
@@ -943,6 +1125,10 @@ impl TextEdit {
                     let kanban = self.kanban.as_ref().expect("part of a board");
                     ObjectKind::Kanban(edited_board(kanban, part, text, spans))
                 }
+                Placement::MindNode => {
+                    let map = self.live_map(engine).map(|(map, _, _)| map);
+                    ObjectKind::MindMap(map.expect("node of a mind map"))
+                }
                 Placement::Fitted { shape: None, .. } | Placement::Label { .. } => {
                     ObjectKind::Sticky(Sticky {
                         spans: spans.clone(),
@@ -1028,6 +1214,18 @@ impl TextEdit {
                 },
             });
         }
+        if let (Target::Existing(id), Placement::MindNode) = (self.target, self.placement) {
+            let unchanged = text == self.original && spans == self.original_spans;
+            if (self.new_card && text.trim().is_empty()) || (unchanged && !self.new_card) {
+                return None;
+            }
+            let (map, bounds, i) = self.live_map(engine)?;
+            return Some(Command::SetNode {
+                id,
+                node: map.nodes[i].clone(),
+                bounds,
+            });
+        }
         if let (Target::Existing(id), Placement::Board { part, bounds, .. }, Some(kanban)) =
             (self.target, self.placement, &self.kanban)
         {
@@ -1066,6 +1264,20 @@ impl TextEdit {
             Target::New if empty => None,
             Target::New => Some(Command::Create(vec![self.data(engine).into()])),
         }
+    }
+}
+
+/// The font size of `node` in `map`: the central topic's or the others'.
+fn map_font_size(map: &MindMap, node: &Node) -> f64 {
+    match map.index(&node.id) {
+        Some(i) => map.font_size(i),
+        None if node.parent.is_none() => map.font_size(map.root().unwrap_or(0)),
+        // A new node: like any other but the central topic.
+        None => map
+            .nodes
+            .iter()
+            .position(|n| n.parent.is_some())
+            .map_or(16.0, |i| map.font_size(i)),
     }
 }
 
@@ -1543,6 +1755,61 @@ mod tests {
         // Nothing for the "add card" row.
         let add = k.add_rect(data.bounds, 2).unwrap().center();
         assert!(TextEdit::existing(&mut e, &doc, id, Some(add), 1.0).is_none());
+    }
+
+    #[test]
+    fn mind_map_nodes_grow_as_typed() {
+        let mut e = engine();
+        let mut doc = Document::new();
+        let size = pb_geom::kurbo::Size::new(100.0, 26.0);
+        let map = MindMap::new(doc.new_line_id(), "Root", size);
+        let root = map.nodes[0].id.clone();
+        let bounds = Rect::from_origin_size((50.0, 50.0), map.layout().bounds.size());
+        let data = ObjectData {
+            kind: ObjectKind::MindMap(map.clone()),
+            bounds,
+            rotation: 0.0,
+            style: MindMap::style(),
+            tags: Default::default(),
+            link: None,
+        };
+        let id = doc
+            .apply(Command::Create(vec![data.into()]))
+            .unwrap()
+            .created[0];
+        let root_rect = map.node_rect(bounds, 0).unwrap();
+        // A new child left empty is not added.
+        let edit = TextEdit::new_node(&mut e, &doc, id, &root, 0.0, false).unwrap();
+        assert!(edit.finish(&mut e).is_none());
+        // Typed into, it shows up right of the root, which stays put.
+        let mut edit = TextEdit::new_node(&mut e, &doc, id, &root, 0.0, false).unwrap();
+        edit.editor.insert(&mut e, "Research");
+        let shown = edit.data(&mut e);
+        let ObjectKind::MindMap(live) = &shown.kind else {
+            panic!("not a mind map");
+        };
+        assert_eq!(live.nodes.len(), 2);
+        let after = live.node_rect(shown.bounds, live.root().unwrap()).unwrap();
+        assert!((after.center() - root_rect.center()).hypot() < 1e-6);
+        let child = live.node_rect(shown.bounds, 1).unwrap();
+        assert!(child.x0 > after.x1);
+        // The frame being typed in is the node's text area.
+        assert!(child.contains(edit.frame(&mut e).rect.center()));
+        // Tab would add under it, Enter beside it (another child of the root).
+        let (_, parent, _, _) = edit.next_node(true).unwrap();
+        assert_eq!(&*parent, &*live.nodes[1].id);
+        let (_, parent, order, _) = edit.next_node(false).unwrap();
+        assert_eq!((&*parent, order), (&*root, 1.0));
+        let Some(cmd @ Command::SetNode { .. }) = edit.finish(&mut e) else {
+            panic!("expected SetNode");
+        };
+        doc.apply(cmd).unwrap();
+        let ObjectKind::MindMap(m) = &doc.get(id).unwrap().data.kind else {
+            panic!("not a mind map");
+        };
+        let n = m.nodes.iter().find(|n| n.parent.is_some()).unwrap();
+        assert_eq!(&*n.text, "Research");
+        assert!(n.text_size.width > 0.0);
     }
 
     #[test]

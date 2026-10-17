@@ -1322,3 +1322,79 @@ fn kanban_cards_are_dragged_selected_and_deleted() {
         .unwrap();
     assert_eq!(board(&doc).1.width(), 720.0);
 }
+
+// Mind maps
+
+#[test]
+fn mind_map_nodes_are_selected_toggled_and_removed() {
+    let mut doc = Document::new();
+    let size = pb_geom::kurbo::Size::new(60.0, 20.0);
+    let map = pb_core::MindMap::new(doc.new_line_id(), "Root", size);
+    let root = map.nodes[0].id.clone();
+    let child = |id: &str, parent: &str, order: f64| pb_core::Node {
+        id: id.into(),
+        parent: Some(parent.into()),
+        order,
+        text: id.into(),
+        spans: Default::default(),
+        text_size: size,
+        collapsed: false,
+        left: false,
+    };
+    let map = map
+        .with_node(child("a", &root, 0.0))
+        .with_node(child("a1", "a", 0.0))
+        .with_node(child("b", &root, 1.0));
+    let bounds = Rect::from_origin_size((0.0, 0.0), map.layout().bounds.size());
+    let data = ObjectData {
+        kind: ObjectKind::MindMap(map.clone()),
+        bounds,
+        rotation: 0.0,
+        style: pb_core::MindMap::style(),
+        tags: Default::default(),
+        link: None,
+    };
+    let id = doc
+        .apply(Command::Create(vec![data.into()]))
+        .unwrap()
+        .created[0];
+    let current = |doc: &Document| match &doc.get(id).unwrap().data {
+        d @ ObjectData {
+            kind: ObjectKind::MindMap(m),
+            ..
+        } => (m.clone(), d.bounds),
+        _ => panic!("not a mind map"),
+    };
+    let mut tools = Tools::default();
+    tools.select_only([id]);
+    // A click on a node selects it.
+    let a = map.index("a").unwrap();
+    let a_rect = map.node_rect(bounds, a).unwrap();
+    click(&mut tools, &doc, at(a_rect.center().x, a_rect.center().y));
+    assert_eq!(tools.selected_node(&doc), Some((id, a)));
+    assert_eq!(tools.node_state(&doc), Some((true, false)));
+    // A click on its toggle collapses it; the root stays put.
+    let layout = map.layout();
+    let toggle = map.toggle_at(layout.find(a).unwrap()).unwrap();
+    let toggle = map
+        .to_world(&layout, bounds, Rect::from_center_size(toggle, (0.0, 0.0)))
+        .center();
+    let root_before = map.node_rect(bounds, map.root().unwrap()).unwrap();
+    let cmd = click(&mut tools, &doc, at(toggle.x, toggle.y)).unwrap();
+    doc.apply(cmd).unwrap();
+    tools.sync(&doc);
+    let (m, b) = current(&doc);
+    assert!(m.nodes[m.index("a").unwrap()].collapsed);
+    let root_after = m.node_rect(b, m.root().unwrap()).unwrap();
+    assert!((root_before.center() - root_after.center()).hypot() < 1e-6);
+    // Deleting the node takes its subtree and selects the parent.
+    let cmd = tools.remove_selected_node(&doc).unwrap();
+    doc.apply(cmd).unwrap();
+    tools.sync(&doc);
+    let (m, _) = current(&doc);
+    assert_eq!(m.nodes.len(), 2);
+    assert_eq!(tools.selected_node(&doc), Some((id, m.root().unwrap())));
+    // Deleting the central topic deletes the map.
+    let cmd = tools.remove_selected_node(&doc).unwrap();
+    assert!(matches!(cmd, Command::Delete(ref ids) if ids == &[id]));
+}
