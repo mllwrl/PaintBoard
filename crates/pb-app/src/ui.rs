@@ -170,6 +170,8 @@ pub struct Model<'a> {
     pub frames: Vec<(ObjectId, String)>,
     pub tool: ToolKind,
     pub last_shape: ShapeKind,
+    /// The structure tool (frame, table, …) the shared button offers.
+    pub last_structure: ToolKind,
     /// Style of the pen or marker, whichever is active.
     pub ink: InkStyle,
     pub sticky_color: Rgba,
@@ -736,11 +738,6 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         (ToolKind::Text, "Text (T)", paint_text),
                         (ToolKind::Sticky, "Sticky note (N)", paint_sticky),
                         (ToolKind::Connector, "Connector (L)", paint_connector),
-                        (ToolKind::Frame, "Frame (F)", paint_frame),
-                        (ToolKind::Table, "Table", paint_table),
-                        (ToolKind::Kanban, "Kanban (K)", paint_kanban),
-                        (ToolKind::MindMap, "Mind map", paint_mindmap),
-                        (ToolKind::Doc, "Markdown document (D)", paint_doc),
                         (ToolKind::Comment, "Comment (C)", paint_comment),
                     ];
                     let mut ink_button = shapes.rect;
@@ -752,6 +749,22 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         if model.tool == tool {
                             ink_button = button.rect;
                         }
+                    }
+                    // Frames, tables, kanban boards, mind maps and documents share a button.
+                    let structure_active = STRUCTURES.iter().any(|(t, ..)| *t == model.tool);
+                    let shown = if structure_active {
+                        model.tool
+                    } else {
+                        model.last_structure
+                    };
+                    let (_, tip, paint) = STRUCTURES
+                        .iter()
+                        .find(|(t, ..)| *t == shown)
+                        .copied()
+                        .unwrap_or(STRUCTURES[0]);
+                    let structures = icon_button(ui, structure_active, tip, paint);
+                    if structures.clicked() && !structure_active {
+                        actions.push(Action::Tool(shown));
                     }
                     let image = icon_button(ui, false, "Image (or drop, paste)", paint_image);
                     if image.clicked() {
@@ -774,12 +787,33 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                     if redo.inner.clicked() {
                         actions.push(Action::Redo);
                     }
-                    (shapes.rect, ink_button)
+                    (shapes.rect, ink_button, structures.rect)
                 })
                 .inner
         })
         .inner;
-    let (shapes_button, ink_button) = shapes_button;
+    let (shapes_button, ink_button, structures_button) = shapes_button;
+    if STRUCTURES.iter().any(|(t, ..)| *t == model.tool) {
+        Area::new(Id::unique("structures"))
+            .fixed_pos(Pos2::new(
+                structures_button.right() + 18.0,
+                structures_button.top() - 8.0,
+            ))
+            .constrain(true)
+            .order(Order::Foreground)
+            .show(ctx, |ui| {
+                panel().show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::splat(2.0);
+                        for (tool, tip, paint) in STRUCTURES {
+                            if icon_button(ui, model.tool == tool, tip, paint).clicked() {
+                                actions.push(Action::Tool(tool));
+                            }
+                        }
+                    });
+                });
+            });
+    }
 
     if model.tool.draws_ink() {
         ink_panel(ctx, model, ink_button, actions);
@@ -907,6 +941,18 @@ const SHAPE_SETS: &[(&str, &[(ShapeKind, &str)])] = &[
     ),
 ];
 const SHAPES_PER_ROW: usize = 6;
+
+/// Draws an icon in a rectangle with a color.
+type PaintIcon = fn(&Painter, Rect, Color32);
+
+/// Tools that share the structures button, with their tooltips and icons.
+const STRUCTURES: [(ToolKind, &str, PaintIcon); 5] = [
+    (ToolKind::Frame, "Frame (F)", paint_frame),
+    (ToolKind::Table, "Table", paint_table),
+    (ToolKind::Kanban, "Kanban (K)", paint_kanban),
+    (ToolKind::MindMap, "Mind map", paint_mindmap),
+    (ToolKind::Doc, "Markdown document (D)", paint_doc),
+];
 
 /// Width ranges of the pen and the marker, in logical pixels.
 const PEN_WIDTHS: std::ops::RangeInclusive<f64> = 1.0..=24.0;

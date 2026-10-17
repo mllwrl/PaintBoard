@@ -114,6 +114,8 @@ pub struct App {
     filter: pb_core::Filter,
     /// Who reactions and comments are by.
     me: std::sync::Arc<str>,
+    /// The structure tool picked last, which the toolbar's shared button offers.
+    last_structure: ToolKind,
     /// The comment thread shown, or a new one being started.
     thread_panel: Option<ThreadPanel>,
     /// Resolved threads keep their pins.
@@ -169,6 +171,7 @@ impl App {
             show_minimap: true,
             filter: pb_core::Filter::default(),
             me: pb_platform::user_name().into(),
+            last_structure: ToolKind::Frame,
             thread_panel: None,
             show_resolved: false,
             picking_link: None,
@@ -301,11 +304,22 @@ impl App {
                 _ => None,
             })
             .collect();
+        if matches!(
+            self.tools.active(),
+            ToolKind::Frame
+                | ToolKind::Table
+                | ToolKind::Kanban
+                | ToolKind::MindMap
+                | ToolKind::Doc
+        ) {
+            self.last_structure = self.tools.active();
+        }
         let model = Model {
             board: &board,
             frames,
             tool: self.tools.active(),
             last_shape: self.tools.last_shape(),
+            last_structure: self.last_structure,
             ink: self
                 .tools
                 .ink_style(self.tools.active() == ToolKind::Marker),
