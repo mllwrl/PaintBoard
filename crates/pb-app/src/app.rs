@@ -455,6 +455,8 @@ impl App {
                     rows: t.rows.len(),
                     cols: t.cols.len(),
                     cells: self.tools.table_cells(&self.document).map(|(_, r)| r),
+                    can_merge: self.tools.can_merge_cells(&self.document, true),
+                    can_split: self.tools.can_merge_cells(&self.document, false),
                 }),
                 _ => None,
             },
@@ -521,6 +523,11 @@ impl App {
             }
             Action::RemoveTableLines(rows) => {
                 if let Some(command) = self.tools.remove_table_lines(&self.document, rows) {
+                    self.apply(command);
+                }
+            }
+            Action::MergeCells(merge) => {
+                if let Some(command) = self.tools.merge_cells(&self.document, merge) {
                     self.apply(command);
                 }
             }

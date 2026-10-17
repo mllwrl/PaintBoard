@@ -3,7 +3,7 @@ use std::sync::Arc;
 use kurbo::{Rect, Vec2};
 use pb_geom::Frame;
 
-use crate::{Cell, ConnectorChange, Content, Label, Line, ObjectId, Spans, StyleChange};
+use crate::{Cell, ConnectorChange, Content, Label, Line, Merge, ObjectId, Spans, StyleChange};
 
 /// A user-level edit. Each applied command is one undo step and, later, one unit of sync.
 ///
@@ -69,12 +69,13 @@ pub enum Command {
         col: Arc<str>,
         cell: Cell,
     },
-    /// Sets a table's rows and columns (added, removed, reordered or resized) and its
-    /// bounds. Cells of removed lines are kept, unseen, so undo brings them back.
+    /// Sets a table's rows and columns (added, removed, reordered or resized), merged
+    /// cells and bounds. Cells of removed lines are kept, unseen, so undo brings them back.
     SetTable {
         id: ObjectId,
         rows: Arc<[Line]>,
         cols: Arc<[Line]>,
+        merges: Arc<[Merge]>,
         bounds: Rect,
     },
     /// Replaces a connector's label. Takes a connector only.

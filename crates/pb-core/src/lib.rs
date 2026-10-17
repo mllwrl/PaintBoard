@@ -18,4 +18,4 @@ pub use object::{
 };
 pub use pb_geom::ShapeKind;
 pub use rich::{Span, Spans, TextMarks};
-pub use table::{Cell, CellRange, Line, Table};
+pub use table::{Cell, CellRange, Line, Merge, Table};

@@ -263,11 +263,21 @@ pub(crate) fn draw_object(
             let b = data.bounds;
             scene.fill(Fill::NonZero, transform, color(style.fill), None, &b);
             let brush = color(style.text_color());
+            let merged = table.merged();
+            // Inside a merged block only its top left cell shows.
+            let hidden = |row, col| {
+                merged
+                    .iter()
+                    .any(|m| m.contains((row, col)) && (m.row0, m.col0) != (row, col))
+            };
             for row in 0..table.rows.len() {
                 for col in 0..table.cols.len() {
                     let Some(cell) = table.cell(row, col) else {
                         continue;
                     };
+                    if hidden(row, col) {
+                        continue;
+                    }
                     if let Some(text_box) = table.text_box(b, row, col, style) {
                         let content = (&cell.text, &cell.spans);
                         text.draw_fitted(scene, transform, content, text_box, brush);
@@ -275,15 +285,10 @@ pub(crate) fn draw_object(
                 }
             }
             if style.stroke_width > 0.0 {
-                let (ys, xs) = table.grid(b);
                 let mut grid = BezPath::new();
-                for &y in &ys[1..ys.len() - 1] {
-                    grid.move_to((b.x0, y));
-                    grid.line_to((b.x1, y));
-                }
-                for &x in &xs[1..xs.len() - 1] {
-                    grid.move_to((x, b.y0));
-                    grid.line_to((x, b.y1));
+                for (from, to) in table.inner_lines(b) {
+                    grid.move_to(from);
+                    grid.line_to(to);
                 }
                 grid.extend(b.path_elements(0.1));
                 let stroke = Stroke::new(style.stroke_width);

@@ -1194,3 +1194,47 @@ fn deleting_with_cells_selected_empties_them() {
     tools.select_only([id]);
     assert!(tools.clear_cells_text(&doc).is_empty());
 }
+
+#[test]
+fn selected_cells_merge_and_split() {
+    let mut doc = Document::new();
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Table);
+    let cmd = click(&mut tools, &doc, at(0.0, 0.0)).unwrap();
+    let id = doc.apply(cmd).unwrap().created[0];
+    let merged = |doc: &Document| match &doc.get(id).unwrap().data.kind {
+        ObjectKind::Table(t) => t.merged(),
+        _ => panic!("not a table"),
+    };
+    tools.select_cell(id, (0, 0));
+    assert!(!tools.can_merge_cells(&doc, true));
+    assert!(tools.merge_cells(&doc, true).is_none());
+    tools.select_cell(id, (0, 0));
+    tools.cells.as_mut().unwrap().end = (1, 1);
+    let cmd = tools.merge_cells(&doc, true).unwrap();
+    doc.apply(cmd).unwrap();
+    tools.sync(&doc);
+    let block = CellRange::new((0, 0), (1, 1));
+    assert_eq!(merged(&doc), vec![block]);
+    assert!(!tools.can_merge_cells(&doc, true));
+    // Picking a cell of the block picks all of it.
+    tools.select_cell(id, (1, 1));
+    assert_eq!(tools.table_cells(&doc), Some((id, block)));
+    // A row below the block stays out of it.
+    let cmd = tools.add_table_line(&doc, true, true).unwrap();
+    doc.apply(cmd).unwrap();
+    assert_eq!(merged(&doc), vec![block]);
+    // Splitting from any part of it.
+    tools.select_cell(id, (1, 0));
+    let cmd = tools.merge_cells(&doc, false).unwrap();
+    doc.apply(cmd).unwrap();
+    assert!(merged(&doc).is_empty());
+    // Removing the bottom row shrinks a block that reaches it.
+    tools.select_cell(id, (2, 0));
+    tools.cells.as_mut().unwrap().end = (3, 2);
+    doc.apply(tools.merge_cells(&doc, true).unwrap()).unwrap();
+    tools.select_only([id]);
+    let cmd = tools.remove_table_lines(&doc, true).unwrap();
+    doc.apply(cmd).unwrap();
+    assert_eq!(merged(&doc), vec![CellRange::new((2, 0), (2, 2))]);
+}

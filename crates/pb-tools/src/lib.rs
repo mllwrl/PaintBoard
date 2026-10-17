@@ -394,7 +394,8 @@ impl Tools {
         let sel = self.cells?;
         let (id, _, table) = self.single_table(doc).filter(|(id, ..)| *id == sel.id)?;
         let range = CellRange::new(sel.anchor, sel.end);
-        (range.row1 < table.rows.len() && range.col1 < table.cols.len()).then_some((id, range))
+        (range.row1 < table.rows.len() && range.col1 < table.cols.len())
+            .then(|| (id, table.expand(range)))
     }
 
     /// Where the selected cells are (world), following the table's rotation.
@@ -960,6 +961,7 @@ impl Tools {
                         id: *id,
                         rows,
                         cols,
+                        merges: t.merges.clone(),
                         bounds,
                     })
                 }
@@ -1027,7 +1029,8 @@ impl Tools {
             },
         );
         let bounds = resized_bounds(data.bounds, rows, (total + weight) / total);
-        let command = self.table_lines(id, table, rows, grown, bounds);
+        // Merged blocks are named by their corner lines, so one inside them widens them.
+        let command = self.table_lines(id, table, rows, grown, table.merges.clone(), bounds);
         // The selected cells stay on their lines.
         if let Some(sel) = &mut self.cells
             && !after
@@ -1064,7 +1067,44 @@ impl Tools {
             .map(|(_, l)| l.clone())
             .collect();
         self.cells = None;
-        Some(self.table_lines(id, table, rows, kept, bounds))
+        let merges = table.merges_without(rows, gone);
+        Some(self.table_lines(id, table, rows, kept, merges, bounds))
+    }
+
+    /// Whether the selected cells can be merged (`merge`), or split back.
+    pub fn can_merge_cells(&self, doc: &Document, merge: bool) -> bool {
+        let (Some((_, range)), Some((_, _, table))) =
+            (self.table_cells(doc), self.single_table(doc))
+        else {
+            return false;
+        };
+        let merged = table.merged();
+        if merge {
+            !range.is_single() && !merged.contains(&range)
+        } else {
+            merged.iter().any(|m| m.intersects(&range))
+        }
+    }
+
+    /// Joins the selected cells into one (`merge`), or splits the merged ones among them.
+    pub fn merge_cells(&self, doc: &Document, merge: bool) -> Option<Command> {
+        if !self.can_merge_cells(doc, merge) {
+            return None;
+        }
+        let (_, range) = self.table_cells(doc)?;
+        let (id, data, table) = self.single_table(doc)?;
+        let merges = if merge {
+            table.with_merged(range)
+        } else {
+            table.with_split(range)
+        };
+        Some(Command::SetTable {
+            id,
+            rows: table.rows.clone(),
+            cols: table.cols.clone(),
+            merges,
+            bounds: data.bounds,
+        })
     }
 
     /// Empties the selected cells, one command per cell with text.
@@ -1094,6 +1134,7 @@ impl Tools {
         table: &Table,
         rows: bool,
         lines: Vec<pb_core::Line>,
+        merges: std::sync::Arc<[pb_core::Merge]>,
         bounds: Rect,
     ) -> Command {
         let (r, c) = if rows {
@@ -1105,6 +1146,7 @@ impl Tools {
             id,
             rows: r,
             cols: c,
+            merges,
             bounds,
         }
     }

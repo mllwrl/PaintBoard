@@ -95,6 +95,8 @@ mod key {
     pub const COLS: &str = "cols";
     pub const CELL: &str = "cell:";
     pub const CELL_MARKS: &str = "cellMarks:";
+    /// ...and merged cells as `row0,col0,row1,col1` ids joined by `;`.
+    pub const MERGES: &str = "merges";
 
     /// `kind` of group nodes.
     pub const GROUP: &str = "group";
@@ -637,6 +639,7 @@ impl Document {
                 id,
                 rows,
                 cols,
+                merges,
                 bounds,
             } => {
                 if !matches!(
@@ -650,6 +653,7 @@ impl Document {
                 let meta = self.tree.get_meta(self.nodes[&id])?;
                 meta.insert(key::ROWS, lines_to_string(&rows))?;
                 meta.insert(key::COLS, lines_to_string(&cols))?;
+                write_merges(&meta, &merges)?;
                 write_bounds(&meta, bounds.abs())?;
             }
             Command::SetLabel { id, label } => {
@@ -1209,6 +1213,7 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
         ObjectKind::Table(table) => {
             meta.insert(key::ROWS, lines_to_string(&table.rows))?;
             meta.insert(key::COLS, lines_to_string(&table.cols))?;
+            write_merges(meta, &table.merges)?;
             for ((row, col), cell) in table.cells.iter() {
                 write_cell(meta, row, col, cell)?;
             }
@@ -1367,6 +1372,40 @@ fn lines_from_string(s: &str) -> Vec<Line> {
         .collect()
 }
 
+/// Writes a table's merged cells, or removes them when there are none.
+fn write_merges(meta: &LoroMap, merges: &[crate::Merge]) -> Result<()> {
+    if merges.is_empty() {
+        if meta.get(key::MERGES).is_some() {
+            meta.delete(key::MERGES)?;
+        }
+        return Ok(());
+    }
+    let text: Vec<String> = merges
+        .iter()
+        .map(|m| format!("{},{},{},{}", m.row0, m.col0, m.row1, m.col1))
+        .collect();
+    meta.insert(key::MERGES, text.join(";"))?;
+    Ok(())
+}
+
+fn read_merges(meta: &LoroMap) -> Arc<[crate::Merge]> {
+    let Some(text) = get_str(meta, key::MERGES) else {
+        return Arc::new([]);
+    };
+    text.split(';')
+        .filter_map(|part| {
+            let mut ids = part.split(',').filter(|id| !id.is_empty()).map(Arc::from);
+            let merge = crate::Merge {
+                row0: ids.next()?,
+                col0: ids.next()?,
+                row1: ids.next()?,
+                col1: ids.next()?,
+            };
+            ids.next().is_none().then_some(merge)
+        })
+        .collect()
+}
+
 /// Writes a table cell's text and styles; empty text removes them.
 fn write_cell(meta: &LoroMap, row: &str, col: &str, cell: &crate::Cell) -> Result<()> {
     let text_key = format!("{}{row}:{col}", key::CELL);
@@ -1427,6 +1466,7 @@ fn read_table(meta: &LoroMap) -> Option<crate::Table> {
         rows: rows.into(),
         cols: cols.into(),
         cells: Arc::new(cells),
+        merges: read_merges(meta),
     })
 }
 
@@ -2589,12 +2629,23 @@ mod tests {
             id,
             rows: rows.into(),
             cols: table.cols.clone(),
+            merges: table.with_merged(crate::CellRange::new((0, 0), (1, 1))),
             bounds: Rect::new(0.0, 0.0, 200.0, 120.0),
         })
         .unwrap();
         assert_eq!(get(&doc, 2, 1), "Done");
+        // Merged cells are named by line ids, so they stay on the old rows and survive a
+        // reload.
+        let merged = |doc: &Document| match &doc.get(id).unwrap().data.kind {
+            ObjectKind::Table(t) => t.merged(),
+            _ => panic!("not a table"),
+        };
+        assert_eq!(merged(&doc), vec![crate::CellRange::new((1, 0), (2, 1))]);
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(merged(&loaded), merged(&doc));
         doc.undo().unwrap();
         assert_eq!(get(&doc, 1, 1), "Done");
+        assert!(merged(&doc).is_empty());
         // Two replicas typing in different cells both keep their text.
         let mut other = Document::from_snapshot(&doc.snapshot()).unwrap();
         set(&mut doc, 0, 0, "A");

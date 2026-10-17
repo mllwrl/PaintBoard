@@ -77,6 +77,8 @@ pub enum Action {
     },
     /// Removes the rows (`true`) or columns of the selected cells, or the last one.
     RemoveTableLines(bool),
+    /// Merges the selected table cells (`true`), or splits the merged ones among them.
+    MergeCells(bool),
     /// Centers the view on a world point (from the minimap).
     LookAt(kurbo::Point),
     /// Replace the selected handwriting with typed text.
@@ -926,6 +928,11 @@ fn selection_toolbar(
                                     Action::RemoveTableLines(false),
                                     cells.cols().count() < table.cols,
                                 ),
+                                if table.can_split {
+                                    ("Unmerge", "Split the merged cells", Action::MergeCells(false), true)
+                                } else {
+                                    ("Merge", "Join the selected cells into one", Action::MergeCells(true), table.can_merge)
+                                },
                             ],
                         };
                         for (label, tip, action, enabled) in buttons {
@@ -1341,6 +1348,8 @@ pub struct TableInfo {
     pub rows: usize,
     pub cols: usize,
     pub cells: Option<pb_core::CellRange>,
+    pub can_merge: bool,
+    pub can_split: bool,
 }
 
 /// A table: a box split into cells.
