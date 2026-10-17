@@ -92,6 +92,11 @@ pub enum Action {
     CloseContextMenu,
     /// Opens or closes the keyboard shortcuts window.
     ToggleShortcuts,
+    /// Presents the board frame by frame (F5).
+    Present,
+    /// Moves through the presentation by this many frames (`i64::MIN`/`MAX`: first/last).
+    PresentStep(i64),
+    StopPresenting,
     /// Opens or closes the template gallery.
     ToggleTemplates,
     /// Adds template `i` of `templates::TEMPLATES` in the middle of the view.
@@ -209,6 +214,10 @@ pub struct Model<'a> {
     pub diagram: Option<Option<String>>,
     /// The template gallery is open.
     pub show_templates: bool,
+    /// Presenting: the frame shown, how many there are, and its title.
+    pub presentation: Option<(usize, usize, String)>,
+    /// The board has frames to present.
+    pub can_present: bool,
     /// The comment thread shown.
     pub thread: Option<ThreadView>,
     /// The board's threads: id, a line about it, and whether it is resolved.
@@ -516,6 +525,12 @@ impl Ui {
         let diagram_text = &mut self.diagram_text;
         let comment_text = &mut self.comment_text;
         let output = self.ctx.run_pass(input, |ctx| {
+            if let Some((index, count, title)) = &model.presentation {
+                // Nothing but the board and the controls.
+                *popup = None;
+                presentation_bar(ctx, *index, *count, title, &mut actions);
+                return;
+            }
             board_menu(ctx, model, &mut actions);
             toolbar(ctx, model, &mut actions);
             let view = view_controls(ctx, model, &mut actions);
@@ -692,6 +707,14 @@ fn board_menu(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         RichText::new("Filter ●").color(Color32::from_rgb(0x3B, 0x82, 0xF6))
                     };
                     ui.menu_button(label, |ui| filter_menu(ui, model, actions));
+                    if ui
+                        .add_enabled(model.can_present, Button::new("Present"))
+                        .on_hover_text("Show the frames one by one (F5)")
+                        .on_disabled_hover_text("Add frames to present them")
+                        .clicked()
+                    {
+                        actions.push(Action::Present);
+                    }
                     if ui
                         .button("Templates")
                         .on_hover_text("Start from a ready-made layout")
@@ -1923,6 +1946,51 @@ fn mention_job(ui: &egui::Ui, text: &str, accent: Color32) -> egui::text::Layout
     job
 }
 
+/// The controls at the bottom while presenting.
+fn presentation_bar(
+    ctx: &Context,
+    index: usize,
+    count: usize,
+    title: &str,
+    actions: &mut Vec<Action>,
+) {
+    let screen = ctx.content_rect();
+    Area::new(Id::unique("presentation"))
+        .fixed_pos(Pos2::new(screen.center().x, screen.bottom() - MARGIN))
+        .pivot(Align2::CENTER_BOTTOM)
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            panel().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(index > 0, Button::new("◀"))
+                        .on_hover_text("Previous (←)")
+                        .clicked()
+                    {
+                        actions.push(Action::PresentStep(-1));
+                    }
+                    let title = if title.trim().is_empty() {
+                        "Untitled frame"
+                    } else {
+                        title
+                    };
+                    ui.label(format!("{title}  ·  {} / {count}", index + 1));
+                    if ui
+                        .add_enabled(index + 1 < count, Button::new("▶"))
+                        .on_hover_text("Next (→, Space)")
+                        .clicked()
+                    {
+                        actions.push(Action::PresentStep(1));
+                    }
+                    ui.separator();
+                    if ui.button("Exit").on_hover_text("Esc").clicked() {
+                        actions.push(Action::StopPresenting);
+                    }
+                });
+            });
+        });
+}
+
 /// The template gallery: a card per template.
 fn templates_window(ctx: &Context, actions: &mut Vec<Action>) {
     let mut open = true;
@@ -2104,6 +2172,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Home", "Back to the start"),
             ("G / Shift+G", "Grid style / snap to grid"),
             ("F1, ?", "This list"),
+            ("F5", "Present the frames"),
         ],
     ),
 ];

@@ -47,6 +47,8 @@ pub struct Overlay {
     /// Search results (world), and the one shown now.
     pub search_hits: Vec<Frame>,
     pub search_current: Option<Frame>,
+    /// While presenting: the frame shown (world); everything around it is dimmed.
+    pub spotlight: Option<Rect>,
     /// Comment thread pins: the point each one marks (world), whether its thread is
     /// resolved, and whether it is the one open.
     pub comment_pins: Vec<(Point, bool, bool)>,
@@ -110,6 +112,16 @@ pub fn draw_overlay(
     let thick = Stroke::new(2.0 * scale);
     let id = Affine::IDENTITY;
 
+    if let Some(area) = overlay.spotlight {
+        let a = to_px(area.origin());
+        let b = to_px(Point::new(area.x1, area.y1));
+        let hole = Rect::from_points(a, b);
+        // Far beyond any window, with the frame cut out.
+        let mut dim = Rect::new(-1e6, -1e6, 1e6, 1e6).to_path(0.1);
+        dim.extend(hole.to_path(0.1));
+        let shade = Color::from_rgba8(0x10, 0x14, 0x1C, 0xD8);
+        scene.fill(Fill::EvenOdd, id, shade, None, &dim);
+    }
     if let Some(hover) = &overlay.hover {
         scene.stroke(&thick, id, colors.accent, None, &outline(hover));
     }

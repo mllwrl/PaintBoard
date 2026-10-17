@@ -140,6 +140,10 @@ pub struct App {
     show_shortcuts: bool,
     /// The template gallery is open.
     show_templates: bool,
+    /// Presenting the board frame by frame.
+    presentation: Option<Presentation>,
+    /// The camera gliding to a new place.
+    camera_glide: Option<Glide>,
     /// The window for making a diagram from text is open, with what was wrong with the
     /// last try.
     diagram: Option<Option<String>>,
@@ -191,6 +195,8 @@ impl App {
             context_menu: None,
             show_shortcuts: false,
             show_templates: false,
+            presentation: None,
+            camera_glide: None,
             diagram: None,
             last_press: None,
             recognition: None,
@@ -239,6 +245,16 @@ impl App {
                 editing::Target::New => previews.push(data),
             }
         }
+        if let Some(glide) = &self.camera_glide {
+            let viewport = Size::new(size.width, size.height);
+            let (center, zoom, done) = glide.at(Instant::now());
+            self.camera.look_at(center, zoom, viewport);
+            if done {
+                self.camera_glide = None;
+            } else {
+                window.request_redraw();
+            }
+        }
         let mut overlay = overlay(&self.document, &self.tools, &overrides, self.camera.zoom());
         overlay.link_badges = self.link_badges().into_iter().map(|(p, _)| p).collect();
         overlay.comment_pins = self
@@ -273,6 +289,17 @@ impl App {
                 winit::dpi::LogicalPosition::new(a.x, a.y),
                 winit::dpi::LogicalSize::new((b.x - a.x).max(1.0), (b.y - a.y).max(1.0)),
             );
+        }
+        if let Some(presentation) = &self.presentation {
+            // Only the frame shown: no selection, pins or badges.
+            overlay = Overlay {
+                spotlight: presentation
+                    .frames
+                    .get(presentation.index)
+                    .and_then(|&id| self.document.get(id))
+                    .map(|o| o.data.bounds),
+                ..Overlay::default()
+            };
         }
         let mut hidden = self.tools.hidden().to_vec();
         if let Some(crop) = &self.cropping {
@@ -354,6 +381,22 @@ impl App {
             show_shortcuts: self.show_shortcuts,
             diagram: self.diagram.clone(),
             show_templates: self.show_templates,
+            presentation: self.presentation.as_ref().map(|p| {
+                let title = p
+                    .frames
+                    .get(p.index)
+                    .and_then(|&id| match self.document.get(id).map(|o| &o.data.kind) {
+                        Some(ObjectKind::Frame(f)) => Some(f.title.to_string()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                (p.index, p.frames.len(), title)
+            }),
+            can_present: self
+                .document
+                .objects()
+                .iter()
+                .any(|o| o.data.kind.is_frame()),
             thread: self.thread_view(),
             threads: self.thread_list(),
             show_resolved: self.show_resolved,
@@ -844,6 +887,9 @@ impl App {
             }
             Action::CloseContextMenu => self.context_menu = None,
             Action::ToggleShortcuts => self.show_shortcuts = !self.show_shortcuts,
+            Action::Present => self.start_presentation(),
+            Action::PresentStep(step) => self.present_step(step),
+            Action::StopPresenting => self.stop_presentation(),
             Action::ToggleTemplates => self.show_templates = !self.show_templates,
             Action::InsertTemplate(i) => {
                 self.show_templates = false;
@@ -1723,6 +1769,117 @@ impl App {
             self.camera.fit(placed, viewport, FRAME_MARGIN);
         }
         Ok(())
+    }
+
+    /// Starts presenting the board's frames, in the order the Frames menu lists them.
+    fn start_presentation(&mut self) {
+        let frames: Vec<ObjectId> = self
+            .document
+            .objects()
+            .iter()
+            .filter(|o| o.data.kind.is_frame())
+            .map(|o| o.id)
+            .collect();
+        if frames.is_empty() {
+            return;
+        }
+        self.finish_editing();
+        self.tools.cancel();
+        self.tools.set_active(ToolKind::Select);
+        self.tools.clear_selection();
+        self.context_menu = None;
+        self.thread_panel = None;
+        self.search = None;
+        self.show_templates = false;
+        self.show_shortcuts = false;
+        self.presentation = Some(Presentation {
+            index: 0,
+            frames,
+            saved: self.camera,
+        });
+        self.show_slide(0);
+    }
+
+    /// Moves `step` frames on (back when negative); `i64::MIN` and `i64::MAX` go to the
+    /// first and the last.
+    fn present_step(&mut self, step: i64) {
+        let Some(p) = &self.presentation else {
+            return;
+        };
+        let last = p.frames.len().saturating_sub(1) as i64;
+        let next = match step {
+            i64::MIN => 0,
+            i64::MAX => last,
+            s => (p.index as i64 + s).clamp(0, last),
+        };
+        self.show_slide(next as usize);
+    }
+
+    /// Shows frame `index` of the presentation, gliding there.
+    fn show_slide(&mut self, index: usize) {
+        let Some(p) = &mut self.presentation else {
+            return;
+        };
+        p.index = index.min(p.frames.len().saturating_sub(1));
+        let Some(area) = p
+            .frames
+            .get(p.index)
+            .and_then(|&id| self.document.get(id))
+            .map(|o| o.data.bounds)
+        else {
+            return;
+        };
+        let viewport = self.viewport();
+        let mut target = self.camera;
+        target.fit(area, viewport, PRESENT_MARGIN);
+        self.glide_to(&target);
+    }
+
+    /// Ends the presentation, gliding back to where the board was.
+    fn stop_presentation(&mut self) {
+        if let Some(p) = self.presentation.take() {
+            self.glide_to(&p.saved);
+        }
+    }
+
+    /// Starts the camera gliding from where it is to `target`.
+    fn glide_to(&mut self, target: &Camera) {
+        let viewport = self.viewport();
+        self.camera_glide = Some(Glide {
+            from: (
+                self.camera.visible_world_rect(viewport).center(),
+                self.camera.zoom(),
+            ),
+            to: (target.visible_world_rect(viewport).center(), target.zoom()),
+            start: Instant::now(),
+        });
+        self.request_redraw();
+    }
+
+    /// A key while presenting. Returns true if the view needs a redraw.
+    fn presentation_key(&mut self, event: &KeyEvent) -> bool {
+        if event.state != ElementState::Pressed {
+            return false;
+        }
+        let PhysicalKey::Code(code) = event.physical_key else {
+            return false;
+        };
+        match code {
+            KeyCode::ArrowRight
+            | KeyCode::ArrowDown
+            | KeyCode::Space
+            | KeyCode::PageDown
+            | KeyCode::Enter
+            | KeyCode::NumpadEnter => self.present_step(1),
+            KeyCode::ArrowLeft | KeyCode::ArrowUp | KeyCode::PageUp | KeyCode::Backspace => {
+                self.present_step(-1);
+            }
+            KeyCode::Home => self.present_step(i64::MIN),
+            KeyCode::End => self.present_step(i64::MAX),
+            KeyCode::Escape | KeyCode::F5 => self.stop_presentation(),
+            _ => return false,
+        }
+        true
     }
 
     /// Lays the selection out in clusters by `by`, each with a heading, as one undo step.
@@ -2817,6 +2974,7 @@ impl App {
             KeyCode::KeyL if !ctrl => self.tools.set_active(ToolKind::Connector),
             KeyCode::KeyF if ctrl => self.open_search(),
             KeyCode::F1 => self.show_shortcuts = !self.show_shortcuts,
+            KeyCode::F5 => self.start_presentation(),
             KeyCode::Slash if modifiers.shift_key() && !ctrl => {
                 self.show_shortcuts = !self.show_shortcuts;
             }
@@ -3151,6 +3309,8 @@ impl App {
                 let typing = self.ui.as_ref().is_some_and(Ui::wants_keyboard);
                 if typing {
                     false
+                } else if self.presentation.is_some() {
+                    self.presentation_key(&event)
                 } else if self.cropping.is_some() {
                     self.crop_key(&event)
                 } else if let Some(edit) = &mut self.editing {
@@ -3230,8 +3390,11 @@ impl App {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 // Presses on the UI stay there; releases always reach the canvas so that a
-                // drag started on it ends even over a toolbar.
-                if state == ElementState::Pressed && (ui_consumed || over_ui) {
+                // drag started on it ends even over a toolbar. While presenting the board
+                // can only be panned (middle button) and zoomed.
+                let ui_press = state == ElementState::Pressed && (ui_consumed || over_ui);
+                let presenting = self.presentation.is_some() && button != MouseButton::Middle;
+                if ui_press || presenting {
                     false
                 } else {
                     let consumed = self.navigation.mouse_button(button, state);
@@ -3303,6 +3466,40 @@ impl App {
         if changed {
             self.request_redraw();
         }
+    }
+}
+
+/// Margin around a presented frame, in logical pixels.
+const PRESENT_MARGIN: f64 = 24.0;
+/// How long the camera takes to glide to a new place.
+const GLIDE: pb_platform::Duration = pb_platform::Duration::from_millis(350);
+
+/// Presenting the board frame by frame.
+struct Presentation {
+    /// The frame shown, an index into `frames`.
+    index: usize,
+    /// The frames, in order, when the presentation started.
+    frames: Vec<ObjectId>,
+    /// Where the board was before, to go back to.
+    saved: Camera,
+}
+
+/// The camera gliding from one view to another: centers (world) and zooms.
+struct Glide {
+    from: (Point, f64),
+    to: (Point, f64),
+    start: Instant,
+}
+
+impl Glide {
+    /// Where the glide is at `now`: center, zoom, and whether it is over.
+    fn at(&self, now: Instant) -> (Point, f64, bool) {
+        let t = (now.duration_since(self.start).as_secs_f64() / GLIDE.as_secs_f64()).min(1.0);
+        // Ease in and out.
+        let s = t * t * (3.0 - 2.0 * t);
+        let center = self.from.0.lerp(self.to.0, s);
+        let zoom = self.from.1 * (self.to.1 / self.from.1).powf(s);
+        (center, zoom, t >= 1.0)
     }
 }
 
@@ -3453,6 +3650,7 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
         quick_dot_radius: pb_tools::quick::DOT_RADIUS,
         link_badges: Vec::new(),
         comment_pins: Vec::new(),
+        spotlight: None,
         search_hits: Vec::new(),
         search_current: None,
         lines,
