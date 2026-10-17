@@ -97,6 +97,14 @@ mod key {
     pub const CELL_MARKS: &str = "cellMarks:";
     /// ...and merged cells as `row0,col0,row1,col1` ids joined by `;`.
     pub const MERGES: &str = "merges";
+    /// Kanban boards: column ids joined by `;`, each column's title under this prefix and
+    /// its id, and each card's text, inline styles and `column;order` under these
+    /// prefixes and its id. A card exists while it has a place.
+    pub const COLUMNS: &str = "columns";
+    pub const COLUMN_TITLE: &str = "columnTitle:";
+    pub const CARD: &str = "card:";
+    pub const CARD_MARKS: &str = "cardMarks:";
+    pub const CARD_AT: &str = "cardAt:";
 
     /// `kind` of group nodes.
     pub const GROUP: &str = "group";
@@ -654,6 +662,47 @@ impl Document {
                 meta.insert(key::ROWS, lines_to_string(&rows))?;
                 meta.insert(key::COLS, lines_to_string(&cols))?;
                 write_merges(&meta, &merges)?;
+                write_bounds(&meta, bounds.abs())?;
+            }
+            Command::SetCard { id, card, bounds } => {
+                let Some(ObjectKind::Kanban(kanban)) = self.get(id).map(|o| &o.data.kind) else {
+                    return Err(Error::UnknownObject(id));
+                };
+                let old = kanban.card_index(&card.id).map(|i| kanban.cards[i].clone());
+                let meta = self.tree.get_meta(self.nodes[&id])?;
+                write_card(&meta, &card, old.as_ref())?;
+                write_bounds(&meta, bounds.abs())?;
+            }
+            Command::RemoveCard { id, card, bounds } => {
+                if !matches!(
+                    self.get(id).map(|o| &o.data.kind),
+                    Some(ObjectKind::Kanban(_))
+                ) {
+                    return Err(Error::UnknownObject(id));
+                }
+                let meta = self.tree.get_meta(self.nodes[&id])?;
+                for prefix in [key::CARD, key::CARD_MARKS, key::CARD_AT] {
+                    let k = format!("{prefix}{card}");
+                    if meta.get(&k).is_some() {
+                        meta.delete(&k)?;
+                    }
+                }
+                write_bounds(&meta, bounds.abs())?;
+            }
+            Command::SetColumns {
+                id,
+                columns,
+                bounds,
+            } => {
+                let Some(ObjectKind::Kanban(kanban)) = self.get(id).map(|o| &o.data.kind) else {
+                    return Err(Error::UnknownObject(id));
+                };
+                if columns.is_empty() {
+                    return Err(Error::UnknownObject(id));
+                }
+                let old = kanban.columns.clone();
+                let meta = self.tree.get_meta(self.nodes[&id])?;
+                write_columns(&meta, &columns, &old)?;
                 write_bounds(&meta, bounds.abs())?;
             }
             Command::SetLabel { id, label } => {
@@ -1218,6 +1267,12 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
                 write_cell(meta, row, col, cell)?;
             }
         }
+        ObjectKind::Kanban(kanban) => {
+            write_columns(meta, &kanban.columns, &[])?;
+            for card in kanban.cards.iter() {
+                write_card(meta, card, None)?;
+            }
+        }
         ObjectKind::Image(image) => {
             meta.insert(key::ASSET, image.asset.to_string())?;
             write_crop(meta, image.crop)?;
@@ -1370,6 +1425,102 @@ fn lines_from_string(s: &str) -> Vec<Line> {
             })
         })
         .collect()
+}
+
+/// Writes a kanban board's columns: their order, and the titles that differ from `old`.
+fn write_columns(meta: &LoroMap, columns: &[crate::Column], old: &[crate::Column]) -> Result<()> {
+    let ids: Vec<&str> = columns.iter().map(|c| &*c.id).collect();
+    let ids = ids.join(";");
+    if get_str(meta, key::COLUMNS).as_deref() != Some(&ids) {
+        meta.insert(key::COLUMNS, ids)?;
+    }
+    for column in columns {
+        let unchanged = old
+            .iter()
+            .any(|o| o.id == column.id && o.title == column.title);
+        if !unchanged {
+            let k = format!("{}{}", key::COLUMN_TITLE, column.id);
+            meta.insert(&k, &*column.title)?;
+        }
+    }
+    Ok(())
+}
+
+/// Writes the parts of a kanban card that differ from `old`, so replicas moving and typing
+/// in the same card keep both changes.
+fn write_card(meta: &LoroMap, card: &crate::Card, old: Option<&crate::Card>) -> Result<()> {
+    let id = &card.id;
+    if old.is_none_or(|o| o.column != card.column || o.order != card.order) {
+        let k = format!("{}{id}", key::CARD_AT);
+        meta.insert(&k, format!("{};{}", card.column, card.order))?;
+    }
+    if old.is_none_or(|o| o.text != card.text) {
+        let k = format!("{}{id}", key::CARD);
+        meta.insert(&k, &*card.text)?;
+    }
+    let spans = rich::fit_to(&card.spans, &card.text);
+    if old.is_none_or(|o| *o.spans != *spans) {
+        let k = format!("{}{id}", key::CARD_MARKS);
+        if spans.is_empty() {
+            if meta.get(&k).is_some() {
+                meta.delete(&k)?;
+            }
+        } else {
+            meta.insert(&k, rich::to_bytes(&spans))?;
+        }
+    }
+    Ok(())
+}
+
+fn read_kanban(meta: &LoroMap) -> Option<crate::Kanban> {
+    let ids = get_str(meta, key::COLUMNS)?;
+    let columns: Vec<crate::Column> = ids
+        .split(';')
+        .filter(|id| !id.is_empty())
+        .map(|id| crate::Column {
+            id: id.into(),
+            title: get_str(meta, &format!("{}{id}", key::COLUMN_TITLE))
+                .unwrap_or_default()
+                .into(),
+        })
+        .collect();
+    if columns.is_empty() {
+        return None;
+    }
+    let mut places = Vec::new();
+    meta.for_each(|k, v| {
+        if let (Some(id), ValueOrContainer::Value(LoroValue::String(at))) =
+            (k.strip_prefix(key::CARD_AT), v)
+            && let Some((column, order)) = at.split_once(';')
+            && let Ok(order) = order.parse::<f64>()
+            && order.is_finite()
+        {
+            places.push((id.to_owned(), column.to_owned(), order));
+        }
+    });
+    let cards = places
+        .into_iter()
+        .map(|(id, column, order)| {
+            let text = get_str(meta, &format!("{}{id}", key::CARD)).unwrap_or_default();
+            let spans: Spans = match meta.get(&format!("{}{id}", key::CARD_MARKS)) {
+                Some(ValueOrContainer::Value(LoroValue::Binary(bytes))) => {
+                    rich::fit_to(&rich::from_bytes(&bytes), &text).into()
+                }
+                _ => Spans::default(),
+            };
+            crate::Card {
+                id: id.into(),
+                column: column.into(),
+                order,
+                text: text.into(),
+                spans,
+            }
+        })
+        .collect();
+    Some(crate::Kanban {
+        columns: columns.into(),
+        cards,
+    })
 }
 
 /// Writes a table's merged cells, or removes them when there are none.
@@ -1662,6 +1813,9 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
         }
         ValueOrContainer::Value(LoroValue::String(s)) if &**s == "table" => {
             ObjectKind::Table(read_table(meta)?)
+        }
+        ValueOrContainer::Value(LoroValue::String(s)) if &**s == "kanban" => {
+            ObjectKind::Kanban(read_kanban(meta)?)
         }
         ValueOrContainer::Value(LoroValue::String(s)) if &**s == "frame" => {
             let title = get_str(meta, key::TEXT).unwrap_or_default();
@@ -2592,6 +2746,84 @@ mod tests {
         })
         .unwrap();
         eprintln!("one move: {:?}", t.elapsed());
+    }
+
+    #[test]
+    fn kanban_cards_are_stored_one_by_one() {
+        let mut doc = Document::new();
+        let kanban = crate::Kanban::starter(|| doc.new_line_id());
+        let mut data = rect(0.0, 0.0, 720.0, 80.0);
+        data.kind = ObjectKind::Kanban(kanban.clone());
+        let id = create(&mut doc, data);
+        let board = |doc: &Document| match &doc.get(id).unwrap().data.kind {
+            ObjectKind::Kanban(k) => k.clone(),
+            _ => panic!("not a kanban"),
+        };
+        let bounds = Rect::new(0.0, 0.0, 720.0, 200.0);
+        let card = crate::Card {
+            id: doc.new_line_id().into(),
+            column: kanban.columns[0].id.clone(),
+            order: 0.0,
+            text: "Write tests".into(),
+            spans: Spans::default(),
+        };
+        doc.apply(Command::SetCard {
+            id,
+            card: card.clone(),
+            bounds,
+        })
+        .unwrap();
+        assert_eq!(board(&doc).cards_in(0).len(), 1);
+        assert_eq!(doc.get(id).unwrap().data.bounds, bounds);
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(loaded.get(id).unwrap().data, doc.get(id).unwrap().data);
+        // One replica moves the card while another edits its text: both stick.
+        let mut other = Document::from_snapshot(&doc.snapshot()).unwrap();
+        let moved = crate::Card {
+            column: kanban.columns[2].id.clone(),
+            ..card.clone()
+        };
+        doc.apply(Command::SetCard {
+            id,
+            card: moved,
+            bounds,
+        })
+        .unwrap();
+        let typed = crate::Card {
+            text: "Write more tests".into(),
+            ..card.clone()
+        };
+        other
+            .apply(Command::SetCard {
+                id,
+                card: typed,
+                bounds,
+            })
+            .unwrap();
+        doc.doc.import(&other.snapshot()).unwrap();
+        doc.refresh();
+        let k = board(&doc);
+        assert_eq!(k.cards_in(2).len(), 1);
+        assert_eq!(&*k.cards[0].text, "Write more tests");
+        // Renamed columns, removed cards; undo brings the card back.
+        let mut columns = k.columns.to_vec();
+        columns[1].title = "Doing".into();
+        doc.apply(Command::SetColumns {
+            id,
+            columns: columns.into(),
+            bounds,
+        })
+        .unwrap();
+        assert_eq!(&*board(&doc).columns[1].title, "Doing");
+        doc.apply(Command::RemoveCard {
+            id,
+            card: card.id.clone(),
+            bounds,
+        })
+        .unwrap();
+        assert!(board(&doc).cards.is_empty());
+        doc.undo().unwrap();
+        assert_eq!(board(&doc).cards.len(), 1);
     }
 
     #[test]

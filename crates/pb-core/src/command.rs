@@ -3,7 +3,9 @@ use std::sync::Arc;
 use kurbo::{Rect, Vec2};
 use pb_geom::Frame;
 
-use crate::{Cell, ConnectorChange, Content, Label, Line, Merge, ObjectId, Spans, StyleChange};
+use crate::{
+    Card, Cell, Column, ConnectorChange, Content, Label, Line, Merge, ObjectId, Spans, StyleChange,
+};
 
 /// A user-level edit. Each applied command is one undo step and, later, one unit of sync.
 ///
@@ -76,6 +78,26 @@ pub enum Command {
         rows: Arc<[Line]>,
         cols: Arc<[Line]>,
         merges: Arc<[Merge]>,
+        bounds: Rect,
+    },
+    /// Adds a card to a kanban board, or changes the card with its id (text, column or
+    /// place), and sets the board's bounds. Takes a kanban board only.
+    SetCard {
+        id: ObjectId,
+        card: Card,
+        bounds: Rect,
+    },
+    /// Removes a card from a kanban board and sets the board's bounds.
+    RemoveCard {
+        id: ObjectId,
+        card: Arc<str>,
+        bounds: Rect,
+    },
+    /// Sets a kanban board's columns (added, removed, reordered or renamed) and bounds.
+    /// Cards of removed columns are kept, unseen, so undo brings them back.
+    SetColumns {
+        id: ObjectId,
+        columns: Arc<[Column]>,
         bounds: Rect,
     },
     /// Replaces a connector's label. Takes a connector only.

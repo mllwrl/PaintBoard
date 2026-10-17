@@ -1238,3 +1238,85 @@ fn selected_cells_merge_and_split() {
     doc.apply(cmd).unwrap();
     assert_eq!(merged(&doc), vec![CellRange::new((2, 0), (2, 2))]);
 }
+
+// Kanban boards
+
+#[test]
+fn kanban_cards_are_dragged_selected_and_deleted() {
+    let mut doc = Document::new();
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Kanban);
+    let cmd = click(&mut tools, &doc, at(0.0, 0.0)).unwrap();
+    let id = doc.apply(cmd).unwrap().created[0];
+    let board = |doc: &Document| match &doc.get(id).unwrap().data {
+        data @ ObjectData {
+            kind: ObjectKind::Kanban(k),
+            ..
+        } => (k.clone(), data.bounds),
+        _ => panic!("not a kanban"),
+    };
+    let (k, bounds) = board(&doc);
+    assert_eq!(k.columns.len(), 3);
+    assert_eq!(bounds.width(), 720.0);
+    assert_eq!(bounds.height(), k.fitted_height(720.0));
+    for (n, text) in ["a", "b"].into_iter().enumerate() {
+        let card = pb_core::Card {
+            id: doc.new_line_id().into(),
+            column: k.columns[0].id.clone(),
+            order: n as f64,
+            text: text.into(),
+            spans: Default::default(),
+        };
+        let (k, b) = board(&doc);
+        let bounds = k.with_card(card.clone()).fitted(b);
+        doc.apply(Command::SetCard { id, card, bounds }).unwrap();
+    }
+    tools.select_only([id]);
+    let (k, bounds) = board(&doc);
+    let a = k.card_index(&k.cards[0].id).unwrap();
+    let middle = k.card_rect(bounds, a).unwrap().center();
+    // A click selects the card.
+    click(&mut tools, &doc, at(middle.x, middle.y));
+    assert_eq!(tools.selected_card(&doc), Some((id, a)));
+    // A drag moves it to the top of the third column.
+    let target = k.column_rect(bounds, 2).unwrap().center().x;
+    let Some(cmd @ Command::SetCard { .. }) = drag(
+        &mut tools,
+        &doc,
+        at(middle.x, middle.y),
+        at(target, middle.y),
+    ) else {
+        panic!("expected SetCard");
+    };
+    doc.apply(cmd).unwrap();
+    tools.sync(&doc);
+    let (k, _) = board(&doc);
+    assert_eq!(k.cards_in(0).len(), 1);
+    assert_eq!(k.cards_in(2).len(), 1);
+    assert_eq!(&*k.cards[k.cards_in(2)[0]].text, "a");
+    // It stays selected, and Delete removes it.
+    let (_, i) = tools.selected_card(&doc).unwrap();
+    assert_eq!(&*k.cards[i].text, "a");
+    let cmd = tools.remove_selected_card(&doc).unwrap();
+    doc.apply(cmd).unwrap();
+    tools.sync(&doc);
+    assert_eq!(board(&doc).0.cards.len(), 1);
+    assert_eq!(tools.selected_card(&doc), None);
+    // Dragging the board itself, away from cards, still moves it.
+    let title = board(&doc).0.title_rect(board(&doc).1, 1).unwrap().center();
+    let Some(Command::Move { .. }) = drag(
+        &mut tools,
+        &doc,
+        at(title.x, title.y),
+        at(title.x + 50.0, title.y),
+    ) else {
+        panic!("expected Move");
+    };
+    // Columns come and go, and the board's width with them.
+    doc.apply(tools.add_kanban_column(&doc).unwrap()).unwrap();
+    let (k, b) = board(&doc);
+    assert_eq!((k.columns.len(), b.width()), (4, 960.0));
+    doc.apply(tools.remove_kanban_column(&doc).unwrap())
+        .unwrap();
+    assert_eq!(board(&doc).1.width(), 720.0);
+}

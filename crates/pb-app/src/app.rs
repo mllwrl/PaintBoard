@@ -313,7 +313,10 @@ impl App {
             let bounds = data.frame().aabb();
             content = Some(content.map_or(bounds, |c: pb_geom::kurbo::Rect| c.union(bounds)));
             let color = match data.kind {
-                ObjectKind::Shape(_) | ObjectKind::Sticky(_) | ObjectKind::Table(_)
+                ObjectKind::Shape(_)
+                | ObjectKind::Sticky(_)
+                | ObjectKind::Table(_)
+                | ObjectKind::Kanban(_)
                     if data.style.fill.to_bytes()[3] > 0 =>
                 {
                     data.style.fill
@@ -418,6 +421,7 @@ impl App {
                         | ObjectKind::Sticky(_)
                         | ObjectKind::Frame(_)
                         | ObjectKind::Table(_)
+                        | ObjectKind::Kanban(_)
                 )
             }),
             has_width: leaves.iter().any(|o| {
@@ -435,7 +439,7 @@ impl App {
                 .any(|o| !matches!(o.data.kind, ObjectKind::Image(_) | ObjectKind::Frame(_))),
             stroke_label: if leaves
                 .iter()
-                .any(|o| matches!(o.data.kind, ObjectKind::Shape(_)))
+                .any(|o| matches!(o.data.kind, ObjectKind::Shape(_) | ObjectKind::Kanban(_)))
             {
                 "Outline"
             } else if leaves
@@ -460,6 +464,10 @@ impl App {
                 }),
                 _ => None,
             },
+            kanban: self
+                .tools
+                .kanban_columns(&self.document)
+                .map(|n| (n, self.tools.selected_card(&self.document).is_some())),
             can_crop: matches!(ids, [id] if Crop::new(&self.document, *id).is_some()),
             several: ids.len() > 1,
             locked: selection.has_locked(&self.document),
@@ -523,6 +531,21 @@ impl App {
             }
             Action::RemoveTableLines(rows) => {
                 if let Some(command) = self.tools.remove_table_lines(&self.document, rows) {
+                    self.apply(command);
+                }
+            }
+            Action::AddKanbanColumn => {
+                if let Some(command) = self.tools.add_kanban_column(&self.document) {
+                    self.apply(command);
+                }
+            }
+            Action::RemoveKanbanColumn => {
+                if let Some(command) = self.tools.remove_kanban_column(&self.document) {
+                    self.apply(command);
+                }
+            }
+            Action::DeleteCard => {
+                if let Some(command) = self.tools.remove_selected_card(&self.document) {
                     self.apply(command);
                 }
             }
@@ -733,6 +756,18 @@ impl App {
         }
     }
 
+    /// Starts a new card below the one being edited.
+    fn next_card(&mut self) {
+        let Some((id, col, at)) = self.editing.as_ref().and_then(|e| e.next_card()) else {
+            return;
+        };
+        self.finish_editing();
+        let engine = self.text.engine();
+        if let Some(edit) = TextEdit::new_card(engine, &self.document, id, col, at) {
+            self.start_editing(edit);
+        }
+    }
+
     /// Empties the selected table cells as one undo step.
     fn clear_cells(&mut self) {
         let commands = self.tools.clear_cells_text(&self.document);
@@ -783,11 +818,19 @@ impl App {
         }
         let zoom = self.camera.zoom();
         let engine = self.text.engine();
-        let edit = match self.tools.table_cells(&self.document) {
-            Some((_, range)) => {
+        let card = self.tools.selected_card(&self.document);
+        let edit = match (self.tools.table_cells(&self.document), card) {
+            (Some((_, range)), _) => {
                 TextEdit::table_cell(engine, &self.document, id, (range.row0, range.col0))
             }
-            None => TextEdit::existing(engine, &self.document, id, None, zoom),
+            (None, Some((_, i))) => match self.document.get(id).map(|o| &o.data.kind) {
+                Some(ObjectKind::Kanban(k)) => {
+                    let card = k.cards[i].id.clone();
+                    TextEdit::card(engine, &self.document, id, &card)
+                }
+                _ => None,
+            },
+            (None, None) => TextEdit::existing(engine, &self.document, id, None, zoom),
         };
         let Some(mut edit) = edit else {
             return self.start_crop(id);
@@ -844,6 +887,19 @@ impl App {
             let edit = TextEdit::new_sticky(self.text.engine(), bounds, style);
             self.start_editing(edit);
             return true;
+        }
+        if self.tools.active() == ToolKind::Select
+            && let Some((id, col)) = self.tools.add_card_at(&self.document, pointer)
+        {
+            let at = match self.document.get(id).map(|o| &o.data.kind) {
+                Some(ObjectKind::Kanban(k)) => k.cards_in(col).len(),
+                _ => 0,
+            };
+            let engine = self.text.engine();
+            if let Some(edit) = TextEdit::new_card(engine, &self.document, id, col, at) {
+                self.start_editing(edit);
+                return true;
+            }
         }
         if double && self.tools.active() == ToolKind::Select {
             let target = self
@@ -1329,6 +1385,7 @@ impl App {
             KeyCode::KeyN if !ctrl => self.tools.set_active(ToolKind::Sticky),
             KeyCode::KeyL if !ctrl => self.tools.set_active(ToolKind::Connector),
             KeyCode::KeyF if !ctrl => self.tools.set_active(ToolKind::Frame),
+            KeyCode::KeyK if !ctrl => self.tools.set_active(ToolKind::Kanban),
             KeyCode::Enter | KeyCode::NumpadEnter if !ctrl => return self.edit_selected_text(),
             KeyCode::KeyP if !ctrl => self.tools.set_active(ToolKind::Pen),
             KeyCode::KeyM if !ctrl => self.tools.set_active(ToolKind::Marker),
@@ -1367,6 +1424,13 @@ impl App {
             } else {
                 ZOrder::Backward
             }),
+            KeyCode::Delete | KeyCode::Backspace
+                if self.tools.selected_card(&self.document).is_some() =>
+            {
+                if let Some(command) = self.tools.remove_selected_card(&self.document) {
+                    self.apply(command);
+                }
+            }
             KeyCode::Delete | KeyCode::Backspace
                 if self.tools.table_cells(&self.document).is_some() =>
             {
@@ -1616,11 +1680,16 @@ impl App {
                     match edit.key(self.text.engine(), &event, modifiers) {
                         KeyOutcome::Handled => {}
                         KeyOutcome::Finish => {
-                            // Escape from a cell leaves the cell selected.
+                            // Escape from a cell or card leaves it selected.
                             let cell = edit.edited_cell();
+                            let card = edit.edited_card();
                             self.finish_editing();
                             if let Some((id, cell)) = cell {
                                 self.tools.select_cell(id, cell);
+                            }
+                            if let Some((id, card)) = card {
+                                self.tools.select_card(id, card);
+                                self.tools.sync(&self.document);
                             }
                         }
                         KeyOutcome::FinishAndPass => {
@@ -1629,6 +1698,7 @@ impl App {
                         }
                         KeyOutcome::NextSticky { below } => self.next_sticky(below),
                         KeyOutcome::NextCell { back } => self.next_cell(back),
+                        KeyOutcome::NextCard => self.next_card(),
                     }
                     true
                 } else {

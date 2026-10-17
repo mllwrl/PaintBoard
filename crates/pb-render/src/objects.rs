@@ -9,7 +9,7 @@ use std::sync::Arc;
 use pb_geom::ink::{smooth_path, variable_outline};
 use pb_text::{TextAlign, TextEngine, TextLayout};
 use vello::Scene;
-use vello::kurbo::{Affine, BezPath, Cap, Join, Line, Rect, Shape, Stroke};
+use vello::kurbo::{Affine, BezPath, Cap, Join, Line, Rect, RoundedRect, Shape, Stroke};
 use vello::peniko::{Color, Fill, Mix};
 
 /// Ink never gets thinner than this fraction of its width, however light the pressure.
@@ -25,6 +25,10 @@ const PLACEHOLDER_LINE: Color = Color::from_rgb8(0xA0, 0xA0, 0x9A);
 /// A frame's hairline edge and its title.
 const FRAME_EDGE: Color = Color::from_rgb8(0xD0, 0xD0, 0xCB);
 const FRAME_TITLE: Color = Color::from_rgb8(0x5F, 0x63, 0x68);
+
+/// Kanban cards and the label of the row that adds them.
+const CARD_FILL: Color = Color::from_rgb8(0xFF, 0xFF, 0xFF);
+const ADD_LABEL: Color = Color::from_rgb8(0x6B, 0x72, 0x80);
 
 /// Fitted sizes kept by [`TextRenderer`]; the cache is dropped when it grows past this.
 const FIT_CACHE_LIMIT: usize = 4096;
@@ -293,6 +297,43 @@ pub(crate) fn draw_object(
                 grid.extend(b.path_elements(0.1));
                 let stroke = Stroke::new(style.stroke_width);
                 scene.stroke(&stroke, transform, color(style.stroke), None, &grid);
+            }
+        }
+        ObjectKind::Kanban(kanban) => {
+            let b = data.bounds;
+            let radius = kanban.radius(b.width());
+            let brush = color(style.text_color());
+            let outline = Stroke::new(style.stroke_width);
+            for col in 0..kanban.columns.len() {
+                let Some(rect) = kanban.column_rect(b, col) else {
+                    continue;
+                };
+                let column = RoundedRect::from_rect(rect, radius);
+                scene.fill(Fill::NonZero, transform, color(style.fill), None, &column);
+                let title = &kanban.columns[col].title;
+                if let Some(text_box) = kanban.title_text_box(b, col) {
+                    let spans = pb_core::Kanban::title_spans(title);
+                    text.draw_fitted(scene, transform, (title, &spans), text_box, brush);
+                }
+                for i in kanban.cards_in(col) {
+                    let Some(rect) = kanban.card_rect(b, i) else {
+                        continue;
+                    };
+                    let card = RoundedRect::from_rect(rect, radius);
+                    scene.fill(Fill::NonZero, transform, CARD_FILL, None, &card);
+                    if style.stroke_width > 0.0 {
+                        scene.stroke(&outline, transform, color(style.stroke), None, &card);
+                    }
+                    let c = &kanban.cards[i];
+                    if let Some(text_box) = kanban.card_text_box(b, i) {
+                        text.draw_fitted(scene, transform, (&c.text, &c.spans), text_box, brush);
+                    }
+                }
+                if let Some(text_box) = kanban.add_text_box(b, col) {
+                    let label: Arc<str> = pb_core::Kanban::ADD_LABEL.into();
+                    let spans = Spans::default();
+                    text.draw_fitted(scene, transform, (&label, &spans), text_box, ADD_LABEL);
+                }
             }
         }
         ObjectKind::Frame(frame) => {

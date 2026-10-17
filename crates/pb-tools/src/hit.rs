@@ -65,7 +65,8 @@ fn touches(data: &ObjectData, area: Rect) -> bool {
         | ObjectKind::Text(_)
         | ObjectKind::Sticky(_)
         | ObjectKind::Image(_)
-        | ObjectKind::Table(_) => true,
+        | ObjectKind::Table(_)
+        | ObjectKind::Kanban(_) => true,
         // Only when the area takes all of it, so a marquee inside a frame selects its
         // contents.
         ObjectKind::Frame(_) => area.contains_rect(data.bounds),
@@ -118,9 +119,10 @@ pub(crate) fn hits(data: &ObjectData, point: Point, tolerance: f64) -> bool {
     let local = data.frame().to_local(point);
     match &data.kind {
         ObjectKind::Shape(shape) => shape.kind.hit(data.bounds, local, pad),
-        ObjectKind::Text(_) | ObjectKind::Sticky(_) | ObjectKind::Table(_) => {
-            data.bounds.inflate(pad, pad).contains(local)
-        }
+        ObjectKind::Text(_)
+        | ObjectKind::Sticky(_)
+        | ObjectKind::Table(_)
+        | ObjectKind::Kanban(_) => data.bounds.inflate(pad, pad).contains(local),
         // By its title only, see `frame_title_at`.
         ObjectKind::Frame(_) => false,
         // Hit along the path, which needs the document; see `connector_hit`.

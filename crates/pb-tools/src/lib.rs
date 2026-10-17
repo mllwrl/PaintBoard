@@ -26,8 +26,9 @@ pub use selection::{Selection, selection_frame, unit_frame};
 
 use bend::BendGrip;
 use pb_core::{
-    Cap, CellRange, Command, Connector, ConnectorChange, Content, Document, End, FrameData, Label,
-    Object, ObjectData, ObjectId, ObjectKind, Route, ShapeKind, Style, Table,
+    Cap, CellRange, Column, Command, Connector, ConnectorChange, Content, Document, End, FrameData,
+    Kanban, KanbanPart, Label, Object, ObjectData, ObjectId, ObjectKind, Route, ShapeKind, Style,
+    Table,
 };
 use pb_geom::kurbo::{Line, Point, Rect, Vec2};
 use pb_geom::{Frame, GridLevel, Snapper, xs_of, ys_of};
@@ -66,6 +67,8 @@ pub enum ToolKind {
     Frame,
     /// Drag out a table, or click to place a 3 x 3 one.
     Table,
+    /// Drag out a kanban board, or click to place one with three columns.
+    Kanban,
 }
 
 impl ToolKind {
@@ -81,6 +84,7 @@ impl ToolKind {
             Self::Connector => "Connector",
             Self::Frame => "Frame",
             Self::Table => "Table",
+            Self::Kanban => "Kanban",
         }
     }
 
@@ -152,6 +156,7 @@ enum Drawn {
     Shape(ShapeKind),
     Frame,
     Table,
+    Kanban,
 }
 
 enum Gesture {
@@ -176,6 +181,17 @@ enum Gesture {
     },
     /// Dragging over the cells of the selected table to select a block of them.
     SelectCells,
+    /// Pressed on card `card` of the selected kanban board `id`: a click selects it, a drag
+    /// moves it to where its middle is dropped.
+    MoveCard {
+        id: ObjectId,
+        card: std::sync::Arc<str>,
+        start: Point,
+        current: Point,
+        /// From the pointer to the card's middle.
+        offset: Vec2,
+        dragging: bool,
+    },
     Resize {
         handle: Handle,
         from: Frame,
@@ -265,6 +281,8 @@ pub struct Tools {
     connect_hover: Option<End>,
     /// Selected cells of the selected table.
     cells: Option<CellSelection>,
+    /// The selected card of the selected kanban board: the board and the card's id.
+    card: Option<(ObjectId, std::sync::Arc<str>)>,
 }
 
 /// A block of cells of table `id`, from the cell first picked to the one picked last.
@@ -292,6 +310,7 @@ impl Default for Tools {
             connector_route: Route::default(),
             connect_hover: None,
             cells: None,
+            card: None,
         }
     }
 }
@@ -377,6 +396,30 @@ impl Tools {
     pub fn select_only(&mut self, ids: impl IntoIterator<Item = ObjectId>) {
         self.selection.set(ids);
         self.cells = None;
+        self.card = None;
+    }
+
+    /// Selects kanban board `id` and its card `card`.
+    pub fn select_card(&mut self, id: ObjectId, card: std::sync::Arc<str>) {
+        self.select_only([id]);
+        self.card = Some((id, card));
+    }
+
+    /// The selected card: its board and index, if a card of the single selected board is
+    /// selected and shown.
+    pub fn selected_card(&self, doc: &Document) -> Option<(ObjectId, usize)> {
+        let (id, card) = self.card.as_ref()?;
+        let (board, _, kanban) = self.single_kanban(doc)?;
+        let i = kanban.card_index(card).filter(|_| board == *id)?;
+        kanban.place_of(i).map(|_| (board, i))
+    }
+
+    /// Where the selected card is (world).
+    fn card_frame(&self, doc: &Document) -> Option<Frame> {
+        let (_, i) = self.selected_card(doc)?;
+        let (_, data, kanban) = self.single_kanban(doc)?;
+        let rect = kanban.card_rect(data.bounds, i)?;
+        Some(Frame::axis_aligned(rect).rotated_about(data.bounds.center(), data.rotation))
     }
 
     /// Selects table `id` and its cell `cell`.
@@ -398,17 +441,21 @@ impl Tools {
             .then(|| (id, table.expand(range)))
     }
 
-    /// Where the selected cells are (world), following the table's rotation.
+    /// Where the selected cells or card are (world), following the object's rotation.
     pub fn cells_frame(&self, doc: &Document) -> Option<Frame> {
+        if let Some(frame) = self.card_frame(doc) {
+            return Some(frame);
+        }
         let (_, range) = self.table_cells(doc)?;
         let (_, data, table) = self.single_table(doc)?;
         let rect = table.range_rect(data.bounds, range)?;
         Some(Frame::axis_aligned(rect).rotated_about(data.bounds.center(), data.rotation))
     }
 
-    /// Deselects the cells but keeps their table selected. Returns true if any were selected.
+    /// Deselects the cells or card but keeps their table or board selected. Returns true if
+    /// any were selected.
     pub fn clear_cells(&mut self) -> bool {
-        self.cells.take().is_some()
+        self.cells.take().is_some() | self.card.take().is_some()
     }
 
     /// Selects everything that is not locked.
@@ -417,6 +464,7 @@ impl Tools {
         let ids = doc.roots().iter().filter(|&&id| !doc.is_locked(id));
         self.selection.set(ids.copied());
         self.cells = None;
+        self.card = None;
     }
 
     /// Returns true if something was selected.
@@ -424,6 +472,7 @@ impl Tools {
         let had = !self.selection.is_empty();
         self.selection.clear();
         self.cells = None;
+        self.card = None;
         had
     }
 
@@ -432,6 +481,9 @@ impl Tools {
         self.selection.retain_existing(doc);
         if self.cells.is_some() && self.table_cells(doc).is_none() {
             self.cells = None;
+        }
+        if self.card.is_some() && self.selected_card(doc).is_none() {
+            self.card = None;
         }
         if self.hover.is_some_and(|id| !doc.contains(id)) {
             self.hover = None;
@@ -528,6 +580,7 @@ impl Tools {
             ToolKind::Shape(shape) => Some(Drawn::Shape(shape)),
             ToolKind::Frame => Some(Drawn::Frame),
             ToolKind::Table => Some(Drawn::Table),
+            ToolKind::Kanban => Some(Drawn::Kanban),
             _ => None,
         };
         if let Some(kind) = drawn {
@@ -619,6 +672,35 @@ impl Tools {
                 let local = data.frame().to_local(p);
                 Some((id, table.cell_at(data.bounds, local)?))
             });
+        let card = self
+            .single_kanban(doc)
+            .filter(|(id, ..)| under == Some(*id) && !toggle)
+            .and_then(|(id, data, kanban)| {
+                let local = data.frame().to_local(p);
+                match kanban.part_at(data.bounds, local)? {
+                    KanbanPart::Card(i) => {
+                        let middle = data
+                            .frame()
+                            .to_world(kanban.card_rect(data.bounds, i)?.center());
+                        Some((id, kanban.cards[i].id.clone(), middle - p))
+                    }
+                    _ => None,
+                }
+            });
+        if let Some((id, card, offset)) = card {
+            self.cells = None;
+            self.gesture = Some(Gesture::MoveCard {
+                id,
+                card,
+                start: p,
+                current: p,
+                offset,
+                dragging: false,
+            });
+            self.hover = None;
+            return true;
+        }
+        self.card = None;
         let mut cell_on_click = None;
         if let Some((id, cell)) = cell {
             let picking = self.cells.is_some_and(|c| c.id == id);
@@ -700,6 +782,16 @@ impl Tools {
                 ..
             }) => {
                 *current = pointer;
+                *dragging |= pointer.screen_distance(*start) >= CLICK_SLOP;
+                *dragging
+            }
+            Some(Gesture::MoveCard {
+                start,
+                current,
+                dragging,
+                ..
+            }) => {
+                *current = pointer.world;
                 *dragging |= pointer.screen_distance(*start) >= CLICK_SLOP;
                 *dragging
             }
@@ -881,6 +973,30 @@ impl Tools {
                 None
             }
             Gesture::SelectCells => None,
+            Gesture::MoveCard {
+                id,
+                card,
+                dragging: false,
+                ..
+            } => {
+                self.card = Some((*id, card.clone()));
+                None
+            }
+            Gesture::MoveCard { .. } => {
+                let moved = self.moved_card(doc);
+                if let (Some((id, card, bounds)), Some(Gesture::MoveCard { card: name, .. })) =
+                    (&moved, &self.gesture)
+                {
+                    self.card = Some((*id, name.clone()));
+                    Some(Command::SetCard {
+                        id: *id,
+                        card: card.clone(),
+                        bounds: *bounds,
+                    })
+                } else {
+                    None
+                }
+            }
             Gesture::Resize { .. } | Gesture::Rotate { .. } => {
                 let changes = self.geometry_changes(doc);
                 let changed = changes
@@ -992,6 +1108,144 @@ impl Tools {
         self.single_connector(doc)
             .map(|(id, _)| bend::handles(doc, id).into_iter().map(|(p, _)| p).collect())
             .unwrap_or_default()
+    }
+
+    /// The single selected unlocked kanban board, with its data.
+    fn single_kanban<'a>(
+        &self,
+        doc: &'a Document,
+    ) -> Option<(ObjectId, &'a ObjectData, &'a Kanban)> {
+        let [id] = self.selection.ids() else {
+            return None;
+        };
+        let object = doc.get(*id).filter(|_| !doc.is_locked(*id))?;
+        match &object.data.kind {
+            ObjectKind::Kanban(kanban) => Some((*id, &object.data, kanban)),
+            _ => None,
+        }
+    }
+
+    /// Where the card being dragged lands: its board, the card in its new place, and the
+    /// board's bounds then; `None` while it would stay where it is.
+    fn moved_card(&self, doc: &Document) -> Option<(ObjectId, pb_core::Card, Rect)> {
+        let Some(Gesture::MoveCard {
+            id,
+            card,
+            current,
+            offset,
+            dragging: true,
+            ..
+        }) = &self.gesture
+        else {
+            return None;
+        };
+        let object = doc.get(*id)?;
+        let ObjectKind::Kanban(kanban) = &object.data.kind else {
+            return None;
+        };
+        let data = &object.data;
+        let i = kanban.card_index(card)?;
+        let middle = data.frame().to_local(*current + *offset);
+        let (col, at) = kanban.drop_at(data.bounds, middle, Some(i));
+        let old = kanban.place_of(i)?;
+        let others_before = old.1;
+        if col == old.0 && at == others_before {
+            return None;
+        }
+        let moved = pb_core::Card {
+            column: kanban.columns[col].id.clone(),
+            order: kanban.order_at(col, at, Some(i)),
+            ..kanban.cards[i].clone()
+        };
+        let bounds = kanban.with_card(moved.clone()).fitted(data.bounds);
+        Some((*id, moved, bounds))
+    }
+
+    /// Whether a kanban board is selected alone, and how many columns it has.
+    pub fn kanban_columns(&self, doc: &Document) -> Option<usize> {
+        self.single_kanban(doc).map(|(_, _, k)| k.columns.len())
+    }
+
+    /// Adds a column at the right of the selected kanban board; the board grows by a column.
+    pub fn add_kanban_column(&self, doc: &Document) -> Option<Command> {
+        let (id, data, kanban) = self.single_kanban(doc)?;
+        let mut columns = kanban.columns.to_vec();
+        let n = columns.len() as f64;
+        columns.push(Column {
+            id: doc.new_line_id().into(),
+            title: "New column".into(),
+        });
+        let b = data.bounds;
+        let grown = Kanban {
+            columns: columns.into(),
+            ..kanban.clone()
+        };
+        let wide = Rect::new(b.x0, b.y0, b.x0 + b.width() * (n + 1.0) / n, b.y1);
+        Some(Command::SetColumns {
+            id,
+            columns: grown.columns.clone(),
+            bounds: grown.fitted(wide),
+        })
+    }
+
+    /// Removes the right column of the selected kanban board, if it has more than one; the
+    /// board shrinks by a column.
+    pub fn remove_kanban_column(&self, doc: &Document) -> Option<Command> {
+        let (id, data, kanban) = self.single_kanban(doc)?;
+        let n = kanban.columns.len();
+        if n < 2 {
+            return None;
+        }
+        let shrunk = Kanban {
+            columns: kanban.columns[..n - 1].into(),
+            ..kanban.clone()
+        };
+        let b = data.bounds;
+        let narrow = Rect::new(
+            b.x0,
+            b.y0,
+            b.x0 + b.width() * (n - 1) as f64 / n as f64,
+            b.y1,
+        );
+        Some(Command::SetColumns {
+            id,
+            columns: shrunk.columns.clone(),
+            bounds: shrunk.fitted(narrow),
+        })
+    }
+
+    /// Removes the selected card from its board.
+    pub fn remove_selected_card(&mut self, doc: &Document) -> Option<Command> {
+        let (id, i) = self.selected_card(doc)?;
+        let (_, data, kanban) = self.single_kanban(doc)?;
+        let card = kanban.cards[i].id.clone();
+        let cards: Vec<_> = kanban
+            .cards
+            .iter()
+            .filter(|c| c.id != card)
+            .cloned()
+            .collect();
+        let left = Kanban {
+            cards: cards.into(),
+            ..kanban.clone()
+        };
+        self.card = None;
+        Some(Command::RemoveCard {
+            id,
+            card,
+            bounds: left.fitted(data.bounds),
+        })
+    }
+
+    /// The "add card" row of the selected kanban board at `pointer`: the board and the
+    /// column.
+    pub fn add_card_at(&self, doc: &Document, pointer: Pointer) -> Option<(ObjectId, usize)> {
+        let (id, data, kanban) = self.single_kanban(doc)?;
+        let local = data.frame().to_local(pointer.world);
+        match kanban.part_at(data.bounds, local)? {
+            KanbanPart::Add(col) => Some((id, col)),
+            _ => None,
+        }
     }
 
     /// The single selected unlocked table, with its data.
@@ -1232,6 +1486,20 @@ impl Tools {
                 o.data.kind = ObjectKind::Connector(c);
                 vec![o]
             }
+            Some(Gesture::MoveCard {
+                id, dragging: true, ..
+            }) => {
+                let Some(mut o) = doc.get(*id).cloned() else {
+                    return Vec::new();
+                };
+                if let (Some((_, card, bounds)), ObjectKind::Kanban(k)) =
+                    (self.moved_card(doc), &mut o.data.kind)
+                {
+                    *k = k.with_card(card);
+                    o.data.bounds = bounds;
+                }
+                vec![o]
+            }
             Some(Gesture::MoveDivider {
                 id,
                 divider,
@@ -1390,6 +1658,7 @@ impl Tools {
                 CursorHint::Crosshair
             }
             Some(Gesture::MoveLabel { .. } | Gesture::MoveBend { .. }) => CursorHint::Move,
+            Some(Gesture::MoveCard { dragging: true, .. }) => CursorHint::Move,
             _ if self.active != ToolKind::Select => CursorHint::Crosshair,
             _ => match self.hover_grip {
                 Some(Grip::Resize(handle)) => handle.cursor(self.hover_rotation),
@@ -1665,6 +1934,8 @@ impl Tools {
                     let (w, h) = Table::CELL_SIZE;
                     (3.0 * w / current.zoom, 3.0 * h / current.zoom)
                 }
+                // The height is fitted to the columns, see `drawn`.
+                Drawn::Kanban => (3.0 * Kanban::COLUMN_WIDTH / current.zoom, 1.0),
             };
             return (Rect::from_center_size(*anchor, size), Vec::new());
         }
@@ -1767,6 +2038,15 @@ fn drawn(doc: &Document, kind: Drawn, bounds: Rect) -> ObjectData {
             rotation: 0.0,
             style: Style::default(),
         },
+        Drawn::Kanban => {
+            let kanban = Kanban::starter(|| doc.new_line_id());
+            ObjectData {
+                bounds: kanban.fitted(bounds),
+                kind: ObjectKind::Kanban(kanban),
+                rotation: 0.0,
+                style: Kanban::style(),
+            }
+        }
         Drawn::Table => ObjectData {
             kind: ObjectKind::Table(Table::new(3, 3, || doc.new_line_id())),
             bounds,

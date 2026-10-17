@@ -5,8 +5,8 @@
 //! the whole edit and autosave and sync see finished text only.
 
 use pb_core::{
-    Cell, Command, Document, FrameData, Label, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Span,
-    Sticky, Style, Table, Text, TextBox, TextMarks,
+    Card, Cell, Command, Document, FrameData, Kanban, KanbanPart, Label, ObjectData, ObjectId,
+    ObjectKind, Rgba, Shape, Span, Sticky, Style, Table, Text, TextBox, TextMarks,
 };
 use pb_geom::kurbo::{Point, Rect, Size, Vec2};
 use pb_geom::{Frame, ShapeKind};
@@ -49,6 +49,8 @@ pub enum KeyOutcome {
     NextCell {
         back: bool,
     },
+    /// Tab on a kanban card: stop editing and start a new card below it.
+    NextCard,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +85,23 @@ enum Placement {
         col: usize,
         text_box: TextBox,
     },
+    /// A card or column title of a kanban board with `bounds`: the text is fitted into
+    /// `text_box` inside `rect`.
+    Board {
+        bounds: Rect,
+        rect: Rect,
+        part: BoardPart,
+        text_box: TextBox,
+    },
+}
+
+/// What of a kanban board is edited.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoardPart {
+    /// Card `i` of the board as edited (see `TextEdit::kanban`).
+    Card(usize),
+    /// The title of column `i`.
+    Title(usize),
 }
 
 impl Placement {
@@ -97,7 +116,7 @@ impl Placement {
                 bounds,
                 shape: None,
             } => Some(Sticky::text_box(bounds)),
-            Self::Cell { text_box, .. } => Some(text_box),
+            Self::Cell { text_box, .. } | Self::Board { text_box, .. } => Some(text_box),
             Self::Free { .. } | Self::Label { .. } | Self::Title { .. } => None,
         }
     }
@@ -121,6 +140,10 @@ pub struct TextEdit {
     connector: Option<ObjectData>,
     /// The table whose cell this is.
     table: Option<Table>,
+    /// The kanban board whose card or title this is, with the card if it is new.
+    kanban: Option<Kanban>,
+    /// The card is not on the board yet: it is added only if it gets some text.
+    new_card: bool,
 }
 
 impl TextEdit {
@@ -150,6 +173,8 @@ impl TextEdit {
             caret_drawn: false,
             connector: None,
             table: None,
+            kanban: None,
+            new_card: false,
         }
     }
 
@@ -187,6 +212,8 @@ impl TextEdit {
             caret_drawn: false,
             connector: None,
             table: None,
+            kanban: None,
+            new_card: false,
         };
         this.refit(engine);
         this
@@ -237,6 +264,8 @@ impl TextEdit {
                 caret_drawn: false,
                 connector: None,
                 table: None,
+                kanban: None,
+                new_card: false,
             }),
             ObjectKind::Sticky(sticky) => Some(Self::fitted(
                 engine,
@@ -284,6 +313,8 @@ impl TextEdit {
                     caret_drawn: false,
                     connector: Some(data.clone()),
                     table: None,
+                    kanban: None,
+                    new_card: false,
                 })
             }
             ObjectKind::Frame(frame) => Some(Self {
@@ -302,6 +333,8 @@ impl TextEdit {
                 caret_drawn: false,
                 connector: None,
                 table: None,
+                kanban: None,
+                new_card: false,
             }),
             ObjectKind::Table(table) => {
                 let local = near.map(|p| data.frame().to_local(p));
@@ -310,8 +343,143 @@ impl TextEdit {
                     .unwrap_or((0, 0));
                 Self::cell(engine, target, data, table, row, col)
             }
+            ObjectKind::Kanban(kanban) => {
+                let local = data.frame().to_local(near?);
+                let part = match kanban.part_at(data.bounds, local)? {
+                    KanbanPart::Card(i) => BoardPart::Card(i),
+                    KanbanPart::Title(col) => BoardPart::Title(col),
+                    KanbanPart::Add(_) => return None,
+                };
+                Self::board(engine, target, data, kanban.clone(), part, false)
+            }
             ObjectKind::Ink(_) | ObjectKind::Image(_) => None,
         }
+    }
+
+    /// Edits a card or column title of the kanban board object `data`, laid out as in
+    /// `kanban` (which has the card when it is `new_card`).
+    fn board(
+        engine: &mut TextEngine,
+        target: Target,
+        data: &ObjectData,
+        kanban: Kanban,
+        part: BoardPart,
+        new_card: bool,
+    ) -> Option<Self> {
+        let bounds = if new_card {
+            kanban.fitted(data.bounds)
+        } else {
+            data.bounds
+        };
+        let (rect, text_box, text, spans) = match part {
+            BoardPart::Card(i) => {
+                let card = kanban.cards.get(i)?;
+                (
+                    kanban.card_rect(bounds, i)?,
+                    kanban.card_text_box(bounds, i)?,
+                    card.text.clone(),
+                    card.spans.clone(),
+                )
+            }
+            BoardPart::Title(col) => {
+                let title = kanban.columns.get(col)?.title.clone();
+                let spans = Kanban::title_spans(&title);
+                (
+                    kanban.title_rect(bounds, col)?,
+                    kanban.title_text_box(bounds, col)?,
+                    title,
+                    spans,
+                )
+            }
+        };
+        let placement = Placement::Board {
+            bounds,
+            rect,
+            part,
+            text_box,
+        };
+        let mut this = Self::fitted(
+            engine,
+            target,
+            (&text, &spans),
+            placement,
+            data.rotation,
+            data.style,
+        );
+        this.kanban = Some(kanban);
+        this.new_card = new_card;
+        Some(this)
+    }
+
+    /// Edits a new, empty card at place `at` of column `col` of kanban board `id`.
+    pub fn new_card(
+        engine: &mut TextEngine,
+        doc: &Document,
+        id: ObjectId,
+        col: usize,
+        at: usize,
+    ) -> Option<Self> {
+        let data = &doc.get(id)?.data;
+        let ObjectKind::Kanban(kanban) = &data.kind else {
+            return None;
+        };
+        let card = Card {
+            id: doc.new_line_id().into(),
+            column: kanban.columns.get(col)?.id.clone(),
+            order: kanban.order_at(col, at, None),
+            text: "".into(),
+            spans: Default::default(),
+        };
+        let kanban = kanban.with_card(card);
+        let i = kanban.cards.len() - 1;
+        Self::board(
+            engine,
+            Target::Existing(id),
+            data,
+            kanban,
+            BoardPart::Card(i),
+            true,
+        )
+    }
+
+    /// Edits card `card` (by id) of kanban board `id`.
+    pub fn card(engine: &mut TextEngine, doc: &Document, id: ObjectId, card: &str) -> Option<Self> {
+        let data = &doc.get(id)?.data;
+        let ObjectKind::Kanban(kanban) = &data.kind else {
+            return None;
+        };
+        let i = kanban.card_index(card)?;
+        Self::board(
+            engine,
+            Target::Existing(id),
+            data,
+            kanban.clone(),
+            BoardPart::Card(i),
+            false,
+        )
+    }
+
+    /// The board and the id of the card being edited, when editing a kanban card.
+    pub fn edited_card(&self) -> Option<(ObjectId, std::sync::Arc<str>)> {
+        match (self.target, self.placement, &self.kanban) {
+            (
+                Target::Existing(id),
+                Placement::Board {
+                    part: BoardPart::Card(i),
+                    ..
+                },
+                Some(kanban),
+            ) => Some((id, kanban.cards.get(i)?.id.clone())),
+            _ => None,
+        }
+    }
+
+    /// Where a card added after the edited one goes: its board, column and place.
+    pub fn next_card(&self) -> Option<(ObjectId, usize, usize)> {
+        let (id, card) = self.edited_card()?;
+        let kanban = self.kanban.as_ref()?;
+        let (col, at) = kanban.place_of(kanban.card_index(&card)?)?;
+        Some((id, col, at + 1))
     }
 
     /// Edits cell (`row`, `col`) of the table object `data`.
@@ -412,7 +580,7 @@ impl TextEdit {
                 Rect::from_origin_size(origin, (width, layout.height))
             }
             Placement::Fitted { bounds, .. } => bounds,
-            Placement::Cell { rect, .. } => rect,
+            Placement::Cell { rect, .. } | Placement::Board { rect, .. } => rect,
             Placement::Label { center, .. } => {
                 let layout = self.editor.layout(engine);
                 let width = layout.width.max(self.editor.size() * MIN_WIDTH);
@@ -432,7 +600,9 @@ impl TextEdit {
     /// The object's bounds as they are now: the text box, except for a frame.
     fn object_bounds(&mut self, engine: &mut TextEngine) -> Rect {
         match self.placement {
-            Placement::Title { bounds, .. } | Placement::Cell { bounds, .. } => bounds,
+            Placement::Title { bounds, .. }
+            | Placement::Cell { bounds, .. }
+            | Placement::Board { bounds, .. } => bounds,
             _ => self.frame(engine).rect,
         }
     }
@@ -442,7 +612,7 @@ impl TextEdit {
         match self.placement {
             Placement::Free { origin, .. } => origin,
             Placement::Title { .. } => self.frame(engine).rect.origin(),
-            Placement::Fitted { .. } | Placement::Cell { .. } => {
+            Placement::Fitted { .. } | Placement::Cell { .. } | Placement::Board { .. } => {
                 let text_box = self.placement.text_box(&self.style);
                 let text_box = text_box.expect("fitted placement");
                 let height = self.editor.layout(engine).height;
@@ -471,11 +641,18 @@ impl TextEdit {
         self.frame(engine).contains(world, pad)
     }
 
-    /// Whether the text takes inline styles: connector labels and frame titles do not.
+    /// Whether the text takes inline styles: connector labels, frame titles and column
+    /// titles do not.
     pub fn is_rich(&self) -> bool {
         matches!(
             self.placement,
-            Placement::Free { .. } | Placement::Fitted { .. } | Placement::Cell { .. }
+            Placement::Free { .. }
+                | Placement::Fitted { .. }
+                | Placement::Cell { .. }
+                | Placement::Board {
+                    part: BoardPart::Card(_),
+                    ..
+                }
         )
     }
 
@@ -571,6 +748,7 @@ impl TextEdit {
         self.touch();
         let ctrl = modifiers.control_key();
         let shift = modifiers.shift_key();
+        let card = self.edited_card().is_some();
         let ed = &mut self.editor;
         // Board shortcuts by physical key, like elsewhere.
         if ctrl && let PhysicalKey::Code(code) = event.physical_key {
@@ -636,11 +814,21 @@ impl TextEdit {
             {
                 return KeyOutcome::NextCell { back: shift };
             }
+            Key::Named(NamedKey::Tab) if card && !ctrl && !shift && !ed.is_composing() => {
+                return KeyOutcome::NextCard;
+            }
             Key::Named(NamedKey::Backspace) => ed.backspace(engine, word),
             Key::Named(NamedKey::Delete) => ed.delete(engine, word),
             // A title is one line: Enter keeps it.
             Key::Named(NamedKey::Enter)
-                if matches!(self.placement, Placement::Title { .. }) && !ed.is_composing() =>
+                if matches!(
+                    self.placement,
+                    Placement::Title { .. }
+                        | Placement::Board {
+                            part: BoardPart::Title(_),
+                            ..
+                        }
+                ) && !ed.is_composing() =>
             {
                 return KeyOutcome::Finish;
             }
@@ -751,6 +939,10 @@ impl TextEdit {
                     let table = self.table.clone().expect("cell of a table");
                     ObjectKind::Table(table.with_cell(row, col, Cell { text, spans }))
                 }
+                Placement::Board { part, .. } => {
+                    let kanban = self.kanban.as_ref().expect("part of a board");
+                    ObjectKind::Kanban(edited_board(kanban, part, text, spans))
+                }
                 Placement::Fitted { shape: None, .. } | Placement::Label { .. } => {
                     ObjectKind::Sticky(Sticky {
                         spans: spans.clone(),
@@ -834,6 +1026,31 @@ impl TextEdit {
                 },
             });
         }
+        if let (Target::Existing(id), Placement::Board { part, bounds, .. }, Some(kanban)) =
+            (self.target, self.placement, &self.kanban)
+        {
+            let unchanged = text == self.original && spans == self.original_spans;
+            let edited = edited_board(kanban, part, text.into(), spans.into());
+            return match part {
+                BoardPart::Card(_)
+                    if self.new_card && edited.cards.last()?.text.trim().is_empty() =>
+                {
+                    None
+                }
+                BoardPart::Card(_) if unchanged && !self.new_card => None,
+                BoardPart::Card(i) => Some(Command::SetCard {
+                    id,
+                    card: edited.cards.get(i)?.clone(),
+                    bounds,
+                }),
+                BoardPart::Title(_) if text_unchanged(&self.original, &edited, part) => None,
+                BoardPart::Title(_) => Some(Command::SetColumns {
+                    id,
+                    columns: edited.columns.clone(),
+                    bounds,
+                }),
+            };
+        }
         let empty = text.trim().is_empty() && matches!(self.placement, Placement::Free { .. });
         match self.target {
             Target::Existing(_) if text == self.original && spans == self.original_spans => None,
@@ -847,6 +1064,46 @@ impl TextEdit {
             Target::New if empty => None,
             Target::New => Some(Command::Create(vec![self.data(engine).into()])),
         }
+    }
+}
+
+/// `kanban` with `text` in place of the card or column title `part`; titles stay plain.
+fn edited_board(
+    kanban: &Kanban,
+    part: BoardPart,
+    text: std::sync::Arc<str>,
+    spans: pb_core::Spans,
+) -> Kanban {
+    match part {
+        BoardPart::Card(i) => match kanban.cards.get(i) {
+            Some(card) => kanban.with_card(Card {
+                text,
+                spans,
+                ..card.clone()
+            }),
+            None => kanban.clone(),
+        },
+        BoardPart::Title(col) => {
+            let mut columns = kanban.columns.to_vec();
+            if let Some(column) = columns.get_mut(col) {
+                column.title = text;
+            }
+            Kanban {
+                columns: columns.into(),
+                ..kanban.clone()
+            }
+        }
+    }
+}
+
+/// Whether the title `part` of `edited` is still `original`.
+fn text_unchanged(original: &str, edited: &Kanban, part: BoardPart) -> bool {
+    match part {
+        BoardPart::Title(col) => edited
+            .columns
+            .get(col)
+            .is_some_and(|c| &*c.title == original),
+        BoardPart::Card(_) => false,
     }
 }
 
@@ -1217,6 +1474,59 @@ mod tests {
         // Tab goes on in the next cell.
         let mut next = TextEdit::table_cell(&mut e, &doc, id, (0, 1)).unwrap();
         assert_eq!(next.frame(&mut e).rect, Rect::new(100.0, 0.0, 200.0, 50.0));
+    }
+
+    #[test]
+    fn kanban_cards_and_titles_are_edited() {
+        let mut e = engine();
+        let mut doc = Document::new();
+        let kanban = Kanban::starter(|| doc.new_line_id());
+        let data = ObjectData {
+            bounds: kanban.fitted(Rect::new(0.0, 0.0, 720.0, 1.0)),
+            kind: ObjectKind::Kanban(kanban.clone()),
+            rotation: 0.0,
+            style: Kanban::style(),
+        };
+        let id = doc
+            .apply(Command::Create(vec![data.into()]))
+            .unwrap()
+            .created[0];
+        // A new card left empty is not added.
+        let edit = TextEdit::new_card(&mut e, &doc, id, 1, 0).unwrap();
+        assert!(edit.finish(&mut e).is_none());
+        // With text it is, and the board grows to hold it.
+        let mut edit = TextEdit::new_card(&mut e, &doc, id, 1, 0).unwrap();
+        edit.editor.insert(&mut e, "Ship it");
+        let shown = edit.data(&mut e);
+        let ObjectKind::Kanban(k) = &shown.kind else {
+            panic!("not a kanban");
+        };
+        assert_eq!(k.cards_in(1).len(), 1);
+        assert_eq!(edit.next_card(), Some((id, 1, 1)));
+        let Some(cmd @ Command::SetCard { .. }) = edit.finish(&mut e) else {
+            panic!("expected SetCard");
+        };
+        doc.apply(cmd).unwrap();
+        let data = &doc.get(id).unwrap().data;
+        let ObjectKind::Kanban(k) = &data.kind else {
+            panic!("not a kanban");
+        };
+        assert_eq!(data.bounds.height(), k.fitted_height(720.0));
+        assert!(data.bounds.height() > kanban.fitted_height(720.0));
+        // A double click on a title renames the column; Enter ends it.
+        let title = k.title_rect(data.bounds, 0).unwrap().center();
+        let mut edit = TextEdit::existing(&mut e, &doc, id, Some(title), 1.0).unwrap();
+        assert!(!edit.is_rich());
+        edit.editor.select_all(&mut e);
+        edit.editor.insert(&mut e, "Backlog");
+        let Some(Command::SetColumns { columns, .. }) = edit.finish(&mut e) else {
+            panic!("expected SetColumns");
+        };
+        assert_eq!(&*columns[0].title, "Backlog");
+        assert_eq!(columns[1], k.columns[1]);
+        // Nothing for the "add card" row.
+        let add = k.add_rect(data.bounds, 2).unwrap().center();
+        assert!(TextEdit::existing(&mut e, &doc, id, Some(add), 1.0).is_none());
     }
 
     #[test]

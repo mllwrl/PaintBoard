@@ -79,6 +79,12 @@ pub enum Action {
     RemoveTableLines(bool),
     /// Merges the selected table cells (`true`), or splits the merged ones among them.
     MergeCells(bool),
+    /// Adds a column at the right of the selected kanban board.
+    AddKanbanColumn,
+    /// Removes the right column of the selected kanban board.
+    RemoveKanbanColumn,
+    /// Removes the selected kanban card.
+    DeleteCard,
     /// Centers the view on a world point (from the minimap).
     LookAt(kurbo::Point),
     /// Replace the selected handwriting with typed text.
@@ -167,6 +173,9 @@ pub struct SelectionInfo {
     pub shape_text: Option<ShapeText>,
     /// A single table is selected.
     pub table: Option<TableInfo>,
+    /// A single kanban board is selected: its number of columns, and whether a card of it
+    /// is selected.
+    pub kanban: Option<(usize, bool)>,
     /// A single unlocked image is selected.
     pub can_crop: bool,
     pub several: bool,
@@ -501,6 +510,7 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         (ToolKind::Connector, "Connector (L)", paint_connector),
                         (ToolKind::Frame, "Frame (F)", paint_frame),
                         (ToolKind::Table, "Table", paint_table),
+                        (ToolKind::Kanban, "Kanban (K)", paint_kanban),
                     ];
                     let mut ink_button = shapes.rect;
                     for (tool, tooltip, paint) in ink_tools {
@@ -946,6 +956,25 @@ fn selection_toolbar(
                         }
                         ui.separator();
                     }
+                    if let Some((columns, card)) = selection.kanban {
+                        let mut buttons = vec![
+                            ("+ Column", "Add a column at the right", Action::AddKanbanColumn, true),
+                            ("− Column", "Remove the right column", Action::RemoveKanbanColumn, columns > 1),
+                        ];
+                        if card {
+                            buttons.push(("Delete card", "Delete the selected card (Delete)", Action::DeleteCard, true));
+                        }
+                        for (label, tip, action, enabled) in buttons {
+                            if ui
+                                .add_enabled(enabled, Button::new(label))
+                                .on_hover_text(tip)
+                                .clicked()
+                            {
+                                actions.push(action);
+                            }
+                        }
+                        ui.separator();
+                    }
                     if selection.can_crop
                         && ui
                             .button("Crop")
@@ -1365,6 +1394,23 @@ fn paint_table(painter: &Painter, rect: Rect, color: Color32) {
     painter.line_segment([at(0.0, 0.37), at(1.0, 0.37)], stroke);
     painter.line_segment([at(0.0, 0.63), at(1.0, 0.63)], stroke);
     painter.line_segment([at(0.5, 0.1), at(0.5, 0.9)], stroke);
+}
+
+/// A kanban board: three columns with cards.
+fn paint_kanban(painter: &Painter, rect: Rect, color: Color32) {
+    let at = |x: f32, y: f32| rect.min + Vec2::new(x, y) * rect.width();
+    let stroke = Stroke::new(1.6, color);
+    for (x, cards) in [(0.0, 3), (0.37, 2), (0.74, 1)] {
+        for i in 0..cards {
+            let y = 0.08 + i as f32 * 0.3;
+            painter.rect_stroke(
+                Rect::from_min_max(at(x, y), at(x + 0.26, y + 0.22)),
+                1,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+        }
+    }
 }
 
 /// A frame: its area under a title line.
