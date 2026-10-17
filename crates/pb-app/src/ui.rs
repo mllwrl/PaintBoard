@@ -107,6 +107,8 @@ pub enum Action {
     /// Starts the countdown over.
     ResetTimer,
     CloseTimer,
+    /// Enters focus mode on the selection or the view, or leaves it (Shift+F).
+    ToggleFocus,
     /// Presents the board frame by frame (F5).
     Present,
     /// Moves through the presentation by this many frames (`i64::MIN`/`MAX`: first/last).
@@ -231,6 +233,8 @@ pub struct Model<'a> {
     pub diagram: Option<Option<String>>,
     /// The template gallery is open.
     pub show_templates: bool,
+    /// Focus mode is on: the board menu, minimap and search step aside.
+    pub focus: bool,
     /// Presenting: the frame shown, how many there are, and its title.
     pub presentation: Option<(usize, usize, String)>,
     /// The laser pointer is on (while presenting).
@@ -286,6 +290,8 @@ pub struct ContextMenuInfo {
     pub has_text: bool,
     /// A single object (not a group) is selected.
     pub single_object: bool,
+    /// Focus mode is on.
+    pub focus: bool,
 }
 
 /// A voting session, for the person using the app.
@@ -587,10 +593,14 @@ impl Ui {
                 presentation_bar(ctx, *index, *count, title, model.laser, &mut actions);
                 return;
             }
-            board_menu(ctx, model, &mut actions);
+            if model.focus {
+                focus_bar(ctx, &mut actions);
+            } else {
+                board_menu(ctx, model, &mut actions);
+            }
             toolbar(ctx, model, &mut actions);
             let view = view_controls(ctx, model, &mut actions);
-            if let Some(map) = &model.minimap {
+            if let Some(map) = model.minimap.as_ref().filter(|_| !model.focus) {
                 minimap(ctx, map, view, &mut actions);
             }
             if let Some(selection) = &model.selection {
@@ -1823,6 +1833,12 @@ fn context_menu(ctx: &Context, info: ContextMenuInfo, actions: &mut Vec<Action>)
                     item(ui, "Add text here", "", Action::AddTextHere, true);
                     ui.separator();
                     item(ui, "Select all", "Ctrl+A", Action::SelectAll, true);
+                    let focus = if info.focus {
+                        "Exit focus"
+                    } else {
+                        "Focus on this view"
+                    };
+                    item(ui, focus, "Shift+F", Action::ToggleFocus, true);
                     return;
                 }
                 let free = !info.locked;
@@ -1862,6 +1878,13 @@ fn context_menu(ctx: &Context, info: ContextMenuInfo, actions: &mut Vec<Action>)
                 if info.single_object {
                     item(ui, "Copy link to object", "", Action::CopyAnchor, true);
                 }
+                ui.separator();
+                let focus = if info.focus {
+                    "Exit focus"
+                } else {
+                    "Focus on selection"
+                };
+                item(ui, focus, "Shift+F", Action::ToggleFocus, true);
             });
         });
     let pressed_elsewhere = ctx.input(|i| i.pointer.any_pressed())
@@ -2164,6 +2187,26 @@ fn timer_pill(ctx: &Context, timer: &TimerView, actions: &mut Vec<Action>) {
         });
 }
 
+/// Stands in for the board menu in focus mode.
+fn focus_bar(ctx: &Context, actions: &mut Vec<Action>) {
+    Area::new(Id::unique("focus"))
+        .fixed_pos(Pos2::new(MARGIN, MARGIN))
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            panel().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    ui.strong("Focus mode");
+                    ui.weak("the rest of the board is out of reach");
+                    ui.separator();
+                    if ui.button("Exit").on_hover_text("Esc, Shift+F").clicked() {
+                        actions.push(Action::ToggleFocus);
+                    }
+                });
+            });
+        });
+}
+
 /// The controls at the bottom while presenting.
 fn presentation_bar(
     ctx: &Context,
@@ -2398,6 +2441,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Home", "Back to the start"),
             ("G / Shift+G", "Grid style / snap to grid"),
             ("F1, ?", "This list"),
+            ("Shift+F", "Focus on the selection or the view"),
             ("F5", "Present the frames"),
             ("L (presenting)", "Laser pointer"),
         ],

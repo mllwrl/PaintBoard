@@ -563,7 +563,10 @@ impl Tools {
     /// Selects everything that is not locked.
     pub fn select_all(&mut self, doc: &Document) {
         self.set_active(ToolKind::Select);
-        let ids = doc.roots().iter().filter(|&&id| !doc.is_locked(id));
+        let ids = doc
+            .roots()
+            .iter()
+            .filter(|&&id| !doc.is_locked(id) && doc.in_focus(id));
         self.selection.set(ids.copied());
         self.cells = None;
         self.card = None;
@@ -1946,7 +1949,7 @@ impl Tools {
             .objects_in(pointer.visible)
             .into_iter()
             .map(|o| doc.top_level(o.id))
-            .filter(|id| !exclude.contains(id))
+            .filter(|id| !exclude.contains(id) && doc.in_focus(*id))
             .collect();
         units.sort_by_key(|&id| doc.paint_order(id));
         units.dedup();

@@ -214,6 +214,9 @@ pub struct Document {
     /// Files used by images. They are not part of the CRDT and never removed while the board
     /// is open, so undoing the deletion of an image finds its file again.
     assets: Assets,
+    /// The area focus mode keeps in reach (world), if it is on. Not stored: it is how this
+    /// window looks at the board.
+    focus: Option<Rect>,
 }
 
 /// An object in the spatial index: its world bounds (outline included) and its place in
@@ -368,6 +371,7 @@ impl Document {
             reactions: HashMap::new(),
             threads: Vec::new(),
             voting: None,
+            focus: None,
         };
         document.refresh();
         document
@@ -475,6 +479,33 @@ impl Document {
                 self.collect_leaves(child, out);
             }
         }
+    }
+
+    /// Narrows what can be reached to `area` (world) for focus mode, or lifts that.
+    pub fn set_focus(&mut self, area: Option<Rect>) {
+        self.focus = area;
+    }
+
+    pub fn focus(&self) -> Option<Rect> {
+        self.focus
+    }
+
+    /// Whether `id` can be reached in focus mode: the center of its top-level object or
+    /// group lies in the focus area, like frame members. Always true when focus is off.
+    pub fn in_focus(&self, id: ObjectId) -> bool {
+        let Some(area) = self.focus else {
+            return true;
+        };
+        self.unit_aabb(&self.leaves(self.top_level(id)))
+            .is_some_and(|bounds| area.contains(bounds.center()))
+    }
+
+    /// The axis-aligned bounds of `leaves` together.
+    fn unit_aabb(&self, leaves: &[&Object]) -> Option<Rect> {
+        leaves
+            .iter()
+            .map(|o| o.data.frame().aabb())
+            .reduce(|a, b| a.union(b))
     }
 
     /// Whether `id` or any group around it is locked.
@@ -1365,11 +1396,7 @@ impl Document {
             .filter(|&root| root != own)
             .filter(|&root| {
                 let leaves = self.leaves(root);
-                let Some(bounds) = leaves
-                    .iter()
-                    .map(|o| o.data.frame().aabb())
-                    .reduce(|a, b| a.union(b))
-                else {
+                let Some(bounds) = self.unit_aabb(&leaves) else {
                     return false;
                 };
                 // Frames hold only smaller frames, so two never hold each other.
@@ -3312,6 +3339,27 @@ mod tests {
         assert!(doc.get(id).unwrap().data.kind.spans().is_empty());
         doc.undo().unwrap();
         assert_eq!(doc.get(id).unwrap().data.kind.spans(), &[span(0, 4)]);
+    }
+
+    #[test]
+    fn focus_reaches_units_centered_in_the_area() {
+        let mut doc = Document::new();
+        let inside = create(&mut doc, rect(0.0, 0.0, 100.0, 100.0));
+        let straddling = create(&mut doc, rect(150.0, 0.0, 100.0, 100.0));
+        let outside = create(&mut doc, rect(500.0, 0.0, 10.0, 10.0));
+        assert!(
+            doc.in_focus(outside),
+            "everything is in reach without focus"
+        );
+        doc.set_focus(Some(Rect::new(-10.0, -10.0, 210.0, 110.0)));
+        assert!(doc.in_focus(inside));
+        assert!(doc.in_focus(straddling), "its center is inside");
+        assert!(!doc.in_focus(outside));
+        // A group counts as a whole, by its center.
+        doc.apply(Command::Group(vec![inside, outside])).unwrap();
+        assert!(!doc.in_focus(inside));
+        doc.set_focus(None);
+        assert!(doc.in_focus(outside));
     }
 
     #[test]

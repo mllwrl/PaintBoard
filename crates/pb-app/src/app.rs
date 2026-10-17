@@ -142,6 +142,8 @@ pub struct App {
     show_templates: bool,
     /// Presenting the board frame by frame.
     presentation: Option<Presentation>,
+    /// In focus mode (the area is the document's): where the camera was before.
+    focus_saved: Option<Camera>,
     /// The countdown timer, while shown.
     timer: Option<Timer>,
     /// The voting results window is open.
@@ -200,6 +202,7 @@ impl App {
             show_shortcuts: false,
             show_templates: false,
             presentation: None,
+            focus_saved: None,
             camera_glide: None,
             timer: None,
             show_results: false,
@@ -409,6 +412,7 @@ impl App {
             show_shortcuts: self.show_shortcuts,
             diagram: self.diagram.clone(),
             show_templates: self.show_templates,
+            focus: self.focus_saved.is_some(),
             laser: self.presentation.as_ref().is_some_and(|p| p.laser),
             presentation: self.presentation.as_ref().map(|p| {
                 let title = p
@@ -955,6 +959,7 @@ impl App {
             Action::Present => self.start_presentation(),
             Action::PresentStep(step) => self.present_step(step),
             Action::StopPresenting => self.stop_presentation(),
+            Action::ToggleFocus => self.toggle_focus(),
             Action::ToggleLaser => self.toggle_laser(),
             Action::ToggleTemplates => self.show_templates = !self.show_templates,
             Action::InsertTemplate(i) => {
@@ -1912,6 +1917,11 @@ impl App {
         self.search = None;
         self.show_templates = false;
         self.show_shortcuts = false;
+        // The presentation shows whole frames, and ends where focus mode began.
+        if let Some(saved) = self.focus_saved.take() {
+            self.document.set_focus(None);
+            self.camera = saved;
+        }
         self.presentation = Some(Presentation {
             index: 0,
             frames,
@@ -1964,6 +1974,39 @@ impl App {
         }
         if let Some(window) = &self.window {
             window.set_cursor_visible(true);
+        }
+    }
+
+    /// Enters focus mode on the selection (or on what is in view when nothing is
+    /// selected), or leaves it.
+    fn toggle_focus(&mut self) {
+        if self.focus_saved.is_some() {
+            self.stop_focus();
+            return;
+        }
+        let viewport = self.viewport();
+        let area = match self.tools.selection().frame(&self.document) {
+            Some(frame) => frame.aabb(),
+            None => self.camera.visible_world_rect(viewport),
+        };
+        self.finish_editing();
+        self.tools.cancel();
+        self.context_menu = None;
+        self.search = None;
+        // A hair larger, so what was picked keeps its center inside however it rounds.
+        let area = area.inflate(1.0, 1.0);
+        self.document.set_focus(Some(area));
+        self.focus_saved = Some(self.camera);
+        let mut target = self.camera;
+        target.fit(area, viewport, FRAME_MARGIN);
+        self.glide_to(&target);
+    }
+
+    /// Leaves focus mode, gliding back to where the board was.
+    fn stop_focus(&mut self) {
+        self.document.set_focus(None);
+        if let Some(saved) = self.focus_saved.take() {
+            self.glide_to(&saved);
         }
     }
 
@@ -2159,6 +2202,7 @@ impl App {
                 )
             }),
             single_object: single.is_some(),
+            focus: self.focus_saved.is_some(),
         }
     }
 
@@ -2245,6 +2289,7 @@ impl App {
             .iter()
             .filter(|t| self.show_resolved || !t.resolved)
             .filter_map(|t| Some((self.document.thread_point(t)?, t.id.clone(), t.resolved)))
+            .filter(|(at, _, _)| self.document.focus().is_none_or(|area| area.contains(*at)))
             .collect()
     }
 
@@ -2385,6 +2430,7 @@ impl App {
         self.document
             .objects_in(visible)
             .into_iter()
+            .filter(|o| self.document.in_focus(o.id))
             .filter_map(|o| {
                 let link = o.data.link.clone()?;
                 let corner = o.data.frame().corners()[1];
@@ -3076,6 +3122,7 @@ impl App {
     /// Shows another board (opened or new) from a clean slate.
     fn replace_document(&mut self, document: Document) {
         self.document = document;
+        self.focus_saved = None;
         self.images.clear();
         self.tools.cancel();
         self.tools.clear_selection();
@@ -3134,6 +3181,7 @@ impl App {
             KeyCode::Slash if modifiers.shift_key() && !ctrl => {
                 self.show_shortcuts = !self.show_shortcuts;
             }
+            KeyCode::KeyF if !ctrl && modifiers.shift_key() => self.toggle_focus(),
             KeyCode::KeyF if !ctrl => self.tools.set_active(ToolKind::Frame),
             KeyCode::KeyK if !ctrl => self.tools.set_active(ToolKind::Kanban),
             KeyCode::KeyD if !ctrl => self.tools.set_active(ToolKind::Doc),
@@ -3226,8 +3274,8 @@ impl App {
                 {
                     if self.tools.active() != ToolKind::Select {
                         self.tools.set_active(ToolKind::Select);
-                    } else {
-                        self.tools.clear_selection();
+                    } else if !self.tools.clear_selection() && self.focus_saved.is_some() {
+                        self.stop_focus();
                     }
                 }
             }

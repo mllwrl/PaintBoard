@@ -1076,6 +1076,22 @@ fn marquee_in_a_frame_selects_its_contents_only() {
     assert!(tools.selection().contains(frame) && tools.selection().contains(inside));
 }
 
+#[test]
+fn focus_keeps_objects_outside_out_of_reach() {
+    let (mut doc, ids) = doc_with(&[
+        Rect::new(0.0, 0.0, 100.0, 100.0),
+        Rect::new(300.0, 0.0, 400.0, 100.0),
+    ]);
+    doc.set_focus(Some(Rect::new(-10.0, -10.0, 110.0, 110.0)));
+    let mut tools = Tools::default();
+    click(&mut tools, &doc, at(350.0, 50.0));
+    assert!(tools.selection().is_empty());
+    drag(&mut tools, &doc, at(-50.0, -50.0), at(500.0, 200.0));
+    assert_eq!(tools.selection().ids(), &[ids[0]]);
+    tools.select_all(&doc);
+    assert_eq!(tools.selection().ids(), &[ids[0]]);
+}
+
 // Tables
 
 #[test]

@@ -79,6 +79,9 @@ pub struct View<'a> {
 /// Opacity of objects a filter hides, relative to their own.
 const FILTERED_OPACITY: f64 = 0.15;
 
+/// Opacity of objects outside the focus area, relative to their own.
+const UNFOCUSED_OPACITY: f64 = 0.06;
+
 /// Ids of the objects that may show in `visible` at `zoom`, back to front: those the
 /// spatial index finds there (with room for frame titles and sticky shadows), the ones
 /// mid-gesture, and connectors attached to those (their stored path is out of date).
@@ -160,12 +163,20 @@ pub fn build_scene(
     let others = shown.iter().filter(|(_, d)| !d.kind.is_frame());
     let previews = view.previews.iter().map(|d| (None, d));
     for (id, data) in frames.chain(others).copied().chain(previews) {
+        let mut opacity = 1.0;
+        if !view.filter.matches(data) {
+            opacity *= FILTERED_OPACITY;
+        }
+        let focused = id.is_none_or(|id| doc.in_focus(id));
+        if !focused {
+            opacity *= UNFOCUSED_OPACITY;
+        }
         let faded;
-        let data = if view.filter.matches(data) {
+        let data = if opacity == 1.0 {
             data
         } else {
             let mut copy = data.clone();
-            copy.style.opacity *= FILTERED_OPACITY;
+            copy.style.opacity *= opacity;
             faded = copy;
             &faded
         };
@@ -194,6 +205,9 @@ pub fn build_scene(
             zoom,
         };
         objects::draw_object(scene, transform, data, resources);
+        if !focused {
+            continue;
+        }
         let tags: Vec<_> = data.tags.iter().filter_map(|t| doc.tag(t)).collect();
         if !tags.is_empty() {
             objects::draw_tags(scene, transform, data, &tags, text);

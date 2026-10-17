@@ -13,7 +13,7 @@ pub fn object_at(doc: &Document, point: Point, tolerance: f64) -> Option<ObjectI
     doc.objects_in(around(point, tolerance))
         .into_iter()
         .rev()
-        .find(|o| object_hits(doc, o, point, tolerance))
+        .find(|o| doc.in_focus(o.id) && object_hits(doc, o, point, tolerance))
         .map(|o| doc.top_level(o.id))
 }
 
@@ -25,7 +25,7 @@ pub fn frame_title_at(doc: &Document, point: Point, zoom: f64) -> Option<ObjectI
     doc.objects_in(Rect::new(point.x, point.y, point.x, point.y + band))
         .into_iter()
         .rev()
-        .filter(|o| o.data.kind.is_frame())
+        .filter(|o| o.data.kind.is_frame() && doc.in_focus(o.id))
         .find(|o| FrameData::title_band(o.data.bounds, zoom).contains(point))
         .map(|o| doc.top_level(o.id))
 }
@@ -35,7 +35,7 @@ pub fn attachable_at(doc: &Document, point: Point, tolerance: f64) -> Option<&Ob
     doc.objects_in(around(point, tolerance))
         .into_iter()
         .rev()
-        .filter(|o| pb_core::connector::can_attach(&o.data.kind))
+        .filter(|o| pb_core::connector::can_attach(&o.data.kind) && doc.in_focus(o.id))
         .find(|o| hits(&o.data, point, tolerance))
 }
 
@@ -150,7 +150,7 @@ pub(crate) fn hits(data: &ObjectData, point: Point, tolerance: f64) -> bool {
     }
 }
 
-/// Unlocked top-level objects and groups touched by `area`, in z-order.
+/// Unlocked top-level objects and groups in focus touched by `area`, in z-order.
 pub fn objects_in(doc: &Document, area: Rect) -> Vec<ObjectId> {
     let mut ids = Vec::new();
     for object in doc.objects_in(area) {
@@ -165,7 +165,7 @@ pub fn objects_in(doc: &Document, area: Rect) -> Vec<ObjectId> {
             }
             _ => touches(&object.data, area),
         };
-        if touched && !ids.contains(&id) && !doc.is_locked(id) {
+        if touched && !ids.contains(&id) && !doc.is_locked(id) && doc.in_focus(id) {
             ids.push(id);
         }
     }
