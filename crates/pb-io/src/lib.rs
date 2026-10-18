@@ -9,3 +9,6 @@ pub mod outline;
 pub mod pdf;
 pub mod preview;
 pub mod svg;
+
+#[cfg(test)]
+mod fuzz_tests;

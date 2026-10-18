@@ -16,6 +16,9 @@ pub mod table;
 pub mod talktrack;
 pub mod version;
 
+#[cfg(test)]
+mod fuzz_tests;
+
 pub use asset::{AssetId, Assets};
 pub use command::{Applied, Command, ZOrder};
 pub use comment::{Comment, Thread, ThreadAnchor};

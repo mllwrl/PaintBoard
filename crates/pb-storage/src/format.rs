@@ -220,6 +220,27 @@ mod tests {
         assert!(loaded.assets().get(asset).is_some());
     }
 
+    proptest::proptest! {
+        /// Damaged files, random bytes or real files cut or with bytes changed, are errors,
+        /// never panics.
+        #[test]
+        fn any_bytes_are_read_without_panics(
+            random in proptest::collection::vec(proptest::num::u8::ANY, 0..256),
+            cut in 0..2000usize,
+            flips in proptest::collection::vec((0..2000usize, proptest::num::u8::ANY), 0..8),
+        ) {
+            let _ = decode(&random);
+            let good = encode(&board());
+            let _ = decode(&good[..cut.min(good.len())]);
+            let mut changed = good.clone();
+            for (at, byte) in flips {
+                let at = at % changed.len();
+                changed[at] = byte;
+            }
+            let _ = decode(&changed);
+        }
+    }
+
     #[test]
     fn rejects_foreign_and_damaged_files() {
         assert!(matches!(decode(b"PNG..."), Err(LoadError::NotABoard)));

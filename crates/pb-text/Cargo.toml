@@ -11,3 +11,6 @@ workspace = true
 [dependencies]
 parley.workspace = true
 pb-core.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

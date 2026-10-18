@@ -233,6 +233,11 @@ pub fn resolve<'a>(
     c: &Connector,
     lookup: impl Fn(ObjectId) -> Option<&'a ObjectData>,
 ) -> (EndPoint, EndPoint) {
+    // Ends on objects that cannot take them (connectors, frames: the tools never attach
+    // there, but old or foreign data might) stay where they were stored, as if the object
+    // were gone; following another connector would depend on the order connectors are
+    // worked out in.
+    let lookup = |id| lookup(id).filter(|data| can_attach(&data.kind));
     let start = resolve_end(&c.start, aim(&c.end, &lookup), c.route, &lookup);
     let end = resolve_end(&c.end, aim(&c.start, &lookup), c.route, &lookup);
     (start, end)

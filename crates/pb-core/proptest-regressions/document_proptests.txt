@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 9ac66765df6def72aaf42529f1a9e6362f312edbeb1c2069c979399e825fde48 # shrinks to base = [], left = [Create { x: 0, y: 0, w: 1, h: 1 }, Connect(0, 0), Connect(0, 3393608072817965317)], right = [Hide(5486921565056447470, true), Undo]
+cc 7d061320c9a83f67fe6e60c72508d5345a5f9befc829b90bef26e9de719e6ae8 # shrinks to ops = [Create { x: 0, y: 0, w: 1, h: 1 }, Connect(0, 0), Connect(2590671892234818727, 4941204988777903), Move(7397900758253466663, 125, -45)]

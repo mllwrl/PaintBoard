@@ -3069,6 +3069,10 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
 }
 
 #[cfg(test)]
+#[path = "document_proptests.rs"]
+mod proptests;
+
+#[cfg(test)]
 mod tests {
     use pb_geom::Frame;
 

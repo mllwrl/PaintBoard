@@ -465,6 +465,23 @@ pub fn layout(engine: &mut TextEngine, source: &str, width: f64, size: f64) -> M
 mod tests {
     use super::*;
 
+    proptest::proptest! {
+        /// Any text reads as Markdown, without panics, and every inline span stays inside
+        /// its block's text.
+        #[test]
+        fn any_text_reads_as_markdown(
+            text in "(#{0,7} |[-*+>] |[0-9]{1,3}[.)] |```|\\*\\*|__|\\*|_|`|\\[|\\]|\\(|\\)|[a-zа-я ]|\n){0,80}",
+            noise in ".*",
+        ) {
+            for source in [text, noise] {
+                for block in parse(&source) {
+                    let len = block.text.len();
+                    proptest::prop_assert!(block.spans.iter().all(|s| s.end <= len && s.start <= s.end));
+                }
+            }
+        }
+    }
+
     #[test]
     fn blocks_are_recognized() {
         let blocks = parse(
