@@ -305,6 +305,8 @@ enum NodeData {
 #[derive(Debug, Default)]
 struct Changes {
     nodes: HashSet<TreeID>,
+    /// Nodes were created, moved or deleted: the tree is walked again.
+    structure: bool,
     /// Something changed that cannot be tied to nodes: read everything again.
     all: bool,
 }
@@ -323,6 +325,12 @@ impl Changes {
                 for item in &tree.diff {
                     self.nodes.insert(item.target);
                 }
+                self.structure = true;
+                found = true;
+            }
+            // The board-wide maps (tags, comments, layers, …) are read again on every
+            // refresh anyway.
+            if !found && matches!(diff.target, loro::ContainerID::Root { .. }) {
                 found = true;
             }
             if !found || diff.is_unknown {
@@ -1499,11 +1507,6 @@ impl Document {
     ///
     /// TODO: update incrementally from Loro diff events once boards get large.
     fn refresh(&mut self) {
-        self.objects.clear();
-        self.unit_layers.clear();
-        self.index.clear();
-        self.groups.clear();
-        self.nodes.clear();
         let changes = self
             .changes
             .lock()
@@ -1512,6 +1515,15 @@ impl Document {
                 all: true,
                 ..Changes::default()
             });
+        if !changes.all && !changes.structure && self.update_in_place(&changes.nodes) {
+            self.revision += 1;
+            return;
+        }
+        self.objects.clear();
+        self.unit_layers.clear();
+        self.index.clear();
+        self.groups.clear();
+        self.nodes.clear();
         if changes.all {
             self.node_cache.clear();
         } else {
@@ -1548,6 +1560,89 @@ impl Document {
             }
         }
         self.revision += 1;
+    }
+
+    /// The quick refresh after edits that only change objects (moved, restyled, retyped),
+    /// not the tree: those objects are read again and updated where they are, in the
+    /// list and the spatial index. Returns false, having changed nothing that a full
+    /// refresh would not redo, if the edit is more than that (groups, layers, new nodes).
+    fn update_in_place(&mut self, nodes: &HashSet<TreeID>) -> bool {
+        let layers = read_layers(&self.doc.get_map(key::LAYERS));
+        if layers != self.layers {
+            return false;
+        }
+        let mut updates = Vec::with_capacity(nodes.len());
+        for &node in nodes {
+            let Some(NodeData::Object { id, layer, .. }) = self.node_cache.get(&node) else {
+                return false;
+            };
+            let (id, layer) = (*id, layer.clone());
+            if self.nodes.get(&id) != Some(&node) || !self.index.contains_key(&id) {
+                return false;
+            }
+            self.node_cache.remove(&node);
+            let Some(NodeData::Object {
+                id: read_id,
+                data,
+                locked,
+                hidden,
+                layer: read_layer,
+            }) = self.node_data(node)
+            else {
+                return false;
+            };
+            if read_id != id || read_layer != layer {
+                return false;
+            }
+            updates.push((id, data, locked, hidden));
+        }
+        let mut index_ok = true;
+        for (id, data, locked, hidden) in updates {
+            let slot = self.index[&id];
+            let object = &mut self.objects[slot];
+            index_ok &= self.spatial.remove(&placed(slot, &object.data)).is_some();
+            object.data = *data;
+            object.locked = locked;
+            object.hidden = hidden;
+            self.spatial.insert(placed(slot, &object.data));
+        }
+        if !index_ok {
+            // Should not happen; rebuild the index rather than keep a stale entry.
+            let all = self
+                .objects
+                .iter()
+                .enumerate()
+                .map(|(i, o)| placed(i, &o.data))
+                .collect();
+            self.spatial = RTree::bulk_load(all);
+        }
+        self.layers = layers;
+        self.talktracks = read_talktracks(&self.doc.get_map(key::TALKTRACKS));
+        self.versions = read_versions(&self.doc.get_map(key::VERSIONS));
+        self.tags = read_tags(&self.doc.get_map(key::TAGS));
+        self.reactions = read_reactions(&self.doc.get_map(key::REACTIONS));
+        self.threads = read_threads(&self.doc.get_map(key::COMMENTS));
+        self.voting = read_voting(&self.doc.get_map(key::VOTING));
+        self.read_only = matches!(
+            self.doc.get_map(key::META).get(key::READ_ONLY),
+            Some(ValueOrContainer::Value(LoroValue::Bool(true)))
+        );
+        // Routing gives connectors new bounds: their index entries go and come back.
+        let connectors: Vec<usize> = self
+            .objects
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| matches!(o.data.kind, ObjectKind::Connector(_)))
+            .map(|(i, _)| i)
+            .collect();
+        for &i in &connectors {
+            self.spatial.remove(&placed(i, &self.objects[i].data));
+        }
+        self.resolve_connectors();
+        for &i in &connectors {
+            self.spatial.insert(placed(i, &self.objects[i].data));
+        }
+        true
     }
 
     /// Puts the roots and objects in layer order, keeping the order within each layer.
@@ -4027,27 +4122,43 @@ mod tests {
     #[test]
     #[ignore = "timing, run by hand"]
     fn big_board_timing() {
+        const N: usize = 100_000;
         let mut doc = Document::new();
-        let items: Vec<Content> = (0..20_000)
-            .map(|i| rect((i % 200) as f64 * 30.0, (i / 200) as f64 * 30.0, 20.0, 20.0).into())
+        let items: Vec<Content> = (0..N)
+            .map(|i| rect((i % 316) as f64 * 30.0, (i / 316) as f64 * 30.0, 20.0, 20.0).into())
             .collect();
         let t = std::time::Instant::now();
         doc.apply(Command::Create(items)).unwrap();
-        eprintln!("create 20k: {:?}", t.elapsed());
+        eprintln!("create {N}: {:?}", t.elapsed());
         let t = std::time::Instant::now();
         for i in 0..1000 {
             let x = f64::from(i % 100) * 50.0;
             assert!(!doc.objects_in(Rect::new(x, x, x + 1.0, x + 1.0)).is_empty() || x > 0.0);
         }
         eprintln!("1000 point queries: {:?}", t.elapsed());
-        let id = doc.objects()[0].id;
         let t = std::time::Instant::now();
-        doc.apply(Command::Move {
-            ids: vec![id],
-            delta: Vec2::new(1.0, 1.0),
-        })
-        .unwrap();
-        eprintln!("one move: {:?}", t.elapsed());
+        let all = doc.objects_in(Rect::new(-1e6, -1e6, 1e6, 1e6)).len();
+        eprintln!("query everything ({all}): {:?}", t.elapsed());
+        let id = doc.objects()[0].id;
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            doc.apply(Command::Move {
+                ids: vec![id],
+                delta: Vec2::new(1.0, 1.0),
+            })
+            .unwrap();
+            eprintln!("one move: {:?}", t.elapsed());
+        }
+        let t = std::time::Instant::now();
+        doc.undo().unwrap();
+        eprintln!("undo one move: {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let bytes = doc.snapshot();
+        eprintln!("snapshot ({} KB): {:?}", bytes.len() / 1024, t.elapsed());
+        let t = std::time::Instant::now();
+        let loaded = Document::from_snapshot(&bytes).unwrap();
+        eprintln!("load: {:?}", t.elapsed());
+        assert_eq!(loaded.objects().len(), N);
     }
 
     #[test]
@@ -4656,6 +4767,44 @@ mod tests {
         assert!(e.y > 200.0, "{e:?}");
         let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
         assert_eq!(loaded.get(c).unwrap().data, doc.get(c).unwrap().data);
+    }
+
+    /// Edits that only change objects update them in place, spatial index included: it
+    /// finds what a board read afresh finds, connectors that follow too.
+    #[test]
+    fn in_place_updates_keep_the_spatial_index_right() {
+        let mut doc = Document::new();
+        let a = create(&mut doc, rect(0.0, 0.0, 100.0, 100.0));
+        let b = create(&mut doc, rect(300.0, 0.0, 100.0, 100.0));
+        let c = create(&mut doc, connector(auto(a), auto(b)));
+        let found = |doc: &Document, area: Rect| -> Vec<ObjectId> {
+            doc.objects_in(area).iter().map(|o| o.id).collect()
+        };
+        let same = |doc: &Document| {
+            let fresh = Document::from_snapshot(&doc.snapshot()).unwrap();
+            for area in [
+                Rect::new(-10.0, -10.0, 10.0, 10.0),
+                Rect::new(150.0, 40.0, 250.0, 60.0),
+                Rect::new(300.0, 300.0, 400.0, 400.0),
+                Rect::new(150.0, 200.0, 250.0, 300.0),
+                Rect::new(-1e4, -1e4, 1e4, 1e4),
+            ] {
+                assert_eq!(found(doc, area), found(&fresh, area), "{area:?}");
+            }
+        };
+        same(&doc);
+        doc.apply(Command::Move {
+            ids: vec![b],
+            delta: Vec2::new(0.0, 300.0),
+        })
+        .unwrap();
+        // The connector now runs down to b, through the middle of the board.
+        assert!(found(&doc, Rect::new(150.0, 200.0, 250.0, 300.0)).contains(&c));
+        same(&doc);
+        doc.undo().unwrap();
+        same(&doc);
+        lock(&mut doc, &[a], true);
+        same(&doc);
     }
 
     #[test]

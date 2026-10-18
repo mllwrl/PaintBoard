@@ -69,6 +69,9 @@ pub struct TextRenderer {
     fitted: HashMap<(Arc<str>, Spans, [u64; 3]), f64>,
     /// Laid-out Markdown documents by source, column width and text size.
     docs: HashMap<(Arc<str>, [u64; 2]), Arc<pb_text::markdown::MarkdownLayout>>,
+    /// The object being drawn is too small on screen for its text to show: leave the
+    /// text out (laying it out is most of the cost of a zoomed-out board).
+    pub(crate) skip: bool,
 }
 
 impl TextRenderer {
@@ -77,6 +80,7 @@ impl TextRenderer {
             engine: TextEngine::new(),
             fitted: HashMap::new(),
             docs: HashMap::new(),
+            skip: false,
         }
     }
 
@@ -131,7 +135,7 @@ impl TextRenderer {
         text_box: TextBox,
         brush: Color,
     ) {
-        if text.is_empty() {
+        if text.is_empty() || self.skip {
             return;
         }
         let size = self.fitted_font_size(text, spans, text_box);
@@ -264,6 +268,11 @@ pub(crate) fn draw_object(
                     brush,
                 );
             }
+        }
+        ObjectKind::Text(content) if text.skip => {
+            // Too small to read: a faint bar where the text is.
+            let bar = color(style.stroke).multiply_alpha(0.3);
+            scene.fill(Fill::NonZero, transform, bar, None, &data.bounds);
         }
         ObjectKind::Text(content) => {
             let b = data.bounds;
@@ -597,6 +606,9 @@ fn draw_doc(
         let stroke = Stroke::new(style.stroke_width);
         scene.stroke(&stroke, transform, color(style.stroke), None, &page);
     }
+    if text.skip {
+        return;
+    }
     let pad = doc.size * pb_core::Doc::PADDING;
     let layout = text.markdown(&doc.text, b.width() - 2.0 * pad, doc.size);
     let (ox, oy) = (b.x0 + pad, b.y0 + pad);
@@ -908,6 +920,17 @@ fn paint_padding(data: &ObjectData) -> f64 {
         ObjectKind::Image(_) => 0.0,
         _ => data.style.stroke_width / 2.0,
     }
+}
+
+/// An object too small on screen for any detail: a box in its main color.
+pub(crate) fn draw_box(scene: &mut Scene, transform: Affine, data: &ObjectData) {
+    let main = match &data.kind {
+        ObjectKind::Image(_) => PLACEHOLDER_LINE,
+        _ if data.style.fill.to_bytes()[3] > 0 => color(data.style.fill),
+        _ => color(data.style.stroke),
+    };
+    let main = main.multiply_alpha(data.style.opacity as f32);
+    scene.fill(Fill::NonZero, transform, main, None, &data.frame().aabb());
 }
 
 fn color(rgba: Rgba) -> Color {

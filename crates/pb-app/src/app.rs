@@ -178,6 +178,16 @@ pub struct App {
     show_export: bool,
     /// A saved version being looked at instead of the board.
     version_view: Option<VersionView>,
+    /// What the minimap shows, by the board's revision, theme and hidden objects shown it
+    /// was made for.
+    #[allow(clippy::type_complexity)]
+    minimap_marks: std::cell::RefCell<
+        Option<(
+            (u64, bool, bool),
+            pb_geom::kurbo::Rect,
+            Vec<(pb_geom::kurbo::Rect, Rgba)>,
+        )>,
+    >,
     /// The UI's size relative to normal, and whether high contrast is on.
     ui_scale: f32,
     high_contrast: bool,
@@ -245,6 +255,7 @@ impl App {
             diagram: None,
             show_export: false,
             version_view: None,
+            minimap_marks: std::cell::RefCell::new(None),
             ui_scale: 1.0,
             high_contrast: false,
             last_press: None,
@@ -611,6 +622,32 @@ impl App {
         if !self.show_minimap {
             return None;
         }
+        let key = (
+            self.document.revision(),
+            self.theme.dark,
+            self.document.shows_hidden(),
+        );
+        let mut cache = self.minimap_marks.borrow_mut();
+        if cache.as_ref().is_none_or(|(k, ..)| *k != key) {
+            *cache = self
+                .minimap_content()
+                .map(|(content, marks)| (key, content, marks));
+        }
+        let (_, content, marks) = cache.as_ref()?;
+        let view = self.camera.visible_world_rect(self.viewport());
+        let area = content.union(view);
+        let pad = area.width().max(area.height()) * 0.04;
+        Some(Minimap {
+            area: area.inflate(pad, pad),
+            objects: marks.clone(),
+            view,
+        })
+    }
+
+    /// What the minimap shows of the board: the area objects cover and a box per object,
+    /// or per cell of a coarse grid when there are many.
+    #[allow(clippy::type_complexity)]
+    fn minimap_content(&self) -> Option<(pb_geom::kurbo::Rect, Vec<(pb_geom::kurbo::Rect, Rgba)>)> {
         let objects = self.document.objects();
         // Frames under everything, like on the board.
         let shown = objects
@@ -642,17 +679,36 @@ impl App {
                 _ if self.theme.dark => Rgba::rgb(0x6A, 0x6D, 0x73),
                 _ => Rgba::rgb(0xC8, 0xC8, 0xC2),
             };
-            marks.push((bounds, color));
+            marks.push((bounds, color, data.kind.is_frame()));
         }
         let content = content?;
-        let view = self.camera.visible_world_rect(self.viewport());
-        let area = content.union(view);
-        let pad = area.width().max(area.height()) * 0.04;
-        Some(Minimap {
-            area: area.inflate(pad, pad),
-            objects: marks,
-            view,
-        })
+        if marks.len() <= MINIMAP_MAX_MARKS {
+            return Some((content, marks.into_iter().map(|(r, c, _)| (r, c)).collect()));
+        }
+        // Too many to draw one by one: frames as they are, the rest by grid cell, each
+        // cell in the color of the topmost object in it.
+        let side = content.width().max(content.height()) / f64::from(MINIMAP_CELLS);
+        let mut cells: HashMap<(i64, i64), Rgba> = HashMap::new();
+        let mut out = Vec::new();
+        for (bounds, color, frame) in marks {
+            if frame {
+                out.push((bounds, color));
+                continue;
+            }
+            let c = bounds.center();
+            let cell = (
+                ((c.x - content.x0) / side).floor() as i64,
+                ((c.y - content.y0) / side).floor() as i64,
+            );
+            cells.insert(cell, color);
+        }
+        let mut cells: Vec<_> = cells.into_iter().collect();
+        cells.sort_by_key(|(cell, _)| *cell);
+        out.extend(cells.into_iter().map(|((cx, cy), color)| {
+            let (x, y) = (content.x0 + cx as f64 * side, content.y0 + cy as f64 * side);
+            (pb_geom::kurbo::Rect::new(x, y, x + side, y + side), color)
+        }));
+        Some((content, out))
     }
 
     /// What a link points at, for people.
@@ -4307,7 +4363,10 @@ impl App {
             && let (Some(ui), Some(window)) = (&mut self.ui, &self.window)
         {
             let response = ui.on_window_event(window, &event);
-            if response.repaint {
+            // egui asks for a repaint after every frame drawn; following that would redraw
+            // nonstop, keeping the GPU busy while nothing changes.
+            let drawn = matches!(event, WindowEvent::RedrawRequested);
+            if response.repaint && !drawn {
                 window.request_redraw();
             }
             ui_consumed = response.consumed;
@@ -4684,6 +4743,12 @@ fn window_icon() -> Option<winit::window::Icon> {
     let pixels = pb_io::image::decode(PNG, 256).ok()?;
     winit::window::Icon::from_rgba(pixels.rgba, pixels.width, pixels.height).ok()
 }
+
+/// The most objects the minimap draws one by one; boards with more are drawn by cell.
+const MINIMAP_MAX_MARKS: usize = 1500;
+
+/// Cells along the longer side of the minimap's grid for large boards.
+const MINIMAP_CELLS: u32 = 100;
 
 /// `name` made fit for a file name: characters Windows does not allow become `_`.
 fn file_name(name: &str) -> String {

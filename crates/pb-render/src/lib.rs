@@ -163,6 +163,13 @@ pub struct View<'a> {
     pub frame_titles: bool,
 }
 
+/// Objects smaller than this on screen (logical pixels) are drawn as plain boxes.
+const LOD_BOX: f64 = 6.0;
+
+/// Objects smaller than this on screen (logical pixels) are drawn without their text,
+/// tags and badges, which could not be read anyway.
+const LOD_TEXT: f64 = 24.0;
+
 /// Opacity of objects a filter hides, relative to their own.
 const FILTERED_OPACITY: f64 = 0.15;
 
@@ -288,7 +295,13 @@ pub fn build_scene(
         if let ObjectKind::Connector(c) = &data.kind {
             let width = data.style.stroke_width;
             let (_, _, path) = pb_core::connector::layout(c, width, current, obstacles_in);
-            let label = c.label.rect(&path).map(|r| (&c.label, r));
+            let bounds = path.bounds();
+            let readable = bounds.width().max(bounds.height()) * zoom >= LOD_TEXT;
+            let label = c
+                .label
+                .rect(&path)
+                .filter(|_| readable)
+                .map(|r| (&c.label, r));
             let area = path.bounds().inflate(width, width);
             let area = label.map_or(area, |(_, r)| area.union(r));
             if area.overlaps(visible) {
@@ -303,6 +316,12 @@ pub fn build_scene(
         if !painted.overlaps(visible) {
             continue;
         }
+        let on_screen = painted.width().max(painted.height()) * zoom;
+        if on_screen < LOD_BOX {
+            objects::draw_box(scene, transform, data);
+            continue;
+        }
+        text.skip = on_screen < LOD_TEXT;
         let resources = objects::Resources {
             text: &mut *text,
             images: &mut *images,
@@ -312,7 +331,8 @@ pub fn build_scene(
             frame_colors: (view.theme.frame_edge, view.theme.frame_title),
         };
         objects::draw_object(scene, transform, data, resources);
-        if !focused {
+        let small = std::mem::replace(&mut text.skip, false);
+        if !focused || small {
             continue;
         }
         let tags: Vec<_> = data.tags.iter().filter_map(|t| doc.tag(t)).collect();
@@ -360,6 +380,73 @@ mod tests {
             style,
             tags: Default::default(),
             link: None,
+        }
+    }
+
+    #[test]
+    #[ignore = "timing, run by hand"]
+    fn big_board_scene_timing() {
+        use pb_core::{Command, Sticky};
+        const N: usize = 100_000;
+        let mut doc = Document::new();
+        let items = (0..N)
+            .map(|i| {
+                let (x, y) = ((i % 316) as f64 * 220.0, (i / 316) as f64 * 220.0);
+                let mut d = data(
+                    ObjectKind::Sticky(Sticky {
+                        text: format!("Note {i}").into(),
+                        spans: Default::default(),
+                    }),
+                    Style::default(),
+                );
+                d.bounds = Rect::new(x, y, x + 200.0, y + 200.0);
+                d.into()
+            })
+            .collect();
+        doc.apply(Command::Create(items)).unwrap();
+        let theme = Theme::light();
+        let (overlay, filter, votes) = (
+            Overlay::default(),
+            pb_core::Filter::default(),
+            HashMap::new(),
+        );
+        let assets = doc.assets().clone();
+        let mut text = TextRenderer::new();
+        let mut images = ImageCache::default();
+        let mut scene = Scene::new();
+        let viewport = Size::new(1600.0, 900.0);
+        for (label, zoom) in [
+            ("100%", 1.0),
+            ("25%", 0.25),
+            ("8%", 0.08),
+            ("whole board", 0.02),
+        ] {
+            let camera = Camera::new(vello::kurbo::Point::ZERO, zoom);
+            for pass in 0..2 {
+                let view = View {
+                    camera: &camera,
+                    viewport,
+                    scale: 1.0,
+                    grid: GridStyle::Dots,
+                    theme: &theme,
+                    document: &doc,
+                    assets: &assets,
+                    overrides: &[],
+                    hidden: &[],
+                    previews: &[],
+                    overlay: &overlay,
+                    filter: &filter,
+                    me: "me",
+                    votes: &votes,
+                    plain: false,
+                    only: None,
+                    frame_titles: true,
+                };
+                let t = std::time::Instant::now();
+                build_scene(&mut scene, &view, &mut text, &mut images);
+                let shown = doc.objects_in(camera.visible_world_rect(viewport)).len();
+                eprintln!("{label} pass {pass}: {shown} shown, {:?}", t.elapsed());
+            }
         }
     }
 
