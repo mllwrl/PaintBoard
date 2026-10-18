@@ -4133,6 +4133,8 @@ impl App {
                     self.apply(command);
                 }
             }
+            // A held Ctrl+V or Ctrl+D would add copies some 30 times a second: one per press.
+            KeyCode::KeyV | KeyCode::KeyD if ctrl && event.repeat => {}
             KeyCode::KeyV if ctrl => self.paste(),
             KeyCode::KeyG if ctrl && modifiers.shift_key() => {
                 self.apply_with(Tools::ungroup_selected);
