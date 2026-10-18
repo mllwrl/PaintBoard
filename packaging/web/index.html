@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PaintBoard</title>
+  <link rel="icon" href="icon.png">
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #F5F5F2; }
+    @media (prefers-color-scheme: dark) { html, body { background: #1E1F22; } }
+    canvas { display: block; width: 100vw; height: 100vh; outline: none; touch-action: none; }
+    #message {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      font: 16px system-ui, sans-serif; color: #5F6368; text-align: center; padding: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div id="message">Loading PaintBoard…</div>
+  <script type="module">
+    import init from './paintboard.js';
+    const message = document.getElementById('message');
+    if (!navigator.gpu) {
+      message.textContent =
+        'PaintBoard needs WebGPU: use a recent Chrome, Edge or another browser that has it.';
+    } else {
+      try {
+        await init();
+        message.remove();
+      } catch (err) {
+        message.textContent = 'PaintBoard could not start: ' + err;
+      }
+    }
+  </script>
+</body>
+</html>

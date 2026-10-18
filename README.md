@@ -9,6 +9,7 @@
 - **Установщик для Windows:** `PaintBoard-<версия>-setup.exe`. Ставит программу для текущего пользователя без прав администратора (можно выбрать «для всех»), добавляет ярлык в меню «Пуск», по желанию — на рабочий стол, и связывает файлы `.pboard` с PaintBoard: двойной щелчок по доске открывает её. Удаляется через «Параметры → Приложения». Рядом с программой лежит `THIRD-PARTY.txt` — лицензии использованных библиотек и шрифта.
 - **Из исходников:** `cargo run --release` или готовый `target\release\paintboard.exe`. Открывается последняя доска; файл, переданный в командной строке (`paintboard.exe доска.pboard`), открывается вместо неё.
 - **Собрать установщик:** нужны Inno Setup 6 (`winget install JRSoftware.InnoSetup`) и cargo-about (`cargo install cargo-about --locked --features cli`), затем `powershell -File packaging\windows\build-installer.ps1`. Готовый файл — в `target\installer`.
+- **Веб-версия (пробная):** `powershell -File packaging\web\build-web.ps1` собирает её в `target\web` (нужны `rustup target add wasm32-unknown-unknown`, `wasm-bindgen-cli` той же версии, что в `Cargo.lock`, и clang из LLVM). Открывать через любой веб-сервер, например `python -m http.server 8000 --directory target\web`, в браузере с WebGPU (свежие Chrome или Edge). Пока без сохранения: доска живёт, пока открыта вкладка; открытие и сохранение файлов, буфер обмена картинок, звук и распознавание рукописного текста в браузере ещё не работают.
 
 ## Доска и файлы
 

@@ -3975,6 +3975,7 @@ impl App {
     }
 
     fn on_gpu_ready(&mut self, gpu: Gpu) {
+        log::info!("drawing with {}", gpu.describe());
         pb_io::svg::warm_up();
         if let Some(ui) = &mut self.ui {
             ui.attach_gpu(&gpu);
@@ -4386,6 +4387,16 @@ impl App {
             ui_consumed = response.consumed;
         }
         let over_ui = self.ui.as_ref().is_some_and(Ui::wants_pointer) && !self.canvas_drag;
+        let pointer_or_keys = matches!(
+            event,
+            WindowEvent::CursorMoved { .. }
+                | WindowEvent::CursorEntered { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::KeyboardInput { .. }
+                | WindowEvent::ModifiersChanged(_)
+                | WindowEvent::Touch(_)
+        );
         let changed = match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
@@ -4579,8 +4590,9 @@ impl App {
             }
             _ => false,
         };
-        // Over the UI, egui sets the cursor.
-        if !over_ui {
+        // Over the UI, egui sets the cursor. Only input changes it: on the web, winit sends
+        // some events (Resized) while it holds the canvas the cursor is set on.
+        if pointer_or_keys && !over_ui {
             let icon = self.cursor_icon();
             if let Some(window) = &self.window {
                 window.set_cursor(icon);

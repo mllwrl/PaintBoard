@@ -56,6 +56,14 @@ impl Gpu {
         &self.context.devices[self.surface.dev_id].device
     }
 
+    /// The graphics card and API in use, for the log.
+    pub fn describe(&self) -> String {
+        let info = self.context.devices[self.surface.dev_id]
+            .adapter()
+            .get_info();
+        format!("{} ({:?})", info.name, info.backend)
+    }
+
     /// Format of the window surface, for renderers drawing into it.
     pub fn surface_format(&self) -> wgpu::TextureFormat {
         self.surface.config.format
