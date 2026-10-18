@@ -4,4 +4,4 @@ mod autosave;
 mod format;
 
 pub use autosave::Autosave;
-pub use format::{EXTENSION, LoadError, decode, encode};
+pub use format::{EXTENSION, LoadError, Prepared, decode, encode, prepare};

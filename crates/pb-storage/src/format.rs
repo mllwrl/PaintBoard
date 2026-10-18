@@ -53,18 +53,43 @@ impl fmt::Display for LoadError {
 impl std::error::Error for LoadError {}
 
 pub fn encode(doc: &Document) -> Vec<u8> {
-    let snapshot = doc.snapshot();
-    let assets: Vec<_> = doc
+    prepare(doc).encode()
+}
+
+/// What a board's file is made of, gathered quickly so the slow part, [`Prepared::encode`],
+/// can run on another thread.
+pub struct Prepared {
+    snapshot: pb_core::SnapshotSource,
+    assets: Vec<(pb_core::AssetId, std::sync::Arc<[u8]>)>,
+}
+
+/// Gathers what [`encode`] writes: the board and the files of the images on it.
+pub fn prepare(doc: &Document) -> Prepared {
+    let assets = doc
         .used_assets()
         .into_iter()
-        .filter_map(|id| doc.assets().get(id).map(|bytes| (id, bytes)))
+        .filter_map(|id| doc.assets().get(id).map(|bytes| (id, bytes.clone())))
         .collect();
+    Prepared {
+        snapshot: doc.snapshot_source(),
+        assets,
+    }
+}
+
+impl Prepared {
+    /// The file's bytes, as [`encode`] makes them.
+    pub fn encode(self) -> Vec<u8> {
+        write(&self.snapshot.export(), &self.assets)
+    }
+}
+
+fn write(snapshot: &[u8], assets: &[(pb_core::AssetId, std::sync::Arc<[u8]>)]) -> Vec<u8> {
     let asset_len: usize = assets.iter().map(|(_, b)| 40 + b.len()).sum();
     let mut bytes = Vec::with_capacity(HEADER_LEN + 12 + snapshot.len() + asset_len);
     bytes.extend_from_slice(MAGIC);
     bytes.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
     bytes.extend_from_slice(&(snapshot.len() as u64).to_le_bytes());
-    bytes.extend_from_slice(&snapshot);
+    bytes.extend_from_slice(snapshot);
     bytes.extend_from_slice(&(assets.len() as u32).to_le_bytes());
     for (id, data) in assets {
         bytes.extend_from_slice(id.as_bytes());
@@ -168,6 +193,31 @@ mod tests {
         assert_eq!(loaded.objects(), doc.objects());
         assert_eq!(loaded.roots(), doc.roots());
         assert!(loaded.group(loaded.roots()[0]).is_some());
+    }
+
+    #[test]
+    fn prepared_on_another_thread_reads_back_the_same() {
+        let mut doc = board();
+        let asset = doc.add_asset(b"fake png".to_vec());
+        let picture = ObjectData {
+            kind: pb_core::ObjectKind::Image(pb_core::Image {
+                asset,
+                crop: Rect::new(0.0, 0.0, 1.0, 1.0),
+            }),
+            bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+            rotation: 0.0,
+            style: Style::default(),
+            tags: Default::default(),
+            link: None,
+        };
+        doc.apply(Command::Create(vec![picture.into()])).unwrap();
+        let prepared = prepare(&doc);
+        let bytes = std::thread::spawn(move || prepared.encode())
+            .join()
+            .unwrap();
+        let loaded = decode(&bytes).unwrap();
+        assert_eq!(loaded.objects(), doc.objects());
+        assert!(loaded.assets().get(asset).is_some());
     }
 
     #[test]

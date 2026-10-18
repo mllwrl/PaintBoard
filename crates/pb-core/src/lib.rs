@@ -20,7 +20,7 @@ pub use asset::{AssetId, Assets};
 pub use command::{Applied, Command, ZOrder};
 pub use comment::{Comment, Thread, ThreadAnchor};
 pub use connector::{Anchor, Cap, Connector, ConnectorChange, End, Label, Route};
-pub use document::{Document, Error, Result, Voting};
+pub use document::{Document, Error, Result, SnapshotSource, Voting};
 pub use kanban::{Card, Column, Kanban, KanbanPart};
 pub use layer::Layer;
 pub use mindmap::{MindMap, MindMapPart, Node};

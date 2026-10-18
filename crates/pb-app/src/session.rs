@@ -27,6 +27,10 @@ const UNTITLED: &str = "Untitled";
 pub struct Session {
     /// The board's file; `None` for an untitled board.
     path: Option<PathBuf>,
+    /// An autosave running on its own thread, so a large board does not freeze the window.
+    saving: Option<Saving>,
+    /// Wakes the app when a background save is done.
+    waker: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     /// App data directory; `None` where there is none (the web, for now), which turns off
     /// keeping untitled boards.
     data_dir: Option<PathBuf>,
@@ -63,6 +67,8 @@ impl Session {
             .ok();
         let mut session = Self {
             path: None,
+            saving: None,
+            waker: None,
             data_dir,
             autosave: Autosave::new(0),
         };
@@ -99,19 +105,28 @@ impl Session {
         )
     }
 
-    /// When the next autosave is due.
+    /// When the next autosave is due; none while one is running (it wakes the app when
+    /// done, see [`Session::set_waker`]).
     pub fn deadline(&self) -> Option<Instant> {
+        if self.saving.is_some() {
+            return None;
+        }
         self.autosave.deadline()
     }
 
-    /// Call after anything that may have changed the document; writes it once due.
+    /// `wake` is called, from the saving thread, when a background save is done.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn set_waker(&mut self, wake: impl Fn() + Send + Sync + 'static) {
+        self.waker = Some(std::sync::Arc::new(wake));
+    }
+
+    /// Call after anything that may have changed the document; saves it once due, on a
+    /// thread of its own.
     pub fn tick(&mut self, doc: &Document, now: Instant) {
+        self.collect_saving(false, now);
         self.autosave.observe(doc.revision(), now);
-        if self.autosave.is_due(now)
-            && let Err(err) = self.write(doc)
-        {
-            log::error!("autosave failed: {err}");
-            self.autosave.failed(now);
+        if self.saving.is_none() && self.autosave.is_due(now) {
+            self.start_saving(doc, now);
         }
     }
 
@@ -143,6 +158,7 @@ impl Session {
         let Some(path) = dialog::pick_save(&FILE_TYPE, &suggested) else {
             return false;
         };
+        self.collect_saving(true, Instant::now());
         if let Err(err) = fs::write_atomic(&path, &encode(doc)) {
             dialog::show_error(tr("Could not save the board"), &err.to_string());
             return false;
@@ -230,8 +246,86 @@ impl Session {
         }
     }
 
+    /// Where the board is written: its file, or the recovery file for an untitled one;
+    /// `None` when there is nowhere to keep it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn target(&self) -> Option<PathBuf> {
+        match &self.path {
+            Some(path) => Some(path.clone()),
+            None => self.data_file(RECOVERY_FILE),
+        }
+    }
+
+    /// Starts writing the board on another thread.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start_saving(&mut self, doc: &Document, now: Instant) {
+        let revision = doc.revision();
+        let Some(target) = self.target() else {
+            self.autosave.saved(revision);
+            return;
+        };
+        let prepared = pb_storage::prepare(doc);
+        let waker = self.waker.clone();
+        let (done, result) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("autosave".into())
+            .spawn(move || {
+                let _ = done.send(fs::write_atomic(&target, &prepared.encode()));
+                if let Some(wake) = waker {
+                    wake();
+                }
+            });
+        match spawned {
+            Ok(_) => self.saving = Some(Saving { revision, result }),
+            Err(err) => {
+                log::error!("autosave thread not started: {err}");
+                self.autosave.failed(now);
+            }
+        }
+    }
+
+    /// The web has no threads (and no files yet): write right away.
+    #[cfg(target_arch = "wasm32")]
+    fn start_saving(&mut self, doc: &Document, now: Instant) {
+        if let Err(err) = self.write(doc) {
+            log::error!("autosave failed: {err}");
+            self.autosave.failed(now);
+        }
+    }
+
+    /// Takes in the background save's outcome once it is done, or waits for it with `wait`.
+    fn collect_saving(&mut self, wait: bool, now: Instant) {
+        let Some(saving) = &self.saving else {
+            return;
+        };
+        let outcome = if wait {
+            saving.result.recv().ok()
+        } else {
+            match saving.result.try_recv() {
+                Ok(outcome) => Some(outcome),
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+            }
+        };
+        let revision = saving.revision;
+        self.saving = None;
+        match outcome {
+            Some(Ok(())) => self.autosave.saved(revision),
+            Some(Err(err)) => {
+                log::error!("autosave failed: {err}");
+                self.autosave.failed(now);
+            }
+            None => {
+                log::error!("the autosave thread stopped");
+                self.autosave.failed(now);
+            }
+        }
+    }
+
     /// Writes the board to its file, or an untitled one to the recovery file.
     fn write(&mut self, doc: &Document) -> io::Result<()> {
+        // A background save writes the same file: let it finish first.
+        self.collect_saving(true, Instant::now());
         let target = match &self.path {
             Some(path) => path.clone(),
             None => match self.data_file(RECOVERY_FILE) {
@@ -251,6 +345,13 @@ impl Session {
     fn data_file(&self, name: &str) -> Option<PathBuf> {
         self.data_dir.as_ref().map(|dir| dir.join(name))
     }
+}
+
+/// An autosave under way on its own thread.
+struct Saving {
+    /// The board's revision when it started: what is saved once it is done.
+    revision: u64,
+    result: std::sync::mpsc::Receiver<io::Result<()>>,
 }
 
 fn load(path: &Path) -> Result<Document, Box<dyn std::error::Error>> {

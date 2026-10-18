@@ -301,6 +301,20 @@ enum NodeData {
     Unknown { id: ObjectId },
 }
 
+/// A handle on a board's CRDT for taking a snapshot elsewhere, e.g. on a saving thread:
+/// it shares the board, so the snapshot holds the board as it is when exported. Edits
+/// made meanwhile wait for the export to finish.
+pub struct SnapshotSource(LoroDoc);
+
+impl SnapshotSource {
+    /// The board in the form [`Document::from_snapshot`] reads.
+    pub fn export(&self) -> Vec<u8> {
+        self.0
+            .export(ExportMode::Snapshot)
+            .expect("snapshot export of a committed document cannot fail")
+    }
+}
+
 /// Changes reported by the CRDT since the last refresh.
 #[derive(Debug, Default)]
 struct Changes {
@@ -430,9 +444,12 @@ impl Document {
     }
 
     pub fn snapshot(&self) -> Vec<u8> {
-        self.doc
-            .export(ExportMode::Snapshot)
-            .expect("snapshot export of a committed document cannot fail")
+        self.snapshot_source().export()
+    }
+
+    /// The board, to take a snapshot of on another thread (see [`SnapshotSource`]).
+    pub fn snapshot_source(&self) -> SnapshotSource {
+        SnapshotSource(self.doc.clone())
     }
 
     pub fn assets(&self) -> &Assets {
@@ -4155,6 +4172,29 @@ mod tests {
         let t = std::time::Instant::now();
         let bytes = doc.snapshot();
         eprintln!("snapshot ({} KB): {:?}", bytes.len() / 1024, t.elapsed());
+        // Exporting from another thread while this one keeps editing.
+        let shared = doc.doc.clone();
+        let worker = std::thread::spawn(move || {
+            let t = std::time::Instant::now();
+            let bytes = shared.export(ExportMode::Snapshot).unwrap();
+            (bytes.len(), t.elapsed())
+        });
+        let mut slowest = std::time::Duration::ZERO;
+        for _ in 0..20 {
+            let t = std::time::Instant::now();
+            doc.apply(Command::Move {
+                ids: vec![id],
+                delta: Vec2::new(1.0, 0.0),
+            })
+            .unwrap();
+            slowest = slowest.max(t.elapsed());
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let (len, took) = worker.join().unwrap();
+        eprintln!(
+            "background export {} KB in {took:?}; slowest move meanwhile {slowest:?}",
+            len / 1024
+        );
         let t = std::time::Instant::now();
         let loaded = Document::from_snapshot(&bytes).unwrap();
         eprintln!("load: {:?}", t.elapsed());

@@ -66,6 +66,9 @@ pub enum UserEvent {
         replace_title: bool,
         result: Result<pb_io::preview::Preview, String>,
     },
+    /// A background save finished; the session takes the outcome in on the next tick.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    Saved,
 }
 
 /// What recognized handwriting is for.
@@ -207,7 +210,16 @@ impl App {
         let file = std::env::args_os().nth(1).map(PathBuf::from);
         #[cfg(target_arch = "wasm32")]
         let file = None;
-        let (session, document) = Session::start(file);
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+        let (mut session, document) = Session::start(file);
+        // Background saves wake the app when done (the web saves right away).
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let wake = proxy.clone();
+            session.set_waker(move || {
+                let _ = wake.send_event(UserEvent::Saved);
+            });
+        }
         Self {
             proxy,
             window: None,
@@ -4280,6 +4292,8 @@ impl ApplicationHandler<UserEvent> for App {
                 replace_title,
                 result,
             } => self.finish_preview(id, &url, replace_title, result),
+            // Waking up is all it takes: `about_to_wait` ticks the session.
+            UserEvent::Saved => {}
         }
     }
 
