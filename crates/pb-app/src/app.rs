@@ -1840,10 +1840,11 @@ impl App {
     /// was nothing to draw or it was cancelled.
     fn export_picture(&mut self, settings: &export::Settings) -> bool {
         let selection = self.tools.selection().ids().to_vec();
-        let Some(target) = export::target(&self.document, settings.scope, &selection) else {
+        let targets = export::targets(&self.document, settings.scope, &selection);
+        if targets.is_empty() {
             dialog::show_error("Export picture", "There is nothing to export.");
             return false;
-        };
+        }
         let name = match settings.scope {
             export::Scope::Frame(id) => match self.document.get(id).map(|o| &o.data.kind) {
                 Some(ObjectKind::Frame(frame)) if !frame.title.trim().is_empty() => {
@@ -1852,7 +1853,7 @@ impl App {
                 _ => "Frame".to_owned(),
             },
             export::Scope::Selection => format!("{} selection", self.session.name()),
-            export::Scope::Board => self.session.name(),
+            export::Scope::Board | export::Scope::Frames => self.session.name(),
         };
         // Characters Windows does not allow in file names.
         let name: String = name
@@ -1878,18 +1879,13 @@ impl App {
             theme: &self.theme,
             me: &self.me,
         };
-        let saved = export::render(&self.document, &target, settings, painters)
-            .and_then(|pixels| export::encode(&pixels, format))
-            .and_then(|bytes| {
-                pb_platform::fs::write_atomic(&path, &bytes).map_err(|err| err.to_string())
-            });
+        let saved = export::file(&self.document, &targets, settings, painters).and_then(|bytes| {
+            pb_platform::fs::write_atomic(&path, &bytes).map_err(|err| err.to_string())
+        });
         match saved {
             Ok(()) => true,
             Err(err) => {
-                dialog::show_error(
-                    "Export picture",
-                    &format!("Could not save the picture: {err}"),
-                );
+                dialog::show_error("Export picture", &format!("Could not save the file: {err}"));
                 false
             }
         }

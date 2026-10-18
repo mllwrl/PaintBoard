@@ -1,4 +1,5 @@
-//! PDF files: their pages rendered to pictures, to place on the board.
+//! PDF files: their pages rendered to pictures, to place on the board, and PDF files
+//! made of pictures of the board.
 
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::Pdf;
@@ -57,9 +58,113 @@ pub fn render_pages(bytes: &[u8], max_pages: usize) -> Result<Vec<Page>, String>
     Ok(pages)
 }
 
+/// A page of a PDF being written: one JPEG picture covering it.
+pub struct PicturePage<'a> {
+    pub jpeg: &'a [u8],
+    /// The picture's size in pixels.
+    pub pixels: (u32, u32),
+    /// The page's size in points (1/72 inch).
+    pub size: (f64, f64),
+}
+
+/// The largest page side PDF readers accept, in points (200 inches).
+pub const MAX_PAGE_SIDE: f64 = 14400.0;
+
+/// A PDF file with one page per picture, each picture filling its page.
+pub fn write_pictures(pages: &[PicturePage<'_>]) -> Vec<u8> {
+    // Objects: 1 catalog, 2 page tree, then a page, its contents and its picture per page.
+    let page_id = |i: usize| 3 + i * 3;
+    let mut out = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec();
+    let mut offsets = Vec::new();
+    let mut object = |out: &mut Vec<u8>, body: &[u8]| {
+        offsets.push(out.len());
+        out.extend(format!("{} 0 obj\n", offsets.len()).bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendobj\n");
+    };
+    object(&mut out, b"<< /Type /Catalog /Pages 2 0 R >>");
+    let kids: Vec<String> = (0..pages.len())
+        .map(|i| format!("{} 0 R", page_id(i)))
+        .collect();
+    let tree = format!(
+        "<< /Type /Pages /Kids [{}] /Count {} >>",
+        kids.join(" "),
+        pages.len()
+    );
+    object(&mut out, tree.as_bytes());
+    for (i, page) in pages.iter().enumerate() {
+        let id = page_id(i);
+        let (w, h) = page.size;
+        let fit = (MAX_PAGE_SIDE / w.max(h)).min(1.0);
+        let (w, h) = (w * fit, h * fit);
+        let body = format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {w:.2} {h:.2}] \
+             /Resources << /XObject << /Im0 {} 0 R >> >> /Contents {} 0 R >>",
+            id + 2,
+            id + 1
+        );
+        object(&mut out, body.as_bytes());
+        let content = format!("q {w:.2} 0 0 {h:.2} 0 0 cm /Im0 Do Q");
+        let body = format!(
+            "<< /Length {} >>\nstream\n{content}\nendstream",
+            content.len()
+        );
+        object(&mut out, body.as_bytes());
+        let mut body = format!(
+            "<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB \
+             /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>\nstream\n",
+            page.pixels.0,
+            page.pixels.1,
+            page.jpeg.len()
+        )
+        .into_bytes();
+        body.extend_from_slice(page.jpeg);
+        body.extend_from_slice(b"\nendstream");
+        object(&mut out, &body);
+    }
+    let xref = out.len();
+    out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).bytes());
+    for offset in &offsets {
+        out.extend(format!("{offset:010} 00000 n \n").bytes());
+    }
+    out.extend(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            offsets.len() + 1
+        )
+        .bytes(),
+    );
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn written_pictures_read_back_as_pages() {
+        let pixels = crate::image::Pixels {
+            width: 40,
+            height: 20,
+            rgba: [200, 30, 30, 255].repeat(40 * 20),
+        };
+        let jpeg = crate::image::encode_jpeg(&pixels, 90).unwrap();
+        let page = |size| PicturePage {
+            jpeg: &jpeg,
+            pixels: (40, 20),
+            size,
+        };
+        let bytes = write_pictures(&[page((300.0, 150.0)), page((100.0, 50.0))]);
+        assert_eq!(page_count(&bytes).unwrap(), 2);
+        let pages = render_pages(&bytes, 2).unwrap();
+        assert_eq!((pages[0].width, pages[0].height), (600, 300));
+        let first = crate::image::decode(&pages[0].png, 4096).unwrap();
+        let middle = ((150 * first.width + 300) * 4) as usize;
+        let [r, g, b, _] = first.rgba[middle..middle + 4] else {
+            unreachable!()
+        };
+        assert!(r > 150 && g < 80 && b < 80, "{r} {g} {b}");
+    }
 
     /// A one-page PDF with a filled square, written by hand.
     fn tiny_pdf() -> Vec<u8> {

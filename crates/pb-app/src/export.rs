@@ -1,4 +1,4 @@
-//! Pictures of the board, a frame or the selection, saved as PNG or JPEG files.
+//! Pictures of the board, a frame or the selection, saved as PNG, JPEG or PDF files.
 
 use std::collections::{HashMap, HashSet};
 
@@ -16,12 +16,15 @@ pub enum Scope {
     Board,
     Selection,
     Frame(ObjectId),
+    /// Every frame, one PDF page each.
+    Frames,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Format {
     Png,
     Jpeg,
+    Pdf,
 }
 
 impl Format {
@@ -29,6 +32,7 @@ impl Format {
         match self {
             Format::Png => "png",
             Format::Jpeg => "jpg",
+            Format::Pdf => "pdf",
         }
     }
 
@@ -36,6 +40,7 @@ impl Format {
         match self {
             Format::Png => "PNG image",
             Format::Jpeg => "JPEG image",
+            Format::Pdf => "PDF document",
         }
     }
 }
@@ -77,18 +82,33 @@ const TILE: u32 = 4096;
 pub struct Target {
     pub area: Rect,
     pub only: Option<HashSet<ObjectId>>,
+    /// Room is left around the area; frames are cut at their edges instead.
+    pub margin: bool,
 }
 
-/// What `scope` covers: `None` when there is nothing to draw.
-pub fn target(doc: &Document, scope: Scope, selection: &[ObjectId]) -> Option<Target> {
+/// The pictures `scope` asks for: empty when there is nothing to draw.
+pub fn targets(doc: &Document, scope: Scope, selection: &[ObjectId]) -> Vec<Target> {
+    if scope == Scope::Frames {
+        let frames = doc.objects().iter().filter(|o| o.data.kind.is_frame());
+        return frames
+            .filter(|o| doc.is_shown(o.id) && !doc.is_hidden(o.id))
+            .filter_map(|o| target(doc, Scope::Frame(o.id), selection))
+            .collect();
+    }
+    target(doc, scope, selection).into_iter().collect()
+}
+
+fn target(doc: &Document, scope: Scope, selection: &[ObjectId]) -> Option<Target> {
     match scope {
         Scope::Frame(id) => {
             let frame = doc.get(id).filter(|o| o.data.kind.is_frame())?;
             Some(Target {
                 area: frame.data.bounds,
                 only: None,
+                margin: false,
             })
         }
+        Scope::Frames => None,
         Scope::Board => {
             let ids = doc
                 .objects()
@@ -96,7 +116,11 @@ pub fn target(doc: &Document, scope: Scope, selection: &[ObjectId]) -> Option<Ta
                 .map(|o| o.id)
                 .filter(|&id| doc.is_shown(id) && !doc.is_hidden(id));
             let area = area_of(doc, ids)?;
-            Some(Target { area, only: None })
+            Some(Target {
+                area,
+                only: None,
+                margin: true,
+            })
         }
         Scope::Selection => {
             let only: HashSet<ObjectId> = doc
@@ -110,6 +134,7 @@ pub fn target(doc: &Document, scope: Scope, selection: &[ObjectId]) -> Option<Ta
             Some(Target {
                 area,
                 only: Some(only),
+                margin: true,
             })
         }
     }
@@ -157,14 +182,48 @@ pub struct Painters<'a> {
     pub me: &'a str,
 }
 
-/// Draws `target` as `settings` ask, tile by tile.
-pub fn render(
+/// The file `settings` ask for, of `targets` (one picture, or a PDF page each).
+pub fn file(
+    doc: &Document,
+    targets: &[Target],
+    settings: &Settings,
+    mut painters: Painters<'_>,
+) -> Result<Vec<u8>, String> {
+    if settings.format != Format::Pdf {
+        let target = targets.first().ok_or("there is nothing to export")?;
+        let (pixels, _) = render(doc, target, settings, &mut painters)?;
+        return encode(&pixels, settings.format);
+    }
+    let mut pictures = Vec::new();
+    for target in targets {
+        let (pixels, scale) = render(doc, target, settings, &mut painters)?;
+        let jpeg = encode(&pixels, Format::Jpeg)?;
+        pictures.push((jpeg, pixels.width, pixels.height, scale));
+    }
+    let pages: Vec<_> = pictures
+        .iter()
+        .map(|(jpeg, w, h, scale)| {
+            // 96 board units at 100% to the inch, 72 points.
+            let points = |px: u32| f64::from(px) / scale * 0.75;
+            pb_io::pdf::PicturePage {
+                jpeg,
+                pixels: (*w, *h),
+                size: (points(*w), points(*h)),
+            }
+        })
+        .collect();
+    Ok(pb_io::pdf::write_pictures(&pages))
+}
+
+/// Draws `target` as `settings` ask, tile by tile; also returns the pixels per world unit
+/// it was drawn at.
+fn render(
     doc: &Document,
     target: &Target,
     settings: &Settings,
-    painters: Painters<'_>,
-) -> Result<Pixels, String> {
-    let margin = !matches!(settings.scope, Scope::Frame(_));
+    painters: &mut Painters<'_>,
+) -> Result<(Pixels, f64), String> {
+    let margin = target.margin;
     let (scale, width, height) = fit(target.area, settings.scale, margin);
     let pad = if margin { MARGIN / scale } else { 0.0 };
     let origin = target.area.origin() - Vec2::new(pad, pad);
@@ -202,7 +261,12 @@ pub fn render(
                 plain: true,
                 only: target.only.as_ref(),
             };
-            build_scene(&mut scene, &view, painters.text, painters.images);
+            build_scene(
+                &mut scene,
+                &view,
+                &mut *painters.text,
+                &mut *painters.images,
+            );
             let pixels = painters.gpu.render_image(&scene, w, h, background)?;
             let row = w as usize * 4;
             for (y, line) in pixels.chunks_exact(row).enumerate() {
@@ -211,18 +275,19 @@ pub fn render(
             }
         }
     }
-    Ok(Pixels {
+    let pixels = Pixels {
         width,
         height,
         rgba,
-    })
+    };
+    Ok((pixels, scale))
 }
 
-/// The file's bytes in `format`.
-pub fn encode(pixels: &Pixels, format: Format) -> Result<Vec<u8>, String> {
+/// A picture file's bytes in `format` (PNG or JPEG).
+fn encode(pixels: &Pixels, format: Format) -> Result<Vec<u8>, String> {
     let bytes = match format {
         Format::Png => pb_io::image::encode_png(pixels),
-        Format::Jpeg => pb_io::image::encode_jpeg(pixels, 92),
+        Format::Jpeg | Format::Pdf => pb_io::image::encode_jpeg(pixels, 92),
     };
     bytes.map_err(|err| err.to_string())
 }

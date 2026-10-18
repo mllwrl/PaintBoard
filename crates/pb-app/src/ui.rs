@@ -876,7 +876,7 @@ fn board_menu(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                             ("Save as…", "Ctrl+Shift+S", Action::SaveAs),
                             ("Insert image…", "", Action::InsertImage),
                             ("Diagram from text…", "", Action::OpenDiagram),
-                            ("Export picture…", "Ctrl+Shift+E", Action::OpenExport),
+                            ("Export…", "Ctrl+Shift+E", Action::OpenExport),
                         ];
                         for (label, shortcut, action) in items {
                             // Inserting changes the board.
@@ -2779,9 +2779,13 @@ fn export_window(
 ) {
     use crate::export::{Format, Scope};
 
-    if let Scope::Frame(id) = settings.scope
-        && !model.frames.iter().any(|(f, _)| *f == id)
-    {
+    let gone = match settings.scope {
+        Scope::Frame(id) => !model.frames.iter().any(|(f, _)| *f == id),
+        // One page per frame needs pages.
+        Scope::Frames => settings.format != Format::Pdf || model.frames.is_empty(),
+        _ => false,
+    };
+    if gone {
         settings.scope = Scope::Board;
     }
     let title_of = |id: ObjectId| {
@@ -2793,7 +2797,7 @@ fn export_window(
             .unwrap_or_default()
     };
     let mut open = true;
-    let shown = egui::Window::new("Export picture")
+    let shown = egui::Window::new("Export")
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
@@ -2835,6 +2839,15 @@ fn export_window(
                                     });
                             });
                         });
+                        let pages = settings.format == Format::Pdf && !model.frames.is_empty();
+                        ui.add_enabled_ui(pages, |ui| {
+                            ui.radio_value(
+                                &mut settings.scope,
+                                Scope::Frames,
+                                "All frames, a page each",
+                            )
+                            .on_disabled_hover_text("PDF only, for boards with frames");
+                        });
                     });
                     ui.end_row();
 
@@ -2842,6 +2855,7 @@ fn export_window(
                     ui.horizontal(|ui| {
                         ui.selectable_value(&mut settings.format, Format::Png, "PNG");
                         ui.selectable_value(&mut settings.format, Format::Jpeg, "JPEG");
+                        ui.selectable_value(&mut settings.format, Format::Pdf, "PDF");
                     });
                     ui.end_row();
 
@@ -3001,7 +3015,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+F", "Find"),
             ("Ctrl+N / O / S", "New / open / save"),
             ("Ctrl+Shift+S", "Save as"),
-            ("Ctrl+Shift+E", "Export a picture"),
+            ("Ctrl+Shift+E", "Export a picture or PDF"),
             ("Space+drag, middle drag", "Pan"),
             ("Ctrl+wheel, Ctrl+= / -", "Zoom"),
             ("Ctrl+0", "Zoom to 100%"),
