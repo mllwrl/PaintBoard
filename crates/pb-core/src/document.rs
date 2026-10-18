@@ -820,6 +820,26 @@ impl Document {
                             let meta = self.tree.get_meta(self.nodes[&object.id])?;
                             let change = change.for_kind(&object.data.kind);
                             write_style_change(&meta, &change, object.data.style)?;
+                            // A new color for the whole text wins over colored fragments
+                            // (bold, italic and the rest stay).
+                            let recolored = match object.data.kind {
+                                ObjectKind::Shape(_) => change.text_color.is_some(),
+                                ObjectKind::Text(_) => change.stroke.is_some(),
+                                _ => false,
+                            };
+                            let spans = object.data.kind.spans();
+                            if recolored && spans.iter().any(|s| s.marks.color.is_some()) {
+                                let plain: Vec<Span> = spans
+                                    .iter()
+                                    .map(|s| {
+                                        let mut s = s.clone();
+                                        s.marks.color = None;
+                                        s
+                                    })
+                                    .filter(|s| s.marks != crate::TextMarks::default())
+                                    .collect();
+                                write_spans(&meta, &plain)?;
+                            }
                         }
                     }
                 }
@@ -3708,6 +3728,43 @@ mod tests {
         }
         let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
         assert_eq!(loaded.objects(), doc.objects());
+    }
+
+    #[test]
+    fn text_color_for_the_whole_text_clears_colored_fragments() {
+        let mut doc = Document::new();
+        let red = Rgba::rgb(0xFF, 0, 0);
+        let marks = crate::TextMarks {
+            bold: true,
+            color: Some(Rgba::rgb(0, 0x80, 0)),
+            ..crate::TextMarks::default()
+        };
+        let mut shape = rect(0.0, 0.0, 100.0, 50.0);
+        shape.kind = ObjectKind::Shape(crate::Shape {
+            kind: ShapeKind::Rectangle,
+            text: "Hello".into(),
+            spans: vec![Span {
+                start: 0,
+                end: 5,
+                marks,
+            }]
+            .into(),
+        });
+        let id = create(&mut doc, shape);
+        let plain = create(&mut doc, rect(200.0, 0.0, 10.0, 10.0));
+        doc.apply(Command::SetStyle {
+            ids: vec![id, plain],
+            change: StyleChange {
+                text_color: Some(red),
+                ..StyleChange::default()
+            },
+        })
+        .unwrap();
+        let data = &doc.get(id).unwrap().data;
+        assert_eq!(data.style.text_color, Some(red));
+        let spans = data.kind.spans();
+        assert_eq!(spans.len(), 1);
+        assert!(spans[0].marks.bold && spans[0].marks.color.is_none());
     }
 
     #[test]
