@@ -407,7 +407,7 @@ impl App {
             previews.clear();
             votes.clear();
             overlay = Overlay {
-                search_hits: view.highlights.clone(),
+                marked: view.highlights.clone(),
                 ..Overlay::default()
             };
         }
@@ -430,6 +430,7 @@ impl App {
                 votes: &votes,
                 plain: false,
                 only: None,
+                frame_titles: true,
             },
             &mut self.text,
             &mut self.images,
@@ -3829,6 +3830,7 @@ impl App {
     }
 
     fn on_gpu_ready(&mut self, gpu: Gpu) {
+        pb_io::svg::warm_up();
         if let Some(ui) = &mut self.ui {
             ui.attach_gpu(&gpu);
         }
@@ -4702,6 +4704,7 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
         spotlight: None,
         laser: Vec::new(),
         search_hits: Vec::new(),
+        marked: Vec::new(),
         search_current: None,
         lines,
         gaps,

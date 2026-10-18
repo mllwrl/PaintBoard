@@ -79,6 +79,9 @@ pub struct View<'a> {
     pub plain: bool,
     /// When set, only these objects are drawn.
     pub only: Option<&'a HashSet<ObjectId>>,
+    /// Frames show their titles above them (left out in a picture of one frame, where
+    /// the titles of frames below it would show inside).
+    pub frame_titles: bool,
 }
 
 /// Opacity of objects a filter hides, relative to their own.
@@ -218,6 +221,7 @@ pub fn build_scene(
             images: &mut *images,
             assets: view.assets,
             zoom,
+            frame_titles: view.frame_titles,
         };
         objects::draw_object(scene, transform, data, resources);
         if !focused {

@@ -203,6 +203,8 @@ pub(crate) struct Resources<'a> {
     pub assets: &'a Assets,
     /// Logical pixels per world unit, for what keeps its size on screen.
     pub zoom: f64,
+    /// Frames show their titles above them.
+    pub frame_titles: bool,
 }
 
 /// Draws one object. `transform` maps world to physical pixels.
@@ -217,6 +219,7 @@ pub(crate) fn draw_object(
         images,
         assets,
         zoom,
+        frame_titles,
     } = resources;
     let transform = transform * data.frame().transform();
     let style = &data.style;
@@ -415,7 +418,7 @@ pub(crate) fn draw_object(
             let b = data.bounds;
             scene.fill(Fill::NonZero, transform, color(style.fill), None, &b);
             scene.stroke(&Stroke::new(1.0 / zoom), transform, FRAME_EDGE, None, &b);
-            if !frame.title.is_empty() {
+            if frame_titles && !frame.title.is_empty() {
                 let size = FrameData::TITLE_SIZE / zoom;
                 let layout = text.engine.layout(&frame.title, size, None);
                 let band = FrameData::title_band(b, zoom);

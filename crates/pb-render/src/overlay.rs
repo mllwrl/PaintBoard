@@ -46,6 +46,9 @@ pub struct Overlay {
     pub quick_dots: Vec<Point>,
     /// Search results (world), and the one shown now.
     pub search_hits: Vec<Frame>,
+    /// Objects to point out (world), e.g. those changed since a saved version: tinted and
+    /// outlined boldly.
+    pub marked: Vec<Frame>,
     pub search_current: Option<Frame>,
     /// While presenting: the frame shown (world); everything around it is dimmed.
     pub spotlight: Option<Rect>,
@@ -162,6 +165,11 @@ pub fn draw_overlay(
         }
     }
     let found = colors.guide;
+    for frame in &overlay.marked {
+        let path = outline(frame);
+        scene.fill(Fill::NonZero, id, found.multiply_alpha(0.12), None, &path);
+        scene.stroke(&Stroke::new(3.0 * scale), id, found, None, &path);
+    }
     for hit in &overlay.search_hits {
         scene.stroke(&thick, id, found.multiply_alpha(0.45), None, &outline(hit));
     }

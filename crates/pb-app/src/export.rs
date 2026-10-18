@@ -306,6 +306,7 @@ fn render(
                 votes: &votes,
                 plain: true,
                 only: target.only.as_ref(),
+                frame_titles: target.margin,
             };
             build_scene(
                 &mut scene,

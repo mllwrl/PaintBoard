@@ -32,6 +32,15 @@ fn fonts() -> Arc<usvg::fontdb::Database> {
         .clone()
 }
 
+/// Starts loading the system's fonts in the background, so the first SVG with text does
+/// not wait for them. Does nothing where there are no threads (the web).
+pub fn warm_up() {
+    #[cfg(not(target_arch = "wasm32"))]
+    std::thread::spawn(|| {
+        fonts();
+    });
+}
+
 /// Draws the SVG (or gzipped SVGZ) file in `bytes`. Pictures it links to are looked up
 /// next to `dir`, the file's folder.
 pub fn draw(bytes: &[u8], dir: Option<&Path>) -> Result<Drawing, String> {
