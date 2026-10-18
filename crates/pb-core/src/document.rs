@@ -831,10 +831,12 @@ impl Document {
                             if recolored && spans.iter().any(|s| s.marks.color.is_some()) {
                                 let plain: Vec<Span> = spans
                                     .iter()
-                                    .map(|s| {
-                                        let mut s = s.clone();
-                                        s.marks.color = None;
-                                        s
+                                    .map(|&s| Span {
+                                        marks: crate::TextMarks {
+                                            color: None,
+                                            ..s.marks
+                                        },
+                                        ..s
                                     })
                                     .filter(|s| s.marks != crate::TextMarks::default())
                                     .collect();

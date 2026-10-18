@@ -3834,6 +3834,7 @@ impl App {
             }
             ElementState::Released => match self.tools.pointer_up(&self.document, pointer) {
                 Some(command) => {
+                    let command = self.fit_resized_text(command);
                     self.apply(command);
                     true
                 }
@@ -3841,6 +3842,41 @@ impl App {
                 None => true,
             },
         }
+    }
+
+    /// Text objects made wider or narrower get the height their text takes at the new
+    /// width, from the top down, so lines that wrap do not spill out of the box.
+    fn fit_resized_text(&mut self, command: Command) -> Command {
+        let Command::SetGeometry(mut changes) = command else {
+            return command;
+        };
+        for (id, frame) in &mut changes {
+            let Some(object) = self.document.get(*id) else {
+                continue;
+            };
+            let ObjectKind::Text(text) = &object.data.kind else {
+                continue;
+            };
+            let rect = frame.rect.abs();
+            if (rect.width() - object.data.bounds.width()).abs() < 0.5 {
+                continue;
+            }
+            let layout = self.text.engine().layout_aligned(
+                &text.text,
+                &text.spans,
+                text.size,
+                // The same slack the text is drawn with.
+                Some(rect.width() + 0.5),
+                pb_text::TextAlign::Start,
+            );
+            frame.rect = pb_geom::kurbo::Rect::new(
+                rect.x0,
+                rect.y0,
+                rect.x1,
+                rect.y0 + layout.height.max(text.size),
+            );
+        }
+        Command::SetGeometry(changes)
     }
 
     /// A "+" dot: adds a copy of `id` on `side`, connects the two, and starts typing on the
