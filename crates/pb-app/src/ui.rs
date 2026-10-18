@@ -156,6 +156,11 @@ pub enum Action {
     InsertTemplate(usize),
     /// Opens the window for making a diagram from text.
     OpenDiagram,
+    /// Opens the window for saving a picture of the board.
+    OpenExport,
+    CloseExport,
+    /// Saves a picture as asked.
+    Export(crate::export::Settings),
     /// Makes a diagram from this Mermaid text.
     InsertDiagram(String),
     CloseDiagram,
@@ -279,6 +284,8 @@ pub struct Model<'a> {
     pub diagram: Option<Option<String>>,
     /// The template gallery is open.
     pub show_templates: bool,
+    /// The export window is open.
+    pub export: Option<ExportInfo>,
     /// Focus mode is on: the board menu, minimap and search step aside.
     pub focus: bool,
     /// Presenting: the frame shown, how many there are, and its title.
@@ -298,6 +305,12 @@ pub struct Model<'a> {
     /// The board's threads: id, a line about it, and whether it is resolved.
     pub threads: Vec<(std::sync::Arc<str>, String, bool)>,
     pub show_resolved: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ExportInfo {
+    /// Something is selected to export.
+    pub has_selection: bool,
 }
 
 /// A comment thread in its panel.
@@ -577,6 +590,10 @@ pub struct Ui {
     comment_text: String,
     /// The layer being renamed, with the name typed so far.
     layer_name: Option<(Arc<str>, String)>,
+    /// Choices in the export window, kept between openings.
+    export: crate::export::Settings,
+    /// The export window was open in the last frame.
+    export_shown: bool,
     repaint_at: Option<Instant>,
 }
 
@@ -607,6 +624,8 @@ impl Ui {
             diagram_text: DIAGRAM_EXAMPLE.to_owned(),
             comment_text: String::new(),
             layer_name: None,
+            export: crate::export::Settings::default(),
+            export_shown: false,
             repaint_at: None,
         }
     }
@@ -655,6 +674,8 @@ impl Ui {
         let diagram_text = &mut self.diagram_text;
         let comment_text = &mut self.comment_text;
         let layer_name = &mut self.layer_name;
+        let export = &mut self.export;
+        let export_shown = &mut self.export_shown;
         let output = self.ctx.run_pass(input, |ctx| {
             if let Some(timer) = &model.timer {
                 timer_pill(ctx, timer, &mut actions);
@@ -719,6 +740,21 @@ impl Ui {
             }
             if let Some(error) = &model.diagram {
                 diagram_window(ctx, error.as_deref(), diagram_text, &mut actions);
+            }
+            match model.export {
+                Some(info) => {
+                    if !*export_shown {
+                        // Opened anew: what is selected, if anything, is what to export.
+                        if info.has_selection {
+                            export.scope = crate::export::Scope::Selection;
+                        } else if export.scope == crate::export::Scope::Selection {
+                            export.scope = crate::export::Scope::Board;
+                        }
+                    }
+                    export_window(ctx, model, info, export, &mut actions);
+                    *export_shown = true;
+                }
+                None => *export_shown = false,
             }
             if model.show_templates {
                 templates_window(ctx, &mut actions);
@@ -840,6 +876,7 @@ fn board_menu(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                             ("Save as…", "Ctrl+Shift+S", Action::SaveAs),
                             ("Insert image…", "", Action::InsertImage),
                             ("Diagram from text…", "", Action::OpenDiagram),
+                            ("Export picture…", "Ctrl+Shift+E", Action::OpenExport),
                         ];
                         for (label, shortcut, action) in items {
                             // Inserting changes the board.
@@ -2732,6 +2769,130 @@ const DIAGRAM_EXAMPLE: &str = "flowchart TD
     D --> E[(Save)]
 ";
 
+/// Saving a picture of the board, a frame or the selection.
+fn export_window(
+    ctx: &Context,
+    model: &Model,
+    info: ExportInfo,
+    settings: &mut crate::export::Settings,
+    actions: &mut Vec<Action>,
+) {
+    use crate::export::{Format, Scope};
+
+    if let Scope::Frame(id) = settings.scope
+        && !model.frames.iter().any(|(f, _)| *f == id)
+    {
+        settings.scope = Scope::Board;
+    }
+    let title_of = |id: ObjectId| {
+        model
+            .frames
+            .iter()
+            .find(|(f, _)| *f == id)
+            .map(|(_, t)| frame_title(t))
+            .unwrap_or_default()
+    };
+    let mut open = true;
+    let shown = egui::Window::new("Export picture")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .order(Order::Foreground)
+        .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            egui::Grid::new("export")
+                .num_columns(2)
+                .spacing([12.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label("What");
+                    ui.vertical(|ui| {
+                        ui.radio_value(&mut settings.scope, Scope::Board, "Whole board");
+                        ui.add_enabled_ui(info.has_selection, |ui| {
+                            ui.radio_value(&mut settings.scope, Scope::Selection, "Selection");
+                        });
+                        ui.add_enabled_ui(!model.frames.is_empty(), |ui| {
+                            ui.horizontal(|ui| {
+                                let frame = match settings.scope {
+                                    Scope::Frame(id) => Some(id),
+                                    _ => None,
+                                };
+                                let shown = frame.or(model.frames.first().map(|(id, _)| *id));
+                                if ui.radio(frame.is_some(), "Frame").clicked()
+                                    && let Some(id) = shown
+                                {
+                                    settings.scope = Scope::Frame(id);
+                                }
+                                egui::ComboBox::from_id_salt("export frame")
+                                    .selected_text(shown.map(title_of).unwrap_or_default())
+                                    .show_ui(ui, |ui| {
+                                        for (id, title) in &model.frames {
+                                            let on = frame == Some(*id);
+                                            if ui.selectable_label(on, frame_title(title)).clicked()
+                                            {
+                                                settings.scope = Scope::Frame(*id);
+                                            }
+                                        }
+                                    });
+                            });
+                        });
+                    });
+                    ui.end_row();
+
+                    ui.label("Format");
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut settings.format, Format::Png, "PNG");
+                        ui.selectable_value(&mut settings.format, Format::Jpeg, "JPEG");
+                    });
+                    ui.end_row();
+
+                    ui.label("Size");
+                    ui.horizontal(|ui| {
+                        for scale in [1.0, 2.0, 3.0, 4.0] {
+                            ui.selectable_value(&mut settings.scale, scale, format!("{scale}×"))
+                                .on_hover_text("Pixels per board unit: 1× is the board at 100%");
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label("");
+                    ui.add_enabled(
+                        settings.format == Format::Png,
+                        egui::Checkbox::new(&mut settings.transparent, "Transparent background"),
+                    );
+                    ui.end_row();
+                });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button("Export…").clicked() {
+                    actions.push(Action::Export(*settings));
+                }
+                if ui.button("Cancel").clicked() {
+                    actions.push(Action::CloseExport);
+                }
+            });
+        });
+    if let Some(shown) = shown {
+        let layer = shown.response.layer_id;
+        let on_top = ctx.memory(|m| m.areas().top_layer_id(Order::Foreground)) == Some(layer);
+        if !on_top {
+            ctx.move_to_top(layer);
+            ctx.request_repaint();
+        }
+    }
+    if !open {
+        actions.push(Action::CloseExport);
+    }
+}
+
+/// How a frame is listed: its title, or a stand-in when it has none.
+fn frame_title(title: &str) -> String {
+    if title.trim().is_empty() {
+        "Untitled frame".to_owned()
+    } else {
+        title.to_owned()
+    }
+}
+
 /// A Mermaid flowchart to turn into shapes and connectors.
 fn diagram_window(
     ctx: &Context,
@@ -2840,6 +3001,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+F", "Find"),
             ("Ctrl+N / O / S", "New / open / save"),
             ("Ctrl+Shift+S", "Save as"),
+            ("Ctrl+Shift+E", "Export a picture"),
             ("Space+drag, middle drag", "Pan"),
             ("Ctrl+wheel, Ctrl+= / -", "Zoom"),
             ("Ctrl+0", "Zoom to 100%"),

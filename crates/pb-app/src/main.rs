@@ -2,6 +2,7 @@
 
 mod app;
 mod editing;
+mod export;
 mod navigation;
 mod pictures;
 mod session;

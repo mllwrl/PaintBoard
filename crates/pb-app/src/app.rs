@@ -25,14 +25,15 @@ use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::editing::{self, KeyOutcome, NEW_TEXT_SIZE, TextEdit};
+use crate::export;
 use crate::navigation::Navigation;
 use crate::pictures::{self, Picture};
 use crate::session::Session;
 use crate::talktrack::{Playback, Recording};
 use crate::ui::{
-    Action, CommentView, ContextMenuInfo, LayersView, LinkInfo, Minimap, Model, PlaybackView,
-    STICKY_COLORS, SearchInfo, SelectionInfo, ShapeText, TableInfo, TextFormat, ThreadView, Ui,
-    VotingView,
+    Action, CommentView, ContextMenuInfo, ExportInfo, LayersView, LinkInfo, Minimap, Model,
+    PlaybackView, STICKY_COLORS, SearchInfo, SelectionInfo, ShapeText, TableInfo, TextFormat,
+    ThreadView, Ui, VotingView,
 };
 
 pub enum UserEvent {
@@ -161,6 +162,8 @@ pub struct App {
     /// The window for making a diagram from text is open, with what was wrong with the
     /// last try.
     diagram: Option<Option<String>>,
+    /// The export window is open.
+    show_export: bool,
     /// The search field should take the keyboard on the next frame.
     focus_search: bool,
     /// Time and screen position of the last left press, to detect double clicks.
@@ -218,6 +221,7 @@ impl App {
             timer: None,
             show_results: false,
             diagram: None,
+            show_export: false,
             last_press: None,
             recognition: None,
             next_request: 0,
@@ -396,6 +400,8 @@ impl App {
                 filter: &self.filter,
                 me: &self.me,
                 votes: &votes,
+                plain: false,
+                only: None,
             },
             &mut self.text,
             &mut self.images,
@@ -467,6 +473,9 @@ impl App {
                 .map(|t| (t.id.clone(), t.title.to_string(), t.duration))
                 .collect(),
             diagram: self.diagram.clone(),
+            export: self.show_export.then(|| ExportInfo {
+                has_selection: !self.tools.selection().is_empty(),
+            }),
             show_templates: self.show_templates,
             focus: self.focus_saved.is_some(),
             laser: self.presentation.as_ref().is_some_and(|p| p.laser),
@@ -1036,6 +1045,13 @@ impl App {
                 self.diagram = Some(None);
             }
             Action::CloseDiagram => self.diagram = None,
+            Action::OpenExport => self.open_export(),
+            Action::CloseExport => self.show_export = false,
+            Action::Export(settings) => {
+                if self.export_picture(&settings) {
+                    self.show_export = false;
+                }
+            }
             Action::InsertDiagram(source) => match self.insert_diagram(&source) {
                 Ok(()) => self.diagram = None,
                 Err(err) => self.diagram = Some(Some(err.to_string())),
@@ -1814,6 +1830,71 @@ impl App {
 
     /// Adds a Mermaid flowchart in the middle of the view, at a size that reads like
     /// normal text there, as one undo step, and selects it.
+    fn open_export(&mut self) {
+        self.finish_editing();
+        self.context_menu = None;
+        self.show_export = true;
+    }
+
+    /// Asks where to save a picture `settings` describe and saves it; `false` if there
+    /// was nothing to draw or it was cancelled.
+    fn export_picture(&mut self, settings: &export::Settings) -> bool {
+        let selection = self.tools.selection().ids().to_vec();
+        let Some(target) = export::target(&self.document, settings.scope, &selection) else {
+            dialog::show_error("Export picture", "There is nothing to export.");
+            return false;
+        };
+        let name = match settings.scope {
+            export::Scope::Frame(id) => match self.document.get(id).map(|o| &o.data.kind) {
+                Some(ObjectKind::Frame(frame)) if !frame.title.trim().is_empty() => {
+                    frame.title.trim().to_owned()
+                }
+                _ => "Frame".to_owned(),
+            },
+            export::Scope::Selection => format!("{} selection", self.session.name()),
+            export::Scope::Board => self.session.name(),
+        };
+        // Characters Windows does not allow in file names.
+        let name: String = name
+            .chars()
+            .map(|c| if r#"<>:"/\|?*"#.contains(c) { '_' } else { c })
+            .collect();
+        let format = settings.format;
+        let file_type = dialog::FileType {
+            name: format.name(),
+            extension: format.extension(),
+        };
+        let suggested = PathBuf::from(format!("{name}.{}", format.extension()));
+        let Some(path) = dialog::pick_save(&file_type, &suggested) else {
+            return false;
+        };
+        let Some(gpu) = self.gpu.as_mut() else {
+            return false;
+        };
+        let painters = export::Painters {
+            gpu,
+            text: &mut self.text,
+            images: &mut self.images,
+            theme: &self.theme,
+            me: &self.me,
+        };
+        let saved = export::render(&self.document, &target, settings, painters)
+            .and_then(|pixels| export::encode(&pixels, format))
+            .and_then(|bytes| {
+                pb_platform::fs::write_atomic(&path, &bytes).map_err(|err| err.to_string())
+            });
+        match saved {
+            Ok(()) => true,
+            Err(err) => {
+                dialog::show_error(
+                    "Export picture",
+                    &format!("Could not save the picture: {err}"),
+                );
+                false
+            }
+        }
+    }
+
     fn insert_diagram(&mut self, source: &str) -> Result<(), pb_io::mermaid::ParseError> {
         use pb_core::{Anchor, Cap, Connector, End, Label, Route, Shape};
         use pb_geom::kurbo::{Rect, Size};
@@ -3470,6 +3551,7 @@ impl App {
             }
             KeyCode::KeyS if ctrl => self.session.save(&self.document),
             KeyCode::KeyO if ctrl => self.open_board(),
+            KeyCode::KeyE if ctrl && modifiers.shift_key() => self.open_export(),
             KeyCode::KeyN if ctrl => self.new_board(),
             KeyCode::KeyZ if ctrl && modifiers.shift_key() => self.redo(),
             KeyCode::KeyZ if ctrl => self.undo(),
@@ -3573,6 +3655,7 @@ impl App {
                 let closed = self.context_menu.take().is_some()
                     || self.thread_panel.take().is_some()
                     || std::mem::replace(&mut self.show_templates, false)
+                    || std::mem::replace(&mut self.show_export, false)
                     || std::mem::replace(&mut self.show_shortcuts, false);
                 if !closed
                     && self.picking_link.take().is_none()

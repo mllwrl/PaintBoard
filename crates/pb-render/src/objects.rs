@@ -576,7 +576,6 @@ pub fn painted_bounds(data: &ObjectData) -> Rect {
     data.frame().aabb().inflate(pad, pad)
 }
 
-/// How far an object paints outside its bounds: half its outline, or a sticky's shadow.
 /// Draws a Markdown document on its page; `transform` maps the object's unrotated
 /// coordinates to physical pixels.
 fn draw_doc(
@@ -897,6 +896,7 @@ pub(crate) fn draw_vote_badge(
     draw_text(scene, transform, origin, &layout, CARD_FILL);
 }
 
+/// How far an object paints outside its bounds: half its outline, or a sticky's shadow.
 fn paint_padding(data: &ObjectData) -> f64 {
     match data.kind {
         ObjectKind::Sticky(_) => {

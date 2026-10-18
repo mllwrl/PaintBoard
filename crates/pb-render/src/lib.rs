@@ -9,14 +9,14 @@ mod overlay;
 pub use gpu::{FrameTarget, Gpu};
 pub use grid::{GridColors, GridStyle, draw_grid};
 pub use images::ImageCache;
-pub use objects::{TextRenderer, fitted_font_size, text_align};
+pub use objects::{TextRenderer, fitted_font_size, painted_bounds, text_align};
 pub use overlay::{
     COMMENT_PIN_RADIUS, LINK_BADGE_RADIUS, Overlay, OverlayColors, TextEditOverlay,
     comment_pin_center, link_badge_center,
 };
 pub use vello;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use pb_core::{Assets, Document, FrameData, Object, ObjectData, ObjectId, ObjectKind};
 use pb_geom::Camera;
@@ -74,6 +74,11 @@ pub struct View<'a> {
     pub me: &'a str,
     /// Vote counts to show on objects, and whether each is among the top ones.
     pub votes: &'a HashMap<ObjectId, (u32, bool)>,
+    /// Drawn for export: no grid, overlay or vote badges, hidden objects left out, and
+    /// nothing faded by the filter or focus.
+    pub plain: bool,
+    /// When set, only these objects are drawn.
+    pub only: Option<&'a HashSet<ObjectId>>,
 }
 
 /// Opacity of objects a filter hides, relative to their own.
@@ -122,14 +127,16 @@ pub fn build_scene(
     images: &mut ImageCache,
 ) {
     scene.reset();
-    draw_grid(
-        scene,
-        view.camera,
-        view.viewport,
-        view.scale,
-        view.grid,
-        &view.theme.grid,
-    );
+    if !view.plain {
+        draw_grid(
+            scene,
+            view.camera,
+            view.viewport,
+            view.scale,
+            view.grid,
+            &view.theme.grid,
+        );
+    }
 
     let transform = Affine::scale(view.scale) * view.camera.transform();
     let visible = view.camera.visible_world_rect(view.viewport);
@@ -146,6 +153,8 @@ pub fn build_scene(
     let shown: Vec<(Option<ObjectId>, &ObjectData)> = shown_objects(doc, visible, zoom, &overrides)
         .into_iter()
         .filter(|id| !view.hidden.contains(id) && doc.is_shown(*id))
+        .filter(|&id| !view.plain || !doc.is_hidden(id))
+        .filter(|id| view.only.is_none_or(|only| only.contains(id)))
         .filter_map(|id| current(id).map(|data| (Some(id), data)))
         .collect();
     // Obstacles for elbow connectors, where they are now.
@@ -167,14 +176,14 @@ pub fn build_scene(
     let previews = view.previews.iter().map(|d| (None, d));
     for (id, data) in frames.chain(others).copied().chain(previews) {
         let mut opacity = 1.0;
-        if !view.filter.matches(data) {
+        if !view.plain && !view.filter.matches(data) {
             opacity *= FILTERED_OPACITY;
         }
-        let focused = id.is_none_or(|id| doc.in_focus(id));
+        let focused = view.plain || id.is_none_or(|id| doc.in_focus(id));
         if !focused {
             opacity *= UNFOCUSED_OPACITY;
         }
-        if id.is_some_and(|id| doc.is_hidden(id)) {
+        if !view.plain && id.is_some_and(|id| doc.is_hidden(id)) {
             opacity *= HIDDEN_OPACITY;
         }
         let faded;
@@ -218,7 +227,10 @@ pub fn build_scene(
         if !tags.is_empty() {
             objects::draw_tags(scene, transform, data, &tags, text);
         }
-        if let Some(&(count, top)) = id.and_then(|id| view.votes.get(&id)) {
+        if let Some(&(count, top)) = id
+            .and_then(|id| view.votes.get(&id))
+            .filter(|_| !view.plain)
+        {
             objects::draw_vote_badge(scene, transform, data, count, top, zoom, text);
         }
         if let Some(id) = id {
@@ -229,6 +241,9 @@ pub fn build_scene(
         }
     }
 
+    if view.plain {
+        return;
+    }
     overlay::draw_overlay(
         scene,
         view.camera,

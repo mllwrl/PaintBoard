@@ -94,9 +94,37 @@ pub fn encode_png(pixels: &Pixels) -> Result<Vec<u8>, ImageError> {
     Ok(out.into_inner())
 }
 
+/// A JPEG file of the pixels at `quality` (1–100); JPEG has no transparency, so alpha is
+/// dropped.
+pub fn encode_jpeg(pixels: &Pixels, quality: u8) -> Result<Vec<u8>, ImageError> {
+    let rgb: Vec<u8> = pixels
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|&[r, g, b, _]| [r, g, b])
+        .collect();
+    let mut out = Cursor::new(Vec::new());
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality);
+    image::ImageEncoder::write_image(
+        encoder,
+        &rgb,
+        pixels.width,
+        pixels.height,
+        image::ExtendedColorType::Rgb8,
+    )?;
+    Ok(out.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jpeg_round_trips_the_size() {
+        let bytes = encode_jpeg(&checker(30, 20), 90).unwrap();
+        assert_eq!(dimensions(&bytes).unwrap(), (30, 20));
+    }
 
     fn checker(width: u32, height: u32) -> Pixels {
         let rgba = (0..width * height)
