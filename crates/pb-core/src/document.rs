@@ -1111,13 +1111,15 @@ impl Document {
                 write_bounds(&meta, bounds.abs())?;
             }
             Command::RemoveNodes { id, nodes, bounds } => {
-                if !matches!(
-                    self.get(id).map(|o| &o.data.kind),
-                    Some(ObjectKind::MindMap(_))
-                ) {
+                let Some(ObjectKind::MindMap(map)) = self.get(id).map(|o| &o.data.kind) else {
                     return Err(Error::UnknownObject(id));
-                }
+                };
                 let meta = self.tree.get_meta(self.nodes[&id])?;
+                // The other branches keep their colors once one goes.
+                for node in map.unpinned_colors() {
+                    let old = map.index(&node.id).map(|i| map.nodes[i].clone());
+                    write_node(&meta, &node, old.as_ref())?;
+                }
                 for node in &nodes {
                     for prefix in [
                         key::NODE,
@@ -2569,13 +2571,18 @@ fn write_node(meta: &LoroMap, node: &crate::Node, old: Option<&crate::Node>) -> 
         let size = format!("{};{}", node.text_size.width, node.text_size.height);
         meta.insert(&format!("{}{id}", key::NODE_SIZE), size)?;
     }
-    if old.is_none_or(|o| o.collapsed != node.collapsed || o.left != node.left) {
+    if old.is_none_or(|o| {
+        o.collapsed != node.collapsed || o.left != node.left || o.color != node.color
+    }) {
         let mut flags = String::new();
         if node.collapsed {
             flags.push('c');
         }
         if node.left {
             flags.push('l');
+        }
+        if let Some(color) = node.color {
+            flags.push_str(&format!("b{color}"));
         }
         meta.insert(&format!("{}{id}", key::NODE_FLAGS), flags)?;
     }
@@ -2637,6 +2644,7 @@ fn read_mindmap(meta: &LoroMap) -> Option<crate::MindMap> {
                 text_size,
                 collapsed: flags.contains('c'),
                 left: flags.contains('l'),
+                color: flags.split_once('b').and_then(|(_, n)| n.parse().ok()),
             }
         })
         .collect();
@@ -4286,6 +4294,7 @@ mod tests {
             text_size: size,
             collapsed: false,
             left: true,
+            color: None,
         };
         let bounds = Rect::new(-100.0, 0.0, 200.0, 100.0);
         doc.apply(Command::SetNode {
@@ -4333,6 +4342,59 @@ mod tests {
         assert_eq!(current(&doc).nodes.len(), 1);
         doc.undo().unwrap();
         assert_eq!(current(&doc).nodes.len(), 2);
+    }
+
+    #[test]
+    fn removing_a_branch_keeps_the_other_branch_colors() {
+        let mut doc = Document::new();
+        let size = kurbo::Size::new(80.0, 24.0);
+        let mut map = crate::MindMap::new(doc.new_line_id(), "Plan", size);
+        let root = map.nodes[0].id.clone();
+        // Branches from before colors were kept: they go by place.
+        let mut ids = Vec::new();
+        for i in 0..3 {
+            let id: std::sync::Arc<str> = doc.new_line_id().into();
+            map = map.with_node(crate::Node {
+                id: id.clone(),
+                parent: Some(root.clone()),
+                order: i as f64,
+                text: "Topic".into(),
+                spans: Spans::default(),
+                text_size: size,
+                collapsed: false,
+                left: false,
+                color: None,
+            });
+            ids.push(id);
+        }
+        let mut data = rect(0.0, 0.0, 200.0, 100.0);
+        data.kind = ObjectKind::MindMap(map.clone());
+        let id = create(&mut doc, data);
+        let current = |doc: &Document| match &doc.get(id).unwrap().data.kind {
+            ObjectKind::MindMap(m) => m.clone(),
+            _ => panic!("not a mind map"),
+        };
+        let colors = |m: &crate::MindMap| -> Vec<_> {
+            let layout = m.layout();
+            ids.iter()
+                .filter_map(|n| m.index(n))
+                .map(|i| layout.find(i).unwrap().branch)
+                .collect()
+        };
+        assert_eq!(colors(&current(&doc)), [1, 2, 3]);
+        doc.apply(Command::RemoveNodes {
+            id,
+            nodes: vec![ids[0].clone()],
+            bounds: Rect::new(0.0, 0.0, 200.0, 100.0),
+        })
+        .unwrap();
+        assert_eq!(colors(&current(&doc)), [2, 3]);
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(colors(&current(&loaded)), [2, 3]);
+        // A new branch takes the color left free.
+        assert_eq!(current(&doc).new_branch_color(), 0);
+        doc.undo().unwrap();
+        assert_eq!(colors(&current(&doc)), [1, 2, 3]);
     }
 
     #[test]

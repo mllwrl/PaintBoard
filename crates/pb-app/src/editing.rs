@@ -522,7 +522,12 @@ impl TextEdit {
         let ObjectKind::MindMap(map) = &data.kind else {
             return None;
         };
-        map.index(parent)?;
+        let p = map.index(parent)?;
+        // A main topic takes the branch color the fewest others have.
+        let color = map.nodes[p]
+            .parent
+            .is_none()
+            .then(|| map.new_branch_color());
         let node = Node {
             id: doc.new_line_id().into(),
             parent: Some(parent.into()),
@@ -532,6 +537,7 @@ impl TextEdit {
             text_size: pb_geom::kurbo::Size::ZERO,
             collapsed: false,
             left,
+            color,
         };
         Some(Self::mind_node(
             engine,

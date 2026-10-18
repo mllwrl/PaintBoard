@@ -1381,6 +1381,7 @@ fn mind_map_nodes_are_selected_toggled_and_removed() {
         text_size: size,
         collapsed: false,
         left: false,
+        color: None,
     };
     let map = map
         .with_node(child("a", &root, 0.0))

@@ -476,6 +476,7 @@ fn mind_map(b: &mut Builder) {
             text_size: measure(b.engine, text, child_size),
             collapsed: false,
             left,
+            color: None,
         });
         for k in 0..2 {
             let sub = format!("{text} {}", k + 1);
@@ -488,6 +489,7 @@ fn mind_map(b: &mut Builder) {
                 text_size: measure(b.engine, &sub, child_size),
                 collapsed: false,
                 left,
+                color: None,
             });
         }
     }

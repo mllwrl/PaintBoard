@@ -26,6 +26,10 @@ pub struct Node {
     pub collapsed: bool,
     /// A main topic (child of the central one) that branches out to the left.
     pub left: bool,
+    /// A main topic's branch color, as an index into [`MindMap::BRANCH_COLORS`], kept
+    /// so deleting a branch does not recolor the others. `None` in maps from before it:
+    /// the color then goes by the topic's place.
+    pub color: Option<u8>,
 }
 
 /// A node where the layout put it.
@@ -107,6 +111,7 @@ impl MindMap {
                 text_size,
                 collapsed: false,
                 left: false,
+                color: None,
             }]),
         }
     }
@@ -194,6 +199,45 @@ impl MindMap {
             Some(&next) => (mine + self.nodes[next].order) / 2.0,
             None => mine + 1.0,
         }
+    }
+
+    /// Main topic `c`'s branch color slot; `children` are the central topic's.
+    fn branch_slot(&self, children: &[usize], c: usize) -> usize {
+        match self.nodes[c].color {
+            Some(slot) => slot as usize % Self::BRANCH_COLORS.len(),
+            None => children.iter().position(|&x| x == c).unwrap_or(0) % Self::BRANCH_COLORS.len(),
+        }
+    }
+
+    /// The branch color for a new main topic: the one the fewest branches have, the first
+    /// of those.
+    pub fn new_branch_color(&self) -> u8 {
+        let mut count = [0usize; Self::BRANCH_COLORS.len()];
+        if let Some(root) = self.root() {
+            let children = self.children(root);
+            for &c in &children {
+                count[self.branch_slot(&children, c)] += 1;
+            }
+        }
+        let min = count.iter().copied().min().unwrap_or(0);
+        count.iter().position(|&n| n == min).unwrap_or(0) as u8
+    }
+
+    /// Main topics whose color still goes by their place, with it pinned: written before
+    /// a branch goes so the others keep their colors.
+    pub fn unpinned_colors(&self) -> Vec<Node> {
+        let Some(root) = self.root() else {
+            return Vec::new();
+        };
+        let children = self.children(root);
+        children
+            .iter()
+            .filter(|&&c| self.nodes[c].color.is_none())
+            .map(|&c| Node {
+                color: Some(self.branch_slot(&children, c) as u8),
+                ..self.nodes[c].clone()
+            })
+            .collect()
     }
 
     /// Whether a new main topic goes left: to the side with fewer nodes.
@@ -294,7 +338,7 @@ impl MindMap {
                     rect.x1 + H_GAP
                 };
                 for c in side {
-                    let branch = children.iter().position(|&x| x == c).unwrap_or(0) + 1;
+                    let branch = self.branch_slot(&children, c) + 1;
                     let h = self.subtree_height(c);
                     self.place(&mut out, 0, c, edge, top, left, 1, branch);
                     top += h + V_GAP;
@@ -540,6 +584,7 @@ mod tests {
             text_size: Size::new(40.0, 20.0),
             collapsed: false,
             left,
+            color: None,
         }
     }
 
