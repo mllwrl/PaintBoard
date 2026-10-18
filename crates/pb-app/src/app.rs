@@ -181,6 +181,9 @@ pub struct App {
     show_export: bool,
     /// A saved version being looked at instead of the board.
     version_view: Option<VersionView>,
+    /// The pen's or marker's options show, for the tool they were opened for.
+    ink_panel: bool,
+    ink_panel_for: Option<ToolKind>,
     /// What the minimap shows, by the board's revision, theme and hidden objects shown it
     /// was made for.
     #[allow(clippy::type_complexity)]
@@ -267,6 +270,8 @@ impl App {
             diagram: None,
             show_export: false,
             version_view: None,
+            ink_panel: true,
+            ink_panel_for: None,
             minimap_marks: std::cell::RefCell::new(None),
             ui_scale: 1.0,
             high_contrast: false,
@@ -490,6 +495,11 @@ impl App {
         ) {
             self.last_structure = self.tools.active();
         }
+        // The pen's options open whenever a pen or marker is picked (button or key).
+        if self.ink_panel_for != Some(self.tools.active()) {
+            self.ink_panel_for = Some(self.tools.active());
+            self.ink_panel = true;
+        }
         let model = Model {
             board: &board,
             frames,
@@ -499,6 +509,7 @@ impl App {
             ink: self
                 .tools
                 .ink_style(self.tools.active() == ToolKind::Marker),
+            ink_panel: self.ink_panel,
             sticky_color: self.sticky_color,
             connector_route: self.tools.connector_route(),
             can_undo: self.document.can_undo(),
@@ -1054,6 +1065,10 @@ impl App {
         match action {
             Action::Tool(tool) => {
                 self.finish_editing();
+                // The active pen's button opens and closes its options.
+                if tool == self.tools.active() && tool.draws_ink() {
+                    self.ink_panel = !self.ink_panel;
+                }
                 self.tools.set_active(tool);
             }
             Action::InkStyle { marker, style } => self.tools.set_ink_style(marker, style),
@@ -3810,6 +3825,10 @@ impl App {
                 if let Some((id, side)) = self.tools.quick_dot_at(&self.document, pointer) {
                     self.quick_create(id, side);
                     return true;
+                }
+                // Drawing puts the pen's options away.
+                if self.tools.active().draws_ink() {
+                    self.ink_panel = false;
                 }
                 self.tools.pointer_down(&self.document, pointer)
             }

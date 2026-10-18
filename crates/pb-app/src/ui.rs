@@ -265,6 +265,8 @@ pub struct Model<'a> {
     pub last_structure: ToolKind,
     /// Style of the pen or marker, whichever is active.
     pub ink: InkStyle,
+    /// The pen's options show (they go away while drawing; its button brings them back).
+    pub ink_panel: bool,
     pub sticky_color: Rgba,
     pub connector_route: Route,
     pub can_undo: bool,
@@ -1277,7 +1279,7 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
             });
     }
 
-    if model.tool.draws_ink() {
+    if model.tool.draws_ink() && model.ink_panel {
         ink_panel(ctx, model, ink_button, actions);
     }
     if model.tool == ToolKind::Sticky {
