@@ -43,6 +43,11 @@ pub fn ask(title: &str, message: &str) -> Answer {
     imp::ask(title, message)
 }
 
+/// A yes-or-no question, e.g. before deleting a lot; true for yes.
+pub fn confirm(title: &str, message: &str) -> bool {
+    imp::confirm(title, message)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod imp {
     use std::path::{Path, PathBuf};
@@ -101,6 +106,16 @@ mod imp {
             _ => Answer::Cancel,
         }
     }
+
+    pub fn confirm(title: &str, message: &str) -> bool {
+        let result = MessageDialog::new()
+            .set_level(MessageLevel::Warning)
+            .set_title(title)
+            .set_description(message)
+            .set_buttons(MessageButtons::YesNo)
+            .show();
+        result == MessageDialogResult::Yes
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -119,6 +134,11 @@ mod imp {
 
     pub fn ask(_title: &str, _message: &str) -> Answer {
         Answer::No
+    }
+
+    /// No dialogs on the web yet: go ahead (what is asked about can be undone).
+    pub fn confirm(_title: &str, _message: &str) -> bool {
+        true
     }
 
     pub fn pick_save(_file_type: &FileType, _suggested: &Path) -> Option<PathBuf> {

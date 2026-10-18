@@ -1210,7 +1210,7 @@ impl App {
                     "Forget the version \"{}\"? This cannot be undone; the board itself stays as it is.",
                     &[&name.unwrap_or_default()],
                 );
-                if dialog::ask(tr("Remove version"), &question) == dialog::Answer::Yes {
+                if dialog::confirm(tr("Remove version"), &question) {
                     if self.version_view.as_ref().is_some_and(|v| v.id == id) {
                         self.version_view = None;
                     }
@@ -1530,7 +1530,7 @@ impl App {
             Action::Duplicate => {
                 self.apply_with(|tools, doc| pb_tools::duplicate(doc, tools.selection()));
             }
-            Action::Delete => self.apply_with(Tools::delete_selected),
+            Action::Delete => self.delete_selected(),
             Action::Reorder(to) => self.reorder(to),
             Action::InsertImage => self.insert_image_files(),
             Action::Crop => {
@@ -2264,6 +2264,24 @@ impl App {
                 dialog::show_error(tr("Print"), &trf("Could not make the PDF: {}", &[&err]))
             }
         }
+    }
+
+    /// Deletes the selection; asks first when that is a lot of the board.
+    fn delete_selected(&mut self) {
+        let Some(command) = self.tools.delete_selected(&self.document) else {
+            return;
+        };
+        if let Command::Delete(ids) = &command {
+            let count: usize = ids.iter().map(|&id| self.document.leaves(id).len()).sum();
+            let everything = count >= DELETE_ASK_ALL && count == self.document.objects().len();
+            if count >= DELETE_ASK || everything {
+                let question = trf("Delete {} objects? Ctrl+Z brings them back.", &[&count]);
+                if !dialog::confirm(tr("Delete"), &question) {
+                    return;
+                }
+            }
+        }
+        self.apply(command);
     }
 
     /// Sets the UI's size relative to normal and high contrast.
@@ -4112,11 +4130,7 @@ impl App {
             {
                 self.clear_cells();
             }
-            KeyCode::Delete | KeyCode::Backspace => {
-                if let Some(command) = self.tools.delete_selected(&self.document) {
-                    self.apply(command);
-                }
-            }
+            KeyCode::Delete | KeyCode::Backspace => self.delete_selected(),
             KeyCode::ArrowLeft => self.nudge(-1.0, 0.0),
             KeyCode::ArrowRight => self.nudge(1.0, 0.0),
             KeyCode::ArrowUp => self.nudge(0.0, -1.0),
@@ -4771,6 +4785,11 @@ fn window_icon() -> Option<winit::window::Icon> {
     let pixels = pb_io::image::decode(PNG, 256).ok()?;
     winit::window::Icon::from_rgba(pixels.rgba, pixels.width, pixels.height).ok()
 }
+
+/// Deleting this many objects at once asks first...
+const DELETE_ASK: usize = 20;
+/// ...and so does deleting everything on a board of at least this many.
+const DELETE_ASK_ALL: usize = 5;
 
 /// The most objects the minimap draws one by one; boards with more are drawn by cell.
 const MINIMAP_MAX_MARKS: usize = 1500;

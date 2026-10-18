@@ -750,6 +750,10 @@ const RU: &[(&str, &str)] = &[
         "Забыть версию «{}»? Это не отменить; сама доска не изменится.",
     ),
     ("Remove version", "Удалить версию"),
+    (
+        "Delete {} objects? Ctrl+Z brings them back.",
+        "Удалить объекты ({})? Ctrl+Z вернёт их.",
+    ),
     ("Layer {}", "Слой {}"),
     (
         "Images, PDF, tables, documents",
