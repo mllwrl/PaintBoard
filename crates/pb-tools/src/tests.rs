@@ -1312,12 +1312,14 @@ fn kanban_cards_are_dragged_selected_and_deleted() {
         let bounds = k.with_card(card.clone()).fitted(b);
         doc.apply(Command::SetCard { id, card, bounds }).unwrap();
     }
-    tools.select_only([id]);
+    // Cards are picked straight away, without selecting the board first.
+    tools.select_only([]);
     let (k, bounds) = board(&doc);
     let a = k.card_index(&k.cards[0].id).unwrap();
     let middle = k.card_rect(bounds, a).unwrap().center();
-    // A click selects the card.
+    // A click selects the card (and its board).
     click(&mut tools, &doc, at(middle.x, middle.y));
+    assert_eq!(tools.selection().ids(), [id]);
     assert_eq!(tools.selected_card(&doc), Some((id, a)));
     // A drag moves it to the top of the third column.
     let target = k.column_rect(bounds, 2).unwrap().center().x;

@@ -798,9 +798,19 @@ impl Tools {
                 let local = data.frame().to_local(p);
                 Some((id, table.cell_at(data.bounds, local)?))
             });
-        let card = self
-            .single_kanban(doc)
-            .filter(|(id, ..)| under == Some(*id) && !toggle)
+        // Cards are picked up straight away, selected board or not (the board moves by its
+        // titles and background).
+        let kanban_under = under.and_then(|id| {
+            let object = doc.get(id)?;
+            match &object.data.kind {
+                ObjectKind::Kanban(kanban) if !doc.is_locked(id) => {
+                    Some((id, &object.data, kanban))
+                }
+                _ => None,
+            }
+        });
+        let card = kanban_under
+            .filter(|_| !toggle)
             .and_then(|(id, data, kanban)| {
                 let local = data.frame().to_local(p);
                 match kanban.part_at(data.bounds, local)? {
@@ -834,6 +844,9 @@ impl Tools {
             None => self.node = None,
         }
         if let Some((id, card, offset)) = card {
+            if !self.selection.contains(id) {
+                self.select_only([id]);
+            }
             self.cells = None;
             self.gesture = Some(Gesture::MoveCard {
                 id,
