@@ -7,6 +7,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::i18n::{tr, trf};
+
 use pb_core::Document;
 use pb_platform::dialog::{self, Answer, FileType};
 use pb_platform::{Instant, fs};
@@ -32,6 +34,28 @@ pub struct Session {
 }
 
 impl Session {
+    /// Opens `file` (named on the command line, e.g. by a double click on it), or else
+    /// the board of the last run.
+    pub fn start(file: Option<PathBuf>) -> (Self, Document) {
+        let (mut session, doc) = Self::restore();
+        let Some(path) = file.filter(|f| Some(f) != session.path.as_ref()) else {
+            return (session, doc);
+        };
+        match load(&path) {
+            Ok(opened) => {
+                if session.release(&doc) {
+                    session.switch_to(Some(path), &opened);
+                    return (session, opened);
+                }
+            }
+            Err(err) => {
+                let title = trf("Could not open {}", &[&path.display()]);
+                dialog::show_error(&title, &err.to_string());
+            }
+        }
+        (session, doc)
+    }
+
     /// Reopens the board of the last run: its file, or else the untitled board.
     pub fn restore() -> (Self, Document) {
         let data_dir = fs::app_data_dir()
@@ -97,7 +121,7 @@ impl Session {
         if self.autosave.is_dirty()
             && let Err(err) = self.write(doc)
         {
-            dialog::show_error("Could not save the board", &err.to_string());
+            dialog::show_error(tr("Could not save the board"), &err.to_string());
         }
     }
 
@@ -120,7 +144,7 @@ impl Session {
             return false;
         };
         if let Err(err) = fs::write_atomic(&path, &encode(doc)) {
-            dialog::show_error("Could not save the board", &err.to_string());
+            dialog::show_error(tr("Could not save the board"), &err.to_string());
             return false;
         }
         if self.path.is_none()
@@ -142,7 +166,7 @@ impl Session {
         let opened = match load(&path) {
             Ok(opened) => opened,
             Err(err) => {
-                let title = format!("Could not open {}", path.display());
+                let title = trf("Could not open {}", &[&path.display()]);
                 dialog::show_error(&title, &err.to_string());
                 return None;
             }
@@ -173,8 +197,8 @@ impl Session {
             return true;
         }
         let answer = dialog::ask(
-            "Save the board?",
-            "This board has no file yet. Save it before closing it?",
+            tr("Save the board?"),
+            tr("This board has no file yet. Save it before closing it?"),
         );
         match answer {
             Answer::Yes => self.save_as(doc),

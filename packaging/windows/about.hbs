@@ -1,0 +1,21 @@
+PaintBoard uses the following open source software. Each license below lists the
+crates that use it.
+
+The crates under the Mozilla Public License 2.0 are used unmodified; their source code is
+available from https://crates.io under the names and versions listed with that license.
+
+{{#each overview}}
+  {{{name}}}: {{count}}
+{{/each}}
+
+================================================================================
+{{#each licenses}}
+
+{{{name}}}
+Used by:{{#each used_by}} {{{crate.name}}} {{{crate.version}}}{{#unless @last}},{{/unless}}{{/each}}
+--------------------------------------------------------------------------------
+
+{{{text}}}
+
+================================================================================
+{{/each}}

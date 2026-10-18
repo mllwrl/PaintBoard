@@ -189,7 +189,12 @@ pub struct App {
 
 impl App {
     pub fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
-        let (session, document) = Session::restore();
+        // A board file named on the command line (a double click on it) opens instead.
+        #[cfg(not(target_arch = "wasm32"))]
+        let file = std::env::args_os().nth(1).map(PathBuf::from);
+        #[cfg(target_arch = "wasm32")]
+        let file = None;
+        let (session, document) = Session::start(file);
         Self {
             proxy,
             window: None,
@@ -4055,6 +4060,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let attributes = Window::default_attributes()
             .with_title("PaintBoard")
+            .with_window_icon(window_icon())
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0));
         #[cfg(target_arch = "wasm32")]
         let attributes = {
@@ -4632,6 +4638,13 @@ fn is_pdf_file(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+}
+
+/// The app's icon for its windows, from `assets/icon.png`.
+fn window_icon() -> Option<winit::window::Icon> {
+    const PNG: &[u8] = include_bytes!("../assets/icon.png");
+    let pixels = pb_io::image::decode(PNG, 256).ok()?;
+    winit::window::Icon::from_rgba(pixels.rgba, pixels.width, pixels.height).ok()
 }
 
 /// `name` made fit for a file name: characters Windows does not allow become `_`.

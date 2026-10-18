@@ -1,5 +1,8 @@
 //! PaintBoard desktop/web entry point: wires winit, wgpu and egui to the rest of the crates.
 
+// Release builds on Windows open no console window next to the app.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 mod editing;
 mod export;

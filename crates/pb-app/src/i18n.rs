@@ -784,6 +784,13 @@ const RU: &[(&str, &str)] = &[
     ("An object without text", "Объект без текста"),
     ("Talktrack {}", "Запись {}"),
     ("Could not open the link", "Не удалось открыть ссылку"),
+    ("Could not open {}", "Не удалось открыть {}"),
+    ("Save the board?", "Сохранить доску?"),
+    (
+        "This board has no file yet. Save it before closing it?",
+        "У этой доски ещё нет файла. Сохранить её перед закрытием?",
+    ),
+    ("Could not save the board", "Не удалось сохранить доску"),
     ("Link target is gone", "Объекта по ссылке больше нет"),
     (
         "The object this links to has been deleted.",
@@ -817,6 +824,7 @@ mod tests {
             include_str!("ui.rs"),
             include_str!("app.rs"),
             include_str!("export.rs"),
+            include_str!("session.rs"),
         ];
         let table = russian();
         let mut missing = Vec::new();
