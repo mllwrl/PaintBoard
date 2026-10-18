@@ -7,3 +7,4 @@ pub mod image;
 pub mod mermaid;
 pub mod pdf;
 pub mod preview;
+pub mod svg;

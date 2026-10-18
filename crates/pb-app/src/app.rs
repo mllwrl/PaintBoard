@@ -1412,7 +1412,7 @@ impl App {
     /// the view.
     fn insert_image_files(&mut self) {
         let mut extensions = pb_io::image::EXTENSIONS.to_vec();
-        extensions.extend(["pdf", "csv", "tsv", "md", "markdown", "txt"]);
+        extensions.extend(["svg", "svgz", "pdf", "csv", "tsv", "md", "markdown", "txt"]);
         let paths = dialog::pick_open_many("Images, PDF, tables, documents", &extensions);
         self.insert_files(&paths, None);
     }
@@ -1466,7 +1466,7 @@ impl App {
         }
         let pictures: Vec<_> = paths
             .iter()
-            .filter(|p| pictures::is_image_file(p))
+            .filter(|p| pictures::is_image_file(p) || pictures::is_svg_file(p))
             .filter_map(|p| Picture::from_file(p).map_err(|e| errors.push(e)).ok())
             .collect();
         self.insert_pictures(pictures, at);
@@ -1563,7 +1563,7 @@ impl App {
         let files = clipboard::files();
         if files
             .iter()
-            .any(|f| pictures::is_image_file(f) || is_table_file(f))
+            .any(|f| pictures::is_image_file(f) || pictures::is_svg_file(f) || is_table_file(f))
         {
             self.insert_files(&files, at);
             return;

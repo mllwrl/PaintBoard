@@ -33,13 +33,25 @@ impl Picture {
         })
     }
 
-    /// Reads an image file; the error message names the file.
+    /// Reads an image file, drawing SVG ones into a picture; the error message names the
+    /// file.
     pub fn from_file(path: &Path) -> Result<Self, String> {
         let name = path
             .file_name()
             .unwrap_or(path.as_os_str())
             .to_string_lossy();
         let bytes = fs::read(path).map_err(|err| format!("{name}: {err}"))?;
+        if is_svg_file(path) {
+            let drawing =
+                pb_io::svg::draw(&bytes, path.parent()).map_err(|err| format!("{name}: {err}"))?;
+            // Shown at the drawing's own size, drawn larger so it stays sharp.
+            let (w, h) = drawing.size;
+            return Ok(Self {
+                bytes: drawing.png,
+                width: (w.round() as u32).max(1),
+                height: (h.round() as u32).max(1),
+            });
+        }
         Self::from_bytes(bytes).map_err(|err| format!("{name}: {err}"))
     }
 
@@ -64,6 +76,13 @@ pub fn is_image_file(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| image::EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+}
+
+/// Whether `path` names an SVG drawing (plain or gzipped).
+pub fn is_svg_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("svg") || e.eq_ignore_ascii_case("svgz"))
 }
 
 /// Bounds for images of the given pixel sizes, side by side in a row centered on `at`.

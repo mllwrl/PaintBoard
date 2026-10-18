@@ -15,3 +15,5 @@ pb-platform.workspace = true
 image.workspace = true
 # Rendering PDF pages to pictures.
 hayro = { version = "0.8", default-features = false, features = ["embed-fonts", "embed-cmaps"] }
+# Drawing SVG files into pictures.
+resvg = { version = "0.48", default-features = false, features = ["svgz", "text", "system-fonts", "raster-images"] }
