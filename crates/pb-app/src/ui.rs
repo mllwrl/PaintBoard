@@ -20,6 +20,8 @@ use pb_text::Mark;
 use pb_tools::{InkStyle, ToolKind};
 use winit::window::Window;
 
+use crate::i18n::{tr, trf};
+
 /// Something the user asked for through the UI.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
@@ -169,6 +171,8 @@ pub enum Action {
     Print,
     /// Switches between the dark and the light theme.
     ToggleTheme,
+    /// Switches the UI between English and Russian.
+    ToggleLanguage,
     /// Opens the window for saving a picture of the board.
     OpenExport,
     CloseExport,
@@ -933,10 +937,10 @@ fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: 
                     ui.add_space(4.0);
                     ui.strong(model.board);
                     if model.read_only {
-                        ui.weak("read-only");
+                        ui.weak(tr("read-only"));
                     }
                     ui.separator();
-                    ui.menu_button("File", |ui| {
+                    ui.menu_button(tr("File"), |ui| {
                         let items = [
                             ("New board", "Ctrl+N", Action::NewBoard),
                             ("Open…", "Ctrl+O", Action::Open),
@@ -951,7 +955,7 @@ fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: 
                             // Inserting changes the board.
                             let on = !model.read_only
                                 || !matches!(action, Action::InsertImage | Action::OpenDiagram);
-                            let button = Button::new(label).shortcut_text(shortcut);
+                            let button = Button::new(tr(label)).shortcut_text(shortcut);
                             if ui.add_enabled(on, button).clicked() {
                                 actions.push(action);
                                 ui.close();
@@ -959,21 +963,21 @@ fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: 
                         }
                         ui.separator();
                         if ui
-                            .add(Button::selectable(model.read_only, "Read-only"))
-                            .on_hover_text("Protect the board: only looking and commenting")
+                            .add(Button::selectable(model.read_only, tr("Read-only")))
+                            .on_hover_text(tr("Protect the board: only looking and commenting"))
                             .clicked()
                         {
                             actions.push(Action::ToggleReadOnly);
                             ui.close();
                         }
                     });
-                    ui.menu_button("Frames", |ui| {
+                    ui.menu_button(tr("Frames"), |ui| {
                         if model.frames.is_empty() {
-                            ui.weak("No frames yet: draw one with F");
+                            ui.weak(tr("No frames yet: draw one with F"));
                         }
                         for (id, title) in &model.frames {
                             let title = if title.trim().is_empty() {
-                                "Untitled frame"
+                                tr("Untitled frame")
                             } else {
                                 title
                             };
@@ -985,56 +989,58 @@ fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: 
                     });
                     let filter = model.filter;
                     let label = if filter.is_empty() {
-                        RichText::new("Filter")
+                        RichText::new(tr("Filter"))
                     } else {
-                        RichText::new("Filter ●").color(Color32::from_rgb(0x3B, 0x82, 0xF6))
+                        RichText::new(tr("Filter ●")).color(Color32::from_rgb(0x3B, 0x82, 0xF6))
                     };
                     ui.menu_button(label, |ui| filter_menu(ui, model, actions));
                     if ui
-                        .add_enabled(model.can_present, Button::new("Present"))
-                        .on_hover_text("Show the frames one by one (F5)")
-                        .on_disabled_hover_text("Add frames to present them")
+                        .add_enabled(model.can_present, Button::new(tr("Present")))
+                        .on_hover_text(tr("Show the frames one by one (F5)"))
+                        .on_disabled_hover_text(tr("Add frames to present them"))
                         .clicked()
                     {
                         actions.push(Action::Present);
                     }
-                    ui.menu_button("Talktracks", |ui| talktracks_menu(ui, model, actions));
-                    ui.menu_button("History", |ui| {
+                    ui.menu_button(tr("Talktracks"), |ui| talktracks_menu(ui, model, actions));
+                    ui.menu_button(tr("History"), |ui| {
                         history_menu(ui, model, version_name, actions)
                     });
-                    ui.menu_button("Vote", |ui| voting_menu(ui, model.voting, &mut *actions));
-                    ui.menu_button("Timer", |ui| {
+                    ui.menu_button(tr("Vote"), |ui| {
+                        voting_menu(ui, model.voting, &mut *actions)
+                    });
+                    ui.menu_button(tr("Timer"), |ui| {
                         for minutes in [1, 3, 5, 10, 15, 30] {
-                            if ui.button(format!("{minutes} min")).clicked() {
+                            if ui.button(trf("{} min", &[&minutes])).clicked() {
                                 actions.push(Action::StartTimer(minutes));
                                 ui.close();
                             }
                         }
                     });
                     if ui
-                        .add_enabled(!model.read_only, Button::new("Templates"))
-                        .on_hover_text("Start from a ready-made layout")
+                        .add_enabled(!model.read_only, Button::new(tr("Templates")))
+                        .on_hover_text(tr("Start from a ready-made layout"))
                         .clicked()
                     {
                         actions.push(Action::ToggleTemplates);
                     }
                     let open = model.threads.iter().filter(|(_, _, r)| !r).count();
                     let label = if open > 0 {
-                        format!("Comments ({open})")
+                        trf("Comments ({})", &[&open])
                     } else {
-                        "Comments".to_owned()
+                        tr("Comments").to_owned()
                     };
                     ui.menu_button(label, |ui| comments_menu(ui, model, actions));
                     if ui
-                        .button("Find")
-                        .on_hover_text("Find on the board (Ctrl+F)")
+                        .button(tr("Find"))
+                        .on_hover_text(tr("Find on the board (Ctrl+F)"))
                         .clicked()
                     {
                         actions.push(Action::OpenSearch);
                     }
                     if ui
                         .button("?")
-                        .on_hover_text("Keyboard shortcuts (F1)")
+                        .on_hover_text(tr("Keyboard shortcuts (F1)"))
                         .clicked()
                     {
                         actions.push(Action::ToggleShortcuts);
@@ -1206,7 +1212,7 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
             .show(ctx, |ui| {
                 panel().show(ui, |ui| {
                     for (set, kinds) in SHAPE_SETS {
-                        ui.weak(*set);
+                        ui.weak(tr(set));
                         egui::Grid::new(*set)
                             .spacing(Vec2::splat(2.0))
                             .show(ui, |ui| {
@@ -1418,8 +1424,8 @@ fn connector_controls(ui: &mut egui::Ui, c: &Connector, actions: &mut Vec<Action
         }
     };
     let start = ui
-        .selectable_label(c.start_cap == Cap::Arrow, "Start arrow")
-        .on_hover_text("Arrowhead at the start");
+        .selectable_label(c.start_cap == Cap::Arrow, tr("Start arrow"))
+        .on_hover_text(tr("Arrowhead at the start"));
     if start.clicked() {
         actions.push(Action::SetConnector(ConnectorChange {
             start_cap: Some(toggled(c.start_cap)),
@@ -1427,8 +1433,8 @@ fn connector_controls(ui: &mut egui::Ui, c: &Connector, actions: &mut Vec<Action
         }));
     }
     let end = ui
-        .selectable_label(c.end_cap == Cap::Arrow, "End arrow")
-        .on_hover_text("Arrowhead at the end");
+        .selectable_label(c.end_cap == Cap::Arrow, tr("End arrow"))
+        .on_hover_text(tr("Arrowhead at the end"));
     if end.clicked() {
         actions.push(Action::SetConnector(ConnectorChange {
             end_cap: Some(toggled(c.end_cap)),
@@ -1437,8 +1443,8 @@ fn connector_controls(ui: &mut egui::Ui, c: &Connector, actions: &mut Vec<Action
     }
     if !c.bends.is_empty()
         && ui
-            .button("Reset path")
-            .on_hover_text("Drop the bends set by hand")
+            .button(tr("Reset path"))
+            .on_hover_text(tr("Drop the bends set by hand"))
             .clicked()
     {
         actions.push(Action::ResetBends);
@@ -1457,36 +1463,44 @@ fn view_controls(ctx: &Context, model: &Model, actions: &mut Vec<Action>) -> Rec
             panel().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if ui
-                        .button(model.grid.name())
-                        .on_hover_text("Grid style (G)")
+                        .button(tr(model.grid.name()))
+                        .on_hover_text(tr("Grid style (G)"))
                         .clicked()
                     {
                         actions.push(Action::NextGrid);
                     }
                     if ui
-                        .selectable_label(model.snap, "Snap to grid")
-                        .on_hover_text("Shift+G")
+                        .selectable_label(model.snap, tr("Snap to grid"))
+                        .on_hover_text(tr("Shift+G"))
                         .clicked()
                     {
                         actions.push(Action::ToggleSnap);
                     }
+                    let lang = crate::i18n::lang().code().to_uppercase();
                     if ui
-                        .selectable_label(model.dark, "Dark")
-                        .on_hover_text("Dark theme")
+                        .button(lang)
+                        .on_hover_text(tr("Language: English / Russian"))
+                        .clicked()
+                    {
+                        actions.push(Action::ToggleLanguage);
+                    }
+                    if ui
+                        .selectable_label(model.dark, tr("Dark"))
+                        .on_hover_text(tr("Dark theme"))
                         .clicked()
                     {
                         actions.push(Action::ToggleTheme);
                     }
                     if ui
-                        .selectable_label(model.minimap.is_some(), "Map")
-                        .on_hover_text("Minimap")
+                        .selectable_label(model.minimap.is_some(), tr("Map"))
+                        .on_hover_text(tr("Minimap"))
                         .clicked()
                     {
                         actions.push(Action::ToggleMinimap);
                     }
                     if ui
-                        .selectable_label(model.layers.is_some(), "Layers")
-                        .on_hover_text("Layers of the board")
+                        .selectable_label(model.layers.is_some(), tr("Layers"))
+                        .on_hover_text(tr("Layers of the board"))
                         .clicked()
                     {
                         actions.push(Action::ToggleLayers);
@@ -1494,25 +1508,33 @@ fn view_controls(ctx: &Context, model: &Model, actions: &mut Vec<Action>) -> Rec
                     let (hidden, shown) = model.hidden;
                     if (hidden > 0 || shown)
                         && ui
-                            .selectable_label(shown, format!("Hidden ({hidden})"))
-                            .on_hover_text("Show hidden objects faded, to pick and show them")
+                            .selectable_label(shown, trf("Hidden ({})", &[&hidden]))
+                            .on_hover_text(tr("Show hidden objects faded, to pick and show them"))
                             .clicked()
                     {
                         actions.push(Action::ShowHidden);
                     }
                     ui.separator();
-                    if ui.button("−").on_hover_text("Zoom out (Ctrl+−)").clicked() {
+                    if ui
+                        .button("−")
+                        .on_hover_text(tr("Zoom out (Ctrl+−)"))
+                        .clicked()
+                    {
                         actions.push(Action::ZoomOut);
                     }
                     let zoom = format!("{:.0}%", model.zoom * 100.0);
                     if ui
                         .button(zoom)
-                        .on_hover_text("Reset zoom (Ctrl+0)")
+                        .on_hover_text(tr("Reset zoom (Ctrl+0)"))
                         .clicked()
                     {
                         actions.push(Action::ZoomReset);
                     }
-                    if ui.button("+").on_hover_text("Zoom in (Ctrl+=)").clicked() {
+                    if ui
+                        .button("+")
+                        .on_hover_text(tr("Zoom in (Ctrl+=)"))
+                        .clicked()
+                    {
                         actions.push(Action::ZoomIn);
                     }
                 });
@@ -1633,13 +1655,13 @@ fn selection_toolbar(
             panel().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if selection.read_only {
-                        if ui.button("Copy").on_hover_text("Ctrl+C").clicked() {
+                        if ui.button(tr("Copy")).on_hover_text(tr("Ctrl+C")).clicked() {
                             actions.push(Action::Copy);
                         }
                         return;
                     }
                     if selection.locked {
-                        if ui.button("Unlock").on_hover_text("Ctrl+Shift+L").clicked() {
+                        if ui.button(tr("Unlock")).on_hover_text(tr("Ctrl+Shift+L")).clicked() {
                             actions.push(Action::ToggleLock);
                         }
                         return;
@@ -1655,23 +1677,23 @@ fn selection_toolbar(
                         toggle(popup, Popup::Stroke, stroke.clicked());
                     }
                     if let Some(text) = selection.shape_text {
-                        let label = RichText::new("Aa").color(to_color32(text.color)).strong();
-                        let button = ui.button(label).on_hover_text("Text color, size and alignment");
+                        let label = RichText::new(tr("Aa")).color(to_color32(text.color)).strong();
+                        let button = ui.button(label).on_hover_text(tr("Text color, size and alignment"));
                         toggle(popup, Popup::Text, button.clicked());
                     }
                     if let Some(busy) = selection.handwriting {
                         ui.add_enabled_ui(!busy, |ui| {
-                            let label = if busy { "Recognizing…" } else { "To text" };
+                            let label = if busy { tr("Recognizing…") } else { tr("To text") };
                             if ui
                                 .button(label)
-                                .on_hover_text("Turn the handwriting into typed text")
+                                .on_hover_text(tr("Turn the handwriting into typed text"))
                                 .clicked()
                             {
                                 actions.push(Action::ToText);
                             }
                             if ui
-                                .button("Calculate")
-                                .on_hover_text("Solve a written expression such as 12 + 7 =")
+                                .button(tr("Calculate"))
+                                .on_hover_text(tr("Solve a written expression such as 12 + 7 ="))
                                 .clicked()
                             {
                                 actions.push(Action::Calculate);
@@ -1717,8 +1739,8 @@ fn selection_toolbar(
                         };
                         for (label, tip, action, enabled) in buttons {
                             if ui
-                                .add_enabled(enabled, Button::new(label))
-                                .on_hover_text(tip)
+                                .add_enabled(enabled, Button::new(tr(label)))
+                                .on_hover_text(tr(tip))
                                 .clicked()
                             {
                                 actions.push(action);
@@ -1727,19 +1749,19 @@ fn selection_toolbar(
                         ui.separator();
                     }
                     if let Some((children, collapsed)) = selection.mind_node {
-                        if ui.button("+ Child").on_hover_text("Add a subtopic (Tab)").clicked() {
+                        if ui.button(tr("+ Child")).on_hover_text(tr("Add a subtopic (Tab)")).clicked() {
                             actions.push(Action::AddNode(true));
                         }
-                        if ui.button("+ Sibling").on_hover_text("Add a topic after this one (Enter)").clicked() {
+                        if ui.button(tr("+ Sibling")).on_hover_text(tr("Add a topic after this one (Enter)")).clicked() {
                             actions.push(Action::AddNode(false));
                         }
                         if children {
-                            let label = if collapsed { "Expand" } else { "Collapse" };
-                            if ui.button(label).on_hover_text("Show or hide the subtopics").clicked() {
+                            let label = if collapsed { tr("Expand") } else { tr("Collapse") };
+                            if ui.button(label).on_hover_text(tr("Show or hide the subtopics")).clicked() {
                                 actions.push(Action::ToggleNode);
                             }
                         }
-                        if ui.button("Delete topic").on_hover_text("Delete it with its subtopics (Delete)").clicked() {
+                        if ui.button(tr("Delete topic")).on_hover_text(tr("Delete it with its subtopics (Delete)")).clicked() {
                             actions.push(Action::DeleteNode);
                         }
                         ui.separator();
@@ -1754,8 +1776,8 @@ fn selection_toolbar(
                         }
                         for (label, tip, action, enabled) in buttons {
                             if ui
-                                .add_enabled(enabled, Button::new(label))
-                                .on_hover_text(tip)
+                                .add_enabled(enabled, Button::new(tr(label)))
+                                .on_hover_text(tr(tip))
                                 .clicked()
                             {
                                 actions.push(action);
@@ -1765,51 +1787,51 @@ fn selection_toolbar(
                     }
                     if selection.is_embed
                         && ui
-                            .button("Update preview")
-                            .on_hover_text("Fetch the page's title and description again")
+                            .button(tr("Update preview"))
+                            .on_hover_text(tr("Fetch the page's title and description again"))
                             .clicked()
                     {
                         actions.push(Action::FetchPreview);
                     }
                     if selection.can_crop
                         && ui
-                            .button("Crop")
-                            .on_hover_text("Double click or Enter; Enter or a click outside to finish, Esc to cancel")
+                            .button(tr("Crop"))
+                            .on_hover_text(tr("Double click or Enter; Enter or a click outside to finish, Esc to cancel"))
                             .clicked()
                     {
                         actions.push(Action::Crop);
                     }
                     if selection.link.is_some() {
-                        let link = ui.button("Link").on_hover_text("Link to a page or another object");
+                        let link = ui.button(tr("Link")).on_hover_text(tr("Link to a page or another object"));
                         toggle(popup, Popup::Link, link.clicked());
                     }
                     if selection.my_reactions.is_some() {
-                        let react = ui.button("React").on_hover_text("Add a reaction");
+                        let react = ui.button(tr("React")).on_hover_text(tr("Add a reaction"));
                         toggle(popup, Popup::React, react.clicked());
                     }
-                    let tags = ui.button("Tags").on_hover_text("Tags on the selection");
+                    let tags = ui.button(tr("Tags")).on_hover_text(tr("Tags on the selection"));
                     toggle(popup, Popup::Tags, tags.clicked());
                     let opacity = format!("{:.0}%", style.opacity * 100.0);
-                    let opacity = ui.button(opacity).on_hover_text("Opacity");
+                    let opacity = ui.button(opacity).on_hover_text(tr("Opacity"));
                     toggle(popup, Popup::Opacity, opacity.clicked());
                     ui.separator();
                     if selection.several {
-                        let arrange = ui.button("Arrange").on_hover_text("Lay out in a grid or in groups");
+                        let arrange = ui.button(tr("Arrange")).on_hover_text(tr("Lay out in a grid or in groups"));
                         toggle(popup, Popup::Arrange, arrange.clicked());
                     }
-                    if selection.several && ui.button("Group").on_hover_text("Ctrl+G").clicked() {
+                    if selection.several && ui.button(tr("Group")).on_hover_text(tr("Ctrl+G")).clicked() {
                         actions.push(Action::Group);
                     }
                     if selection.has_group
-                        && ui.button("Ungroup").on_hover_text("Ctrl+Shift+G").clicked()
+                        && ui.button(tr("Ungroup")).on_hover_text(tr("Ctrl+Shift+G")).clicked()
                     {
                         actions.push(Action::Ungroup);
                     }
-                    if ui.button("Lock").on_hover_text("Ctrl+Shift+L").clicked() {
+                    if ui.button(tr("Lock")).on_hover_text(tr("Ctrl+Shift+L")).clicked() {
                         actions.push(Action::ToggleLock);
                     }
                     if !selection.layers.is_empty() {
-                        ui.menu_button("Layer", |ui| {
+                        ui.menu_button(tr("Layer"), |ui| {
                             for (id, name) in &selection.layers {
                                 let here = selection.layer.as_ref() == Some(id);
                                 if ui.add(Button::selectable(here, name)).clicked() {
@@ -1819,24 +1841,24 @@ fn selection_toolbar(
                             }
                         })
                         .response
-                        .on_hover_text("Move to another layer");
+                        .on_hover_text(tr("Move to another layer"));
                     }
-                    let hide = if selection.hidden { "Show" } else { "Hide" };
-                    if ui.button(hide).on_hover_text("Ctrl+Shift+H").clicked() {
+                    let hide = if selection.hidden { tr("Show") } else { tr("Hide") };
+                    if ui.button(hide).on_hover_text(tr("Ctrl+Shift+H")).clicked() {
                         actions.push(Action::ToggleHidden);
                     }
                     ui.separator();
-                    if ui.button("Front").on_hover_text("Ctrl+Shift+]").clicked() {
+                    if ui.button(tr("Front")).on_hover_text(tr("Ctrl+Shift+]")).clicked() {
                         actions.push(Action::Reorder(ZOrder::Front));
                     }
-                    if ui.button("Back").on_hover_text("Ctrl+Shift+[").clicked() {
+                    if ui.button(tr("Back")).on_hover_text(tr("Ctrl+Shift+[")).clicked() {
                         actions.push(Action::Reorder(ZOrder::Back));
                     }
                     ui.separator();
-                    if ui.button("Duplicate").on_hover_text("Ctrl+D").clicked() {
+                    if ui.button(tr("Duplicate")).on_hover_text(tr("Ctrl+D")).clicked() {
                         actions.push(Action::Duplicate);
                     }
-                    if ui.button("Delete").on_hover_text("Delete").clicked() {
+                    if ui.button(tr("Delete")).on_hover_text(tr("Delete")).clicked() {
                         actions.push(Action::Delete);
                     }
                 });
@@ -1898,8 +1920,8 @@ fn selection_toolbar(
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         let auto = ui
-                            .selectable_label(text.auto, "Auto")
-                            .on_hover_text("As large as fits the shape");
+                            .selectable_label(text.auto, tr("Auto"))
+                            .on_hover_text(tr("As large as fits the shape"));
                         if auto.clicked() && !text.auto {
                             actions.push(Action::SetStyle(StyleChange {
                                 font_size: Some(None),
@@ -1910,9 +1932,9 @@ fn selection_toolbar(
                         let slider = Slider::new(&mut size, FONT_SIZES)
                             .logarithmic(true)
                             .fixed_decimals(0);
-                        let response = ui
-                            .add(slider)
-                            .on_hover_text("Font size; text that does not fit the shape shrinks");
+                        let response = ui.add(slider).on_hover_text(tr(
+                            "Font size; text that does not fit the shape shrinks",
+                        ));
                         style_drag(&response, actions, || StyleChange {
                             font_size: Some(Some(size.round())),
                             ..StyleChange::default()
@@ -1924,7 +1946,7 @@ fn selection_toolbar(
                             (HAlign::Center, "Center"),
                             (HAlign::Right, "Right"),
                         ] {
-                            if ui.selectable_label(text.align == align, name).clicked() {
+                            if ui.selectable_label(text.align == align, tr(name)).clicked() {
                                 actions.push(Action::SetStyle(StyleChange {
                                     text_align: Some(align),
                                     ..StyleChange::default()
@@ -1937,7 +1959,10 @@ fn selection_toolbar(
                             (VAlign::Middle, "Middle"),
                             (VAlign::Bottom, "Bottom"),
                         ] {
-                            if ui.selectable_label(text.valign == valign, name).clicked() {
+                            if ui
+                                .selectable_label(text.valign == valign, tr(name))
+                                .clicked()
+                            {
                                 actions.push(Action::SetStyle(StyleChange {
                                     text_valign: Some(valign),
                                     ..StyleChange::default()
@@ -1953,10 +1978,10 @@ fn selection_toolbar(
                     if let Some(current) = &link.current {
                         ui.horizontal(|ui| {
                             ui.label(format!("→ {current}"));
-                            if ui.button("Open").clicked() {
+                            if ui.button(tr("Open")).clicked() {
                                 actions.push(Action::FollowLink);
                             }
-                            if ui.button("Remove").clicked() {
+                            if ui.button(tr("Remove")).clicked() {
                                 actions.push(Action::RemoveLink);
                             }
                         });
@@ -1965,22 +1990,22 @@ fn selection_toolbar(
                     ui.horizontal(|ui| {
                         let field = ui.add(
                             egui::TextEdit::singleline(link_text)
-                                .hint_text("Web address or copied object link")
+                                .hint_text(tr("Web address or copied object link"))
                                 .desired_width(220.0),
                         );
                         let valid = pb_core::Link::from_input(link_text).is_some();
                         let entered =
                             field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        let set = ui.add_enabled(valid, Button::new("Set"));
+                        let set = ui.add_enabled(valid, Button::new(tr("Set")));
                         if valid && (entered || set.clicked()) {
                             actions.push(Action::SetLink(std::mem::take(link_text)));
                         }
                     });
                     if !link.frames.is_empty() {
-                        ui.weak("Link to a frame:");
+                        ui.weak(tr("Link to a frame:"));
                         for (id, title) in &link.frames {
                             let title = if title.trim().is_empty() {
-                                "Untitled frame"
+                                tr("Untitled frame")
                             } else {
                                 title
                             };
@@ -1991,23 +2016,23 @@ fn selection_toolbar(
                     }
                     ui.horizontal(|ui| {
                         let label = if link.picking {
-                            "Click an object…"
+                            tr("Click an object…")
                         } else {
-                            "Pick on board"
+                            tr("Pick on board")
                         };
                         if ui
                             .add_enabled(!link.picking, Button::new(label))
-                            .on_hover_text("Then click the object to link to; Esc cancels")
+                            .on_hover_text(tr("Then click the object to link to; Esc cancels"))
                             .clicked()
                         {
                             actions.push(Action::PickLinkTarget);
                             *popup = None;
                         }
                         if ui
-                            .button("Copy link")
-                            .on_hover_text(
+                            .button(tr("Copy link"))
+                            .on_hover_text(tr(
                                 "Copy a link to this object, to paste into another one's Link",
-                            )
+                            ))
                             .clicked()
                         {
                             actions.push(Action::CopyAnchor);
@@ -2030,7 +2055,7 @@ fn selection_toolbar(
                     ];
                     ui.horizontal(|ui| {
                         for (label, tip, by) in choices {
-                            if ui.button(label).on_hover_text(tip).clicked() {
+                            if ui.button(tr(label)).on_hover_text(tr(tip)).clicked() {
                                 actions.push(Action::Arrange(by));
                             }
                         }
@@ -2074,12 +2099,13 @@ fn selection_toolbar(
                     ui.horizontal(|ui| {
                         let field = ui.add(
                             egui::TextEdit::singleline(new_tag)
-                                .hint_text("New tag")
+                                .hint_text(tr("New tag"))
                                 .desired_width(140.0),
                         );
                         let entered =
                             field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        let add = ui.add_enabled(!new_tag.trim().is_empty(), Button::new("Add"));
+                        let add =
+                            ui.add_enabled(!new_tag.trim().is_empty(), Button::new(tr("Add")));
                         if (entered || add.clicked()) && !new_tag.trim().is_empty() {
                             actions.push(Action::NewTag(new_tag.trim().to_owned()));
                             new_tag.clear();
@@ -2114,14 +2140,17 @@ fn context_menu(ctx: &Context, info: ContextMenuInfo, actions: &mut Vec<Action>)
         .show(ctx, |ui| {
             panel().show(ui, |ui| {
                 ui.set_min_width(180.0);
-                let mut item =
-                    |ui: &mut egui::Ui, label: &str, keys: &str, action: Action, on: bool| {
-                        let button = Button::new(label).shortcut_text(keys).frame(false);
-                        if ui.add_enabled(on, button).clicked() {
-                            actions.push(action);
-                            actions.push(Action::CloseContextMenu);
-                        }
-                    };
+                let mut item = |ui: &mut egui::Ui,
+                                label: &'static str,
+                                keys: &str,
+                                action: Action,
+                                on: bool| {
+                    let button = Button::new(tr(label)).shortcut_text(keys).frame(false);
+                    if ui.add_enabled(on, button).clicked() {
+                        actions.push(action);
+                        actions.push(Action::CloseContextMenu);
+                    }
+                };
                 if info.read_only {
                     if info.selection {
                         item(ui, "Copy", "Ctrl+C", Action::Copy, true);
@@ -2207,7 +2236,7 @@ fn context_menu(ctx: &Context, info: ContextMenuInfo, actions: &mut Vec<Action>)
 /// The board's comment threads, and whether resolved ones show.
 fn comments_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
     if model.threads.is_empty() {
-        ui.weak("No comments yet: use the comment tool (C)");
+        ui.weak(tr("No comments yet: use the comment tool (C)"));
     }
     for (id, line, resolved) in &model.threads {
         if *resolved && !model.show_resolved {
@@ -2247,13 +2276,17 @@ fn thread_panel(ctx: &Context, thread: &ThreadView, text: &mut String, actions: 
                         "Comments"
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("×").on_hover_text("Close (Esc)").clicked() {
+                        if ui
+                            .small_button("×")
+                            .on_hover_text(tr("Close (Esc)"))
+                            .clicked()
+                        {
                             actions.push(Action::CloseThread);
                         }
                         if !thread.is_new {
                             if ui
-                                .small_button("Delete")
-                                .on_hover_text("Delete the thread")
+                                .small_button(tr("Delete"))
+                                .on_hover_text(tr("Delete the thread"))
                                 .clicked()
                             {
                                 actions.push(Action::DeleteThread);
@@ -2266,7 +2299,7 @@ fn thread_panel(ctx: &Context, thread: &ThreadView, text: &mut String, actions: 
                                     "Mark it done; it hides unless resolved ones show",
                                 )
                             };
-                            if ui.small_button(label).on_hover_text(tip).clicked() {
+                            if ui.small_button(tr(label)).on_hover_text(tr(tip)).clicked() {
                                 actions.push(Action::ResolveThread(!thread.resolved));
                             }
                         }
@@ -2284,7 +2317,7 @@ fn thread_panel(ctx: &Context, thread: &ThreadView, text: &mut String, actions: 
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            if ui.small_button("Delete").clicked() {
+                                            if ui.small_button(tr("Delete")).clicked() {
                                                 actions.push(Action::DeleteComment(
                                                     comment.id.clone(),
                                                 ));
@@ -2299,7 +2332,7 @@ fn thread_panel(ctx: &Context, thread: &ThreadView, text: &mut String, actions: 
                 ui.separator();
                 let field = ui.add(
                     egui::TextEdit::multiline(text)
-                        .hint_text("Write a comment… @name mentions someone")
+                        .hint_text(tr("Write a comment… @name mentions someone"))
                         .desired_rows(2)
                         .desired_width(f32::INFINITY),
                 );
@@ -2313,10 +2346,14 @@ fn thread_panel(ctx: &Context, thread: &ThreadView, text: &mut String, actions: 
                 let send = field.has_focus()
                     && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
                 ui.horizontal(|ui| {
-                    let label = if thread.is_new { "Comment" } else { "Reply" };
+                    let label = if thread.is_new {
+                        tr("Post")
+                    } else {
+                        tr("Reply")
+                    };
                     let button = ui
                         .add_enabled(!text.trim().is_empty(), Button::new(label))
-                        .on_hover_text("Ctrl+Enter");
+                        .on_hover_text(tr("Ctrl+Enter"));
                     if (button.clicked() || send) && !text.trim().is_empty() {
                         actions.push(Action::PostComment(std::mem::take(text)));
                     }
@@ -2348,7 +2385,7 @@ const TIMER_DROP: f32 = 52.0;
 /// Starting, ending and clearing votes.
 fn voting_menu(ui: &mut egui::Ui, voting: Option<VotingView>, actions: &mut Vec<Action>) {
     let start = |ui: &mut egui::Ui, actions: &mut Vec<Action>| {
-        ui.weak("Votes per person:");
+        ui.weak(tr("Votes per person:"));
         ui.horizontal(|ui| {
             for limit in [3, 5, 10] {
                 if ui.button(limit.to_string()).clicked() {
@@ -2361,18 +2398,18 @@ fn voting_menu(ui: &mut egui::Ui, voting: Option<VotingView>, actions: &mut Vec<
     match voting {
         None => start(ui, actions),
         Some(v) if v.open => {
-            ui.label(format!("{} of {} votes left", v.left, v.limit));
-            if ui.button("End voting").clicked() {
+            ui.label(trf("{} of {} votes left", &[&v.left, &v.limit]));
+            if ui.button(tr("End voting")).clicked() {
                 actions.push(Action::EndVoting);
                 ui.close();
             }
         }
         Some(_) => {
-            if ui.button("Results").clicked() {
+            if ui.button(tr("Results")).clicked() {
                 actions.push(Action::ToggleResults);
                 ui.close();
             }
-            if ui.button("Clear votes").clicked() {
+            if ui.button(tr("Clear votes")).clicked() {
                 actions.push(Action::ClearVotes);
                 ui.close();
             }
@@ -2393,12 +2430,12 @@ fn voting_banner(ctx: &Context, voting: VotingView, actions: &mut Vec<Action>) {
         .show(ctx, |ui| {
             panel().show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.strong("Voting");
-                    ui.label(format!(
+                    ui.strong(tr("Voting"));
+                    ui.label(trf(
                         "{} of {} votes left · click an object to vote, Shift+click to take one back",
-                        voting.left, voting.limit
+                        &[&voting.left, &voting.limit],
                     ));
-                    if ui.button("End voting").clicked() {
+                    if ui.button(tr("End voting")).clicked() {
                         actions.push(Action::EndVoting);
                     }
                 });
@@ -2409,7 +2446,7 @@ fn voting_banner(ctx: &Context, voting: VotingView, actions: &mut Vec<Action>) {
 /// The voting results: objects by votes, each going to its object.
 fn results_window(ctx: &Context, results: &[(ObjectId, u32, String)], actions: &mut Vec<Action>) {
     let mut open = true;
-    let shown = egui::Window::new("Voting results")
+    let shown = egui::Window::new(tr("Voting results"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
@@ -2417,7 +2454,7 @@ fn results_window(ctx: &Context, results: &[(ObjectId, u32, String)], actions: &
         .anchor(Align2::RIGHT_TOP, egui::vec2(-MARGIN, 64.0))
         .show(ctx, |ui| {
             if results.is_empty() {
-                ui.weak("No votes yet");
+                ui.weak(tr("No votes yet"));
             }
             egui::ScrollArea::vertical()
                 .max_height(360.0)
@@ -2468,26 +2505,30 @@ fn timer_pill(ctx: &Context, timer: &TimerView, actions: &mut Vec<Action>) {
                 ui.horizontal(|ui| {
                     let (text, color) = if timer.done {
                         let color = if timer.flash { Color32::WHITE } else { alert };
-                        ("Time's up".to_owned(), color)
+                        (tr("Time's up").to_owned(), color)
                     } else {
                         (timer.text.clone(), ui.visuals().strong_text_color())
                     };
                     ui.label(RichText::new(text).size(20.0).color(color).strong());
                     if !timer.done {
-                        let label = if timer.running { "Pause" } else { "Resume" };
-                        let tip = if timer.running {
-                            "Stop the clock"
+                        let label = if timer.running {
+                            tr("Pause")
                         } else {
-                            "Run the clock on"
+                            tr("Resume")
+                        };
+                        let tip = if timer.running {
+                            tr("Stop the clock")
+                        } else {
+                            tr("Run the clock on")
                         };
                         if ui.button(label).on_hover_text(tip).clicked() {
                             actions.push(Action::PauseTimer);
                         }
                     }
-                    if ui.button("↺").on_hover_text("Start over").clicked() {
+                    if ui.button("↺").on_hover_text(tr("Start over")).clicked() {
                         actions.push(Action::ResetTimer);
                     }
-                    if ui.button("×").on_hover_text("Close").clicked() {
+                    if ui.button("×").on_hover_text(tr("Close")).clicked() {
                         actions.push(Action::CloseTimer);
                     }
                 });
@@ -2514,11 +2555,11 @@ fn layers_panel(
             panel().show(ui, |ui| {
                 ui.set_width(250.0);
                 ui.horizontal(|ui| {
-                    ui.strong("Layers");
+                    ui.strong(tr("Layers"));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .button("+ Add")
-                            .on_hover_text("New layer on top")
+                            .button(tr("+ Add"))
+                            .on_hover_text(tr("New layer on top"))
                             .clicked()
                         {
                             actions.push(Action::AddLayer);
@@ -2534,7 +2575,7 @@ fn layers_panel(
                             let mut visible = layer.visible;
                             if ui
                                 .checkbox(&mut visible, "")
-                                .on_hover_text("Visible")
+                                .on_hover_text(tr("Visible"))
                                 .changed()
                             {
                                 actions.push(Action::UpdateLayer(pb_core::Layer {
@@ -2568,10 +2609,7 @@ fn layers_panel(
                                             )
                                             .min_size(Vec2::new(110.0, 0.0)),
                                         )
-                                        .on_hover_text(
-                                            "New objects go to the selected layer; \
-                                             double click to rename",
-                                        );
+                                        .on_hover_text(tr("New objects go to the selected layer; double click to rename"));
                                     if label.double_clicked() {
                                         *renaming =
                                             Some((layer.id.clone(), layer.name.to_string()));
@@ -2581,8 +2619,8 @@ fn layers_panel(
                                 }
                             }
                             if ui
-                                .selectable_label(layer.locked, "Lock")
-                                .on_hover_text("Nothing on a locked layer can be changed")
+                                .selectable_label(layer.locked, tr("Lock"))
+                                .on_hover_text(tr("Nothing on a locked layer can be changed"))
                                 .clicked()
                             {
                                 actions.push(Action::UpdateLayer(pb_core::Layer {
@@ -2601,7 +2639,7 @@ fn layers_panel(
                             });
                             let remove = ui
                                 .add_enabled(!layer.is_base(), Button::new("×"))
-                                .on_hover_text("Remove the layer and everything on it");
+                                .on_hover_text(tr("Remove the layer and everything on it"));
                             if remove.clicked() {
                                 actions.push(Action::RemoveLayer(layer.id.clone()));
                             }
@@ -2620,10 +2658,10 @@ fn clock(seconds: f64) -> String {
 
 /// Recording a talktrack, and the board's talktracks to play or remove.
 fn talktracks_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
-    let record = Button::new("● Record talktrack");
+    let record = Button::new(tr("● Record talktrack"));
     if ui
         .add_enabled(model.recording.is_none(), record)
-        .on_hover_text("Record your voice while you move around the board")
+        .on_hover_text(tr("Record your voice while you move around the board"))
         .clicked()
     {
         actions.push(Action::StartRecording);
@@ -2639,7 +2677,7 @@ fn talktracks_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) 
                 actions.push(Action::PlayTalktrack(id.clone()));
                 ui.close();
             }
-            if ui.small_button("×").on_hover_text("Remove").clicked() {
+            if ui.small_button("×").on_hover_text(tr("Remove")).clicked() {
                 actions.push(Action::RemoveTalktrack(id.clone()));
             }
         });
@@ -2651,13 +2689,13 @@ fn history_menu(ui: &mut egui::Ui, model: &Model, name: &mut String, actions: &m
     ui.horizontal(|ui| {
         let field = ui.add(
             egui::TextEdit::singleline(name)
-                .hint_text("Version name")
+                .hint_text(tr("Version name"))
                 .desired_width(170.0),
         );
         let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         if ui
-            .button("Save version")
-            .on_hover_text("Remember the board as it is now")
+            .button(tr("Save version"))
+            .on_hover_text(tr("Remember the board as it is now"))
             .clicked()
             || entered
         {
@@ -2667,7 +2705,7 @@ fn history_menu(ui: &mut egui::Ui, model: &Model, name: &mut String, actions: &m
     });
     ui.separator();
     if model.versions.is_empty() {
-        ui.weak("No saved versions yet");
+        ui.weak(tr("No saved versions yet"));
     }
     egui::ScrollArea::vertical()
         .max_height(320.0)
@@ -2675,7 +2713,10 @@ fn history_menu(ui: &mut egui::Ui, model: &Model, name: &mut String, actions: &m
             for version in &model.versions {
                 ui.horizontal(|ui| {
                     let label = format!("{}  ·  {}", version.name, version.when);
-                    let hint = format!("Saved by {}. Look at the board as it was", version.author);
+                    let hint = trf(
+                        "Saved by {}. Look at the board as it was",
+                        &[&version.author],
+                    );
                     if ui
                         .add(Button::new(label).frame(false))
                         .on_hover_text(hint)
@@ -2686,7 +2727,7 @@ fn history_menu(ui: &mut egui::Ui, model: &Model, name: &mut String, actions: &m
                     }
                     if ui
                         .small_button("×")
-                        .on_hover_text("Forget this version")
+                        .on_hover_text(tr("Forget this version"))
                         .clicked()
                     {
                         actions.push(Action::RemoveVersion(version.id.clone()));
@@ -2707,22 +2748,24 @@ fn version_bar(ctx: &Context, version: &VersionBanner, read_only: bool, actions:
             panel().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.strong(&version.name);
-                    ui.label(format!("saved {} by {}", version.when, version.author));
+                    ui.label(trf("saved {} by {}", &[&version.when, &version.author]));
                     ui.separator();
                     ui.weak(&version.summary)
-                        .on_hover_text("Changed and removed objects are outlined");
+                        .on_hover_text(tr("Changed and removed objects are outlined"));
                     ui.separator();
                     if ui
-                        .add_enabled(!read_only, Button::new("Restore"))
-                        .on_hover_text("Bring the board back to this version (Ctrl+Z undoes it)")
-                        .on_disabled_hover_text("The board is read-only")
+                        .add_enabled(!read_only, Button::new(tr("Restore")))
+                        .on_hover_text(tr(
+                            "Bring the board back to this version (Ctrl+Z undoes it)",
+                        ))
+                        .on_disabled_hover_text(tr("The board is read-only"))
                         .clicked()
                     {
                         actions.push(Action::RestoreVersion);
                     }
                     if ui
-                        .button("Close")
-                        .on_hover_text("Back to the board (Esc)")
+                        .button(tr("Close"))
+                        .on_hover_text(tr("Back to the board (Esc)"))
                         .clicked()
                     {
                         actions.push(Action::CloseVersion);
@@ -2746,16 +2789,20 @@ fn recording_pill(ctx: &Context, seconds: u64, sound: bool, actions: &mut Vec<Ac
                     ui.label(RichText::new("●").color(red).size(16.0));
                     ui.strong(clock(seconds as f64));
                     if !sound {
-                        ui.weak("no microphone");
+                        ui.weak(tr("no microphone"));
                     }
                     if ui
-                        .button("Stop")
-                        .on_hover_text("Keep the talktrack")
+                        .button(tr("Stop"))
+                        .on_hover_text(tr("Keep the talktrack"))
                         .clicked()
                     {
                         actions.push(Action::StopRecording);
                     }
-                    if ui.button("Cancel").on_hover_text("Throw it away").clicked() {
+                    if ui
+                        .button(tr("Cancel"))
+                        .on_hover_text(tr("Throw it away"))
+                        .clicked()
+                    {
                         actions.push(Action::CancelRecording);
                     }
                 });
@@ -2773,8 +2820,8 @@ fn playback_bar(ctx: &Context, view: &PlaybackView, actions: &mut Vec<Action>) {
         .show(ctx, |ui| {
             panel().show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let play = if view.paused { "Play" } else { "Pause" };
-                    if ui.button(play).on_hover_text("Space").clicked() {
+                    let play = if view.paused { tr("Play") } else { tr("Pause") };
+                    if ui.button(play).on_hover_text(tr("Space")).clicked() {
                         actions.push(Action::TogglePlayback);
                     }
                     let mut at = view.position;
@@ -2786,7 +2833,7 @@ fn playback_bar(ctx: &Context, view: &PlaybackView, actions: &mut Vec<Action>) {
                     ui.label(format!("{} / {}", clock(view.position), clock(view.length)));
                     ui.separator();
                     ui.label(&view.title);
-                    if ui.button("Exit").on_hover_text("Esc").clicked() {
+                    if ui.button(tr("Exit")).on_hover_text(tr("Esc")).clicked() {
                         actions.push(Action::StopPlayback);
                     }
                 });
@@ -2803,10 +2850,14 @@ fn focus_bar(ctx: &Context, actions: &mut Vec<Action>) {
             panel().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.add_space(4.0);
-                    ui.strong("Focus mode");
-                    ui.weak("the rest of the board is out of reach");
+                    ui.strong(tr("Focus mode"));
+                    ui.weak(tr("the rest of the board is out of reach"));
                     ui.separator();
-                    if ui.button("Exit").on_hover_text("Esc, Shift+F").clicked() {
+                    if ui
+                        .button(tr("Exit"))
+                        .on_hover_text(tr("Esc, Shift+F"))
+                        .clicked()
+                    {
                         actions.push(Action::ToggleFocus);
                     }
                 });
@@ -2833,33 +2884,33 @@ fn presentation_bar(
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(index > 0, Button::new("◀"))
-                        .on_hover_text("Previous (←)")
+                        .on_hover_text(tr("Previous (←)"))
                         .clicked()
                     {
                         actions.push(Action::PresentStep(-1));
                     }
                     let title = if title.trim().is_empty() {
-                        "Untitled frame"
+                        tr("Untitled frame")
                     } else {
                         title
                     };
                     ui.label(format!("{title}  ·  {} / {count}", index + 1));
                     if ui
                         .add_enabled(index + 1 < count, Button::new("▶"))
-                        .on_hover_text("Next (→, Space)")
+                        .on_hover_text(tr("Next (→, Space)"))
                         .clicked()
                     {
                         actions.push(Action::PresentStep(1));
                     }
                     ui.separator();
                     if ui
-                        .selectable_label(laser, "Laser")
-                        .on_hover_text("Point with a red dot (L)")
+                        .selectable_label(laser, tr("Laser"))
+                        .on_hover_text(tr("Point with a red dot (L)"))
                         .clicked()
                     {
                         actions.push(Action::ToggleLaser);
                     }
-                    if ui.button("Exit").on_hover_text("Esc").clicked() {
+                    if ui.button(tr("Exit")).on_hover_text(tr("Esc")).clicked() {
                         actions.push(Action::StopPresenting);
                     }
                 });
@@ -2870,7 +2921,7 @@ fn presentation_bar(
 /// The template gallery: a card per template.
 fn templates_window(ctx: &Context, actions: &mut Vec<Action>) {
     let mut open = true;
-    let shown = egui::Window::new("Templates")
+    let shown = egui::Window::new(tr("Templates"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
@@ -2889,12 +2940,16 @@ fn templates_window(ctx: &Context, actions: &mut Vec<Action>) {
                                 let small = egui::TextStyle::Small.resolve(ui.style());
                                 let ink = ui.visuals().strong_text_color();
                                 let weak = ui.visuals().weak_text_color();
-                                job.append(template.name, 0.0, egui::TextFormat::simple(body, ink));
+                                job.append(
+                                    tr(template.name),
+                                    0.0,
+                                    egui::TextFormat::simple(body, ink),
+                                );
                                 job.append(
                                     &format!(
                                         "
 {}",
-                                        template.description
+                                        tr(template.description)
                                     ),
                                     0.0,
                                     egui::TextFormat::simple(small, weak),
@@ -2963,7 +3018,7 @@ fn export_window(
             .unwrap_or_default()
     };
     let mut open = true;
-    let shown = egui::Window::new("Export")
+    let shown = egui::Window::new(tr("Export"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
@@ -2974,11 +3029,11 @@ fn export_window(
                 .num_columns(2)
                 .spacing([12.0, 8.0])
                 .show(ui, |ui| {
-                    ui.label("What");
+                    ui.label(tr("What"));
                     ui.vertical(|ui| {
-                        ui.radio_value(&mut settings.scope, Scope::Board, "Whole board");
+                        ui.radio_value(&mut settings.scope, Scope::Board, tr("Whole board"));
                         ui.add_enabled_ui(info.has_selection, |ui| {
-                            ui.radio_value(&mut settings.scope, Scope::Selection, "Selection");
+                            ui.radio_value(&mut settings.scope, Scope::Selection, tr("Selection"));
                         });
                         ui.add_enabled_ui(!model.frames.is_empty(), |ui| {
                             ui.horizontal(|ui| {
@@ -2987,7 +3042,7 @@ fn export_window(
                                     _ => None,
                                 };
                                 let shown = frame.or(model.frames.first().map(|(id, _)| *id));
-                                if ui.radio(frame.is_some(), "Frame").clicked()
+                                if ui.radio(frame.is_some(), tr("Frame")).clicked()
                                     && let Some(id) = shown
                                 {
                                     settings.scope = Scope::Frame(id);
@@ -3010,27 +3065,27 @@ fn export_window(
                             ui.radio_value(
                                 &mut settings.scope,
                                 Scope::Frames,
-                                "All frames, a page each",
+                                tr("All frames, a page each"),
                             )
-                            .on_disabled_hover_text("PDF only, for boards with frames");
+                            .on_disabled_hover_text(tr("PDF only, for boards with frames"));
                         });
                     });
                     ui.end_row();
 
-                    ui.label("Format");
+                    ui.label(tr("Format"));
                     ui.horizontal(|ui| {
-                        ui.selectable_value(&mut settings.format, Format::Png, "PNG");
-                        ui.selectable_value(&mut settings.format, Format::Jpeg, "JPEG");
-                        ui.selectable_value(&mut settings.format, Format::Pdf, "PDF");
+                        ui.selectable_value(&mut settings.format, Format::Png, tr("PNG"));
+                        ui.selectable_value(&mut settings.format, Format::Jpeg, tr("JPEG"));
+                        ui.selectable_value(&mut settings.format, Format::Pdf, tr("PDF"));
                         ui.separator();
-                        ui.selectable_value(&mut settings.format, Format::Markdown, "Markdown")
-                            .on_hover_text("The text: frames as headings, notes as a list");
-                        ui.selectable_value(&mut settings.format, Format::Csv, "CSV")
-                            .on_hover_text("The first table, for spreadsheets");
+                        ui.selectable_value(&mut settings.format, Format::Markdown, tr("Markdown"))
+                            .on_hover_text(tr("The text: frames as headings, notes as a list"));
+                        ui.selectable_value(&mut settings.format, Format::Csv, tr("CSV"))
+                            .on_hover_text(tr("The first table, for spreadsheets"));
                     });
                     ui.end_row();
 
-                    ui.label("Size");
+                    ui.label(tr("Size"));
                     ui.add_enabled_ui(!settings.format.is_text(), |ui| {
                         ui.horizontal(|ui| {
                             for scale in [1.0, 2.0, 3.0, 4.0] {
@@ -3039,7 +3094,9 @@ fn export_window(
                                     scale,
                                     format!("{scale}×"),
                                 )
-                                .on_hover_text("Pixels per board unit: 1× is the board at 100%");
+                                .on_hover_text(tr(
+                                    "Pixels per board unit: 1× is the board at 100%",
+                                ));
                             }
                         });
                     });
@@ -3048,16 +3105,19 @@ fn export_window(
                     ui.label("");
                     ui.add_enabled(
                         settings.format == Format::Png,
-                        egui::Checkbox::new(&mut settings.transparent, "Transparent background"),
+                        egui::Checkbox::new(
+                            &mut settings.transparent,
+                            tr("Transparent background"),
+                        ),
                     );
                     ui.end_row();
                 });
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui.button("Export…").clicked() {
+                if ui.button(tr("Export…")).clicked() {
                     actions.push(Action::Export(*settings));
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(tr("Cancel")).clicked() {
                     actions.push(Action::CloseExport);
                 }
             });
@@ -3078,7 +3138,7 @@ fn export_window(
 /// How a frame is listed: its title, or a stand-in when it has none.
 fn frame_title(title: &str) -> String {
     if title.trim().is_empty() {
-        "Untitled frame".to_owned()
+        tr("Untitled frame").to_owned()
     } else {
         title.to_owned()
     }
@@ -3092,14 +3152,14 @@ fn diagram_window(
     actions: &mut Vec<Action>,
 ) {
     let mut open = true;
-    let shown = egui::Window::new("Diagram from text")
+    let shown = egui::Window::new(tr("Diagram from text"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .order(Order::Foreground)
         .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
-            ui.label("A Mermaid flowchart: nodes like A[Box], B{Decision}, C((Circle)); edges like A --> B or A -->|label| B.");
+            ui.label(tr("A Mermaid flowchart: nodes like A[Box], B{Decision}, C((Circle)); edges like A --> B or A -->|label| B."));
             ui.add(
                 egui::TextEdit::multiline(text)
                     .code_editor()
@@ -3110,10 +3170,10 @@ fn diagram_window(
                 ui.colored_label(Color32::from_rgb(0xD0, 0x30, 0x30), error);
             }
             ui.horizontal(|ui| {
-                if ui.button("Insert").clicked() {
+                if ui.button(tr("Insert")).clicked() {
                     actions.push(Action::InsertDiagram(text.clone()));
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(tr("Cancel")).clicked() {
                     actions.push(Action::CloseDiagram);
                 }
             });
@@ -3207,11 +3267,18 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
+/// Whether shortcut keys say more than key names, like "Enter, double click": those are
+/// translated, while "Ctrl+B / I / U" or "Delete" stay as on the keyboard.
+fn has_words(keys: &str) -> bool {
+    keys.split(|c: char| !c.is_ascii_alphabetic())
+        .any(|word| word.len() > 1 && word.chars().all(|c| c.is_ascii_lowercase()))
+}
+
 /// The list of keyboard shortcuts, above the other panels.
 fn shortcuts_window(ctx: &Context, actions: &mut Vec<Action>) {
     let mut open = true;
     let max_height = ctx.content_rect().height() * 0.75;
-    let shown = egui::Window::new("Keyboard shortcuts")
+    let shown = egui::Window::new(tr("Keyboard shortcuts"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
@@ -3222,15 +3289,16 @@ fn shortcuts_window(ctx: &Context, actions: &mut Vec<Action>) {
                 .max_height(max_height)
                 .show(ui, |ui| {
                     for (topic, keys) in SHORTCUTS {
-                        ui.strong(*topic);
+                        ui.strong(tr(topic));
                         egui::Grid::new(*topic)
                             .num_columns(2)
                             .spacing([16.0, 4.0])
                             .min_col_width(150.0)
                             .show(ui, |ui| {
                                 for (key, what) in *keys {
-                                    ui.label(RichText::new(*key).monospace());
-                                    ui.label(*what);
+                                    let key = if has_words(key) { tr(key) } else { key };
+                                    ui.label(RichText::new(key).monospace());
+                                    ui.label(tr(what));
                                     ui.end_row();
                                 }
                             });
@@ -3265,7 +3333,7 @@ fn search_bar(ctx: &Context, info: SearchInfo, text: &mut String, actions: &mut 
                 ui.horizontal(|ui| {
                     let field = ui.add(
                         egui::TextEdit::singleline(text)
-                            .hint_text("Find on the board")
+                            .hint_text(tr("Find on the board"))
                             .desired_width(220.0),
                     );
                     if info.focus {
@@ -3296,27 +3364,27 @@ fn search_bar(ctx: &Context, info: SearchInfo, text: &mut String, actions: &mut 
                         actions.push(Action::CloseSearch);
                     }
                     let status = match (info.count, info.has_query) {
-                        (0, true) => "No results".to_owned(),
+                        (0, true) => tr("No results").to_owned(),
                         (0, false) => String::new(),
-                        (n, _) => format!("{} of {n}", info.current + 1),
+                        (n, _) => trf("{} of {}", &[&(info.current + 1), &n]),
                     };
                     ui.label(status);
                     let some = info.count > 0;
                     if ui
                         .add_enabled(some, Button::new("↑"))
-                        .on_hover_text("Previous (Shift+Enter)")
+                        .on_hover_text(tr("Previous (Shift+Enter)"))
                         .clicked()
                     {
                         actions.push(Action::SearchStep(false));
                     }
                     if ui
                         .add_enabled(some, Button::new("↓"))
-                        .on_hover_text("Next (Enter)")
+                        .on_hover_text(tr("Next (Enter)"))
                         .clicked()
                     {
                         actions.push(Action::SearchStep(true));
                     }
-                    if ui.button("×").on_hover_text("Close (Esc)").clicked() {
+                    if ui.button("×").on_hover_text(tr("Close (Esc)")).clicked() {
                         actions.push(Action::CloseSearch);
                     }
                 });
@@ -3327,14 +3395,14 @@ fn search_bar(ctx: &Context, info: SearchInfo, text: &mut String, actions: &mut 
 /// Tags and fill colors to show only some objects, and managing the board's tags.
 fn filter_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
     let filter = model.filter;
-    ui.strong("Tags");
+    ui.strong(tr("Tags"));
     if model.tags.is_empty() {
-        ui.weak("No tags yet: select objects and use Tags");
+        ui.weak(tr("No tags yet: select objects and use Tags"));
     }
     for (tag, count) in &model.tags {
         ui.horizontal(|ui| {
             if tag_dot(ui, tag.color)
-                .on_hover_text("Change the color")
+                .on_hover_text(tr("Change the color"))
                 .clicked()
             {
                 actions.push(Action::RecolorTag(tag.id.clone()));
@@ -3343,14 +3411,14 @@ fn filter_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
             let label = format!("{} ({count})", tag.name);
             if ui
                 .selectable_label(on, label)
-                .on_hover_text("Show objects with this tag")
+                .on_hover_text(tr("Show objects with this tag"))
                 .clicked()
             {
                 actions.push(Action::FilterTag(tag.id.clone()));
             }
             if ui
                 .small_button("×")
-                .on_hover_text("Remove the tag from the board")
+                .on_hover_text(tr("Remove the tag from the board"))
                 .clicked()
             {
                 actions.push(Action::RemoveTag(tag.id.clone()));
@@ -3359,7 +3427,7 @@ fn filter_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
     }
     if !model.fill_colors.is_empty() {
         ui.separator();
-        ui.strong("Colors");
+        ui.strong(tr("Colors"));
         ui.horizontal_wrapped(|ui| {
             for &color in &model.fill_colors {
                 let on = filter.colors.contains(&color);
@@ -3372,7 +3440,7 @@ fn filter_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
     }
     if !filter.is_empty() {
         ui.separator();
-        if ui.button("Show everything").clicked() {
+        if ui.button(tr("Show everything")).clicked() {
             actions.push(Action::ClearFilter);
             ui.close();
         }
@@ -3413,25 +3481,25 @@ fn format_bar(ctx: &Context, format: &TextFormat, actions: &mut Vec<Action>) {
                         (
                             Mark::Bold,
                             m.bold,
-                            RichText::new("B").strong(),
+                            RichText::new(tr("B")).strong(),
                             "Bold (Ctrl+B)",
                         ),
                         (
                             Mark::Italic,
                             m.italic,
-                            RichText::new("I").italics(),
+                            RichText::new(tr("I")).italics(),
                             "Italic (Ctrl+I)",
                         ),
                         (
                             Mark::Underline,
                             m.underline,
-                            RichText::new("U").underline(),
+                            RichText::new(tr("U")).underline(),
                             "Underline (Ctrl+U)",
                         ),
                         (
                             Mark::Strike,
                             m.strike,
-                            RichText::new("S").strikethrough(),
+                            RichText::new(tr("S")).strikethrough(),
                             "Strikethrough (Ctrl+Shift+X)",
                         ),
                     ];
@@ -3457,9 +3525,9 @@ fn format_bar(ctx: &Context, format: &TextFormat, actions: &mut Vec<Action>) {
                             );
                         }
                         let tip = if color.is_none() {
-                            "Text color of the object"
+                            tr("Text color of the object")
                         } else {
-                            "Text color"
+                            tr("Text color")
                         };
                         if response.on_hover_text(tip).clicked() {
                             actions.push(Action::MarkColor(color));
@@ -3533,7 +3601,11 @@ fn color_grid(ui: &mut egui::Ui, colors: &[Rgba], current: Rgba, columns: usize)
                         egui::StrokeKind::Outside,
                     );
                 }
-                let name = if color.to_bytes()[3] == 0 { "None" } else { "" };
+                let name = if color.to_bytes()[3] == 0 {
+                    tr("None")
+                } else {
+                    ""
+                };
                 let response = if name.is_empty() {
                     response
                 } else {
@@ -3550,7 +3622,7 @@ fn color_grid(ui: &mut egui::Ui, colors: &[Rgba], current: Rgba, columns: usize)
     picked
 }
 
-fn swatch_button(ui: &mut egui::Ui, color: Rgba, ring: bool, tooltip: &str) -> Response {
+fn swatch_button(ui: &mut egui::Ui, color: Rgba, ring: bool, tooltip: &'static str) -> Response {
     icon_button(ui, false, tooltip, |painter, rect, _| {
         if ring {
             let stroke = Stroke::new(4.0, to_color32(color));
@@ -3586,7 +3658,7 @@ fn paint_swatch(painter: &Painter, rect: Rect, color: Rgba) {
 fn icon_button(
     ui: &mut egui::Ui,
     selected: bool,
-    tooltip: &str,
+    tooltip: &'static str,
     paint: impl FnOnce(&Painter, Rect, Color32),
 ) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(BUTTON), Sense::click());
@@ -3605,7 +3677,7 @@ fn icon_button(
         ui.visuals().weak_text_color()
     };
     paint(painter, rect.shrink(9.0), color);
-    response.on_hover_text(tooltip)
+    response.on_hover_text(tr(tooltip))
 }
 
 fn paint_cursor(painter: &Painter, rect: Rect, color: Color32) {
@@ -3917,4 +3989,41 @@ fn paint_turn(painter: &Painter, rect: Rect, color: Color32, redo: bool) {
 fn to_color32(color: Rgba) -> Color32 {
     let [r, g, b, a] = color.to_bytes();
     Color32::from_rgba_unmultiplied(r, g, b, a)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Texts kept in tables are translated where they are shown; all have a translation.
+    #[test]
+    fn texts_in_tables_are_translated() {
+        let mut texts: Vec<&str> = Vec::new();
+        for (set, kinds) in SHAPE_SETS {
+            texts.push(set);
+            texts.extend(kinds.iter().map(|(_, name)| *name));
+        }
+        texts.extend(STRUCTURES.iter().map(|(_, tip, _)| *tip));
+        for (topic, keys) in SHORTCUTS {
+            texts.push(topic);
+            for (key, what) in *keys {
+                texts.push(what);
+                if has_words(key) {
+                    texts.push(key);
+                }
+            }
+        }
+        for template in &crate::templates::TEMPLATES {
+            texts.push(template.name);
+            texts.push(template.description);
+        }
+        for grid in [GridStyle::Dots, GridStyle::Lines, GridStyle::None] {
+            texts.push(grid.name());
+        }
+        let missing: Vec<_> = texts
+            .into_iter()
+            .filter(|t| !crate::i18n::translated(t))
+            .collect();
+        assert!(missing.is_empty(), "no translation for {missing:#?}");
+    }
 }

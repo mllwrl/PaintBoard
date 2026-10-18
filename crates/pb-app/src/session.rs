@@ -69,10 +69,10 @@ impl Session {
 
     /// File name for the window title.
     pub fn name(&self) -> String {
-        self.path
-            .as_deref()
-            .and_then(Path::file_stem)
-            .map_or_else(|| UNTITLED.to_owned(), |s| s.to_string_lossy().into_owned())
+        self.path.as_deref().and_then(Path::file_stem).map_or_else(
+            || crate::i18n::tr(UNTITLED).to_owned(),
+            |s| s.to_string_lossy().into_owned(),
+        )
     }
 
     /// When the next autosave is due.
@@ -115,7 +115,7 @@ impl Session {
         let suggested = self
             .path
             .clone()
-            .unwrap_or_else(|| PathBuf::from(format!("{UNTITLED}.{EXTENSION}")));
+            .unwrap_or_else(|| PathBuf::from(format!("{}.{EXTENSION}", crate::i18n::tr(UNTITLED))));
         let Some(path) = dialog::pick_save(&FILE_TYPE, &suggested) else {
             return false;
         };

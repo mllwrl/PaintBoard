@@ -29,6 +29,11 @@ pub fn user_name() -> String {
     "Me".to_owned()
 }
 
+/// The system's (or the browser's) language and region, like `ru-RU`, if it says.
+pub fn locale() -> Option<String> {
+    sys_locale::get_locale()
+}
+
 /// Milliseconds since the Unix epoch, also in the browser.
 pub fn now_ms() -> i64 {
     web_time::SystemTime::now()

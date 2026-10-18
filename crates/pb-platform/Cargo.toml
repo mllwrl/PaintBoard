@@ -11,6 +11,8 @@ workspace = true
 [dependencies]
 log.workspace = true
 web-time.workspace = true
+# The language the system is set to, for the UI's.
+sys-locale = "0.3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd.workspace = true

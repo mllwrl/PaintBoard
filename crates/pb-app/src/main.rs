@@ -3,6 +3,7 @@
 mod app;
 mod editing;
 mod export;
+mod i18n;
 mod navigation;
 mod pictures;
 mod session;

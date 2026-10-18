@@ -26,6 +26,7 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::editing::{self, KeyOutcome, NEW_TEXT_SIZE, TextEdit};
 use crate::export;
+use crate::i18n::{tr, trf};
 use crate::navigation::Navigation;
 use crate::pictures::{self, Picture};
 use crate::session::Session;
@@ -648,17 +649,17 @@ impl App {
             Link::Url(url) => url.to_string(),
             Link::Object(id) => match self.document.get(*id).map(|o| &o.data.kind) {
                 Some(ObjectKind::Frame(f)) if !f.title.trim().is_empty() => {
-                    format!("Frame “{}”", f.title)
+                    trf("Frame “{}”", &[&f.title])
                 }
-                Some(ObjectKind::Frame(_)) => "Untitled frame".into(),
+                Some(ObjectKind::Frame(_)) => tr("Untitled frame").into(),
                 Some(kind) => match kind.text().filter(|t| !t.trim().is_empty()) {
                     Some(text) => {
                         let short: String = text.chars().take(30).collect();
                         format!("“{}”", short.trim())
                     }
-                    None => "An object on the board".into(),
+                    None => tr("An object on the board").into(),
                 },
-                None => "A deleted object".into(),
+                None => tr("A deleted object").into(),
             },
         }
     }
@@ -1104,7 +1105,7 @@ impl App {
             Action::SaveVersion(name) => {
                 let name = name.trim();
                 let name = if name.is_empty() {
-                    format!("Version {}", self.document.versions().len() + 1)
+                    trf("Version {}", &[&(self.document.versions().len() + 1)])
                 } else {
                     name.to_owned()
                 };
@@ -1125,16 +1126,26 @@ impl App {
             }
             Action::RemoveVersion(id) => {
                 let name = self.document.version(&id).map(|v| v.name.to_string());
-                let question = format!(
+                let question = trf(
                     "Forget the version \"{}\"? This cannot be undone; the board itself stays as it is.",
-                    name.unwrap_or_default()
+                    &[&name.unwrap_or_default()],
                 );
-                if dialog::ask("Remove version", &question) == dialog::Answer::Yes {
+                if dialog::ask(tr("Remove version"), &question) == dialog::Answer::Yes {
                     if self.version_view.as_ref().is_some_and(|v| v.id == id) {
                         self.version_view = None;
                     }
                     self.apply(Command::RemoveVersion(id));
                 }
+            }
+            Action::ToggleLanguage => {
+                use crate::i18n::Lang;
+                let lang = match crate::i18n::lang() {
+                    Lang::En => Lang::Ru,
+                    Lang::Ru => Lang::En,
+                };
+                crate::i18n::set_lang(lang);
+                crate::settings::save_language(lang);
+                self.request_redraw();
             }
             Action::ToggleTheme => {
                 let dark = !self.theme.dark;
@@ -1383,7 +1394,7 @@ impl App {
                 let id: Arc<str> = self.document.new_line_id().into();
                 let layer = pb_core::Layer {
                     id: id.clone(),
-                    name: format!("Layer {}", layers.len() + 1).into(),
+                    name: trf("Layer {}", &[&(layers.len() + 1)]).into(),
                     order,
                     visible: true,
                     locked: false,
@@ -1510,7 +1521,7 @@ impl App {
     fn insert_image_files(&mut self) {
         let mut extensions = pb_io::image::EXTENSIONS.to_vec();
         extensions.extend(["svg", "svgz", "pdf", "csv", "tsv", "md", "markdown", "txt"]);
-        let paths = dialog::pick_open_many("Images, PDF, tables, documents", &extensions);
+        let paths = dialog::pick_open_many(tr("Images, PDF, tables, documents"), &extensions);
         self.insert_files(&paths, None);
     }
 
@@ -1547,7 +1558,7 @@ impl App {
             // Several tables step down and to the right, so none hides another.
             let at = at.map(|p| p + Vec2::splat(40.0 * i as f64 / zoom));
             match rows {
-                Ok(rows) if rows.is_empty() => errors.push(format!("{}: no cells", path.display())),
+                Ok(rows) if rows.is_empty() => errors.push(trf("{}: no cells", &[&path.display()])),
                 Ok(rows) => {
                     if let Some(note) = self.insert_table(rows, at) {
                         errors.push(format!("{}: {note}", path.display()));
@@ -1568,7 +1579,7 @@ impl App {
             .collect();
         self.insert_pictures(pictures, at);
         if !errors.is_empty() {
-            dialog::show_error("Some files could not be added", &errors.join("\n"));
+            dialog::show_error(tr("Some files could not be added"), &errors.join("\n"));
         }
     }
 
@@ -1602,10 +1613,10 @@ impl App {
         self.document.end_undo_group();
         if count > MAX_PDF_PAGES {
             dialog::show_error(
-                "Only the first pages were added",
-                &format!(
-                    "{} has {count} pages; the first {MAX_PDF_PAGES} are on the board.",
-                    path.display()
+                tr("Only the first pages were added"),
+                &trf(
+                    "{} has {} pages; the first {} are on the board.",
+                    &[&path.display(), &count, &MAX_PDF_PAGES],
                 ),
             );
         }
@@ -1653,7 +1664,7 @@ impl App {
         if let Some(image) = clipboard::image() {
             match Picture::from_clipboard(image) {
                 Ok(picture) => self.insert_pictures(vec![picture], at),
-                Err(err) => dialog::show_error("Could not paste the image", &err.to_string()),
+                Err(err) => dialog::show_error(tr("Could not paste the image"), &err.to_string()),
             }
             return;
         }
@@ -1669,7 +1680,10 @@ impl App {
         if let Some(text) = clipboard::text().filter(|t| t.contains('\t')) {
             let rows = pb_io::csv::parse_tsv(&text);
             if let Some(note) = self.insert_table(rows, at) {
-                dialog::show_error("Pasted table", &format!("The table is too large: {note}."));
+                dialog::show_error(
+                    tr("Pasted table"),
+                    &trf("The table is too large: {}.", &[&note]),
+                );
             }
             return;
         }
@@ -1853,10 +1867,12 @@ impl App {
 
         let (row_count, col_count) = (rows.len(), rows.first().map_or(0, Vec::len));
         let note = (row_count > MAX_TABLE_ROWS || col_count > MAX_TABLE_COLS).then(|| {
-            format!(
+            trf(
                 "only the first {} rows and {} columns were added",
-                row_count.min(MAX_TABLE_ROWS),
-                col_count.min(MAX_TABLE_COLS)
+                &[
+                    &row_count.min(MAX_TABLE_ROWS),
+                    &col_count.min(MAX_TABLE_COLS),
+                ],
             )
         });
         rows.truncate(MAX_TABLE_ROWS);
@@ -1985,15 +2001,15 @@ impl App {
     fn add_mindmap_at(&mut self, at: Point) {
         self.finish_editing();
         self.tools.set_active(ToolKind::Select);
-        const TOPIC: &str = "Central topic";
-        let probe = pb_core::MindMap::new("probe", TOPIC, pb_geom::kurbo::Size::ZERO);
+        let topic = tr("Central topic");
+        let probe = pb_core::MindMap::new("probe", topic, pb_geom::kurbo::Size::ZERO);
         let size = probe.font_size(0);
         let layout = self
             .text
             .engine()
-            .layout(TOPIC, size, Some(pb_core::MindMap::WRAP_WIDTH));
+            .layout(topic, size, Some(pb_core::MindMap::WRAP_WIDTH));
         let text_size = pb_geom::kurbo::Size::new(layout.width, layout.height);
-        let map = pb_core::MindMap::new(self.document.new_line_id(), TOPIC, text_size);
+        let map = pb_core::MindMap::new(self.document.new_line_id(), topic, text_size);
         let root = map.nodes[0].id.clone();
         let natural = map.layout().bounds.size();
         let zoom = self.camera.zoom();
@@ -2063,7 +2079,7 @@ impl App {
         let doc = match self.document.version_view(&id) {
             Ok(doc) => doc,
             Err(err) => {
-                dialog::show_error("Could not show the version", &err.to_string());
+                dialog::show_error(tr("Could not show the version"), &err.to_string());
                 return;
             }
         };
@@ -2075,19 +2091,19 @@ impl App {
             .filter_map(|&id| doc.get(id))
             .map(|o| o.data.frame())
             .collect();
-        let count = |n: usize, what: &str| (n > 0).then(|| format!("{n} {what}"));
+        let count = |n: usize, what: &'static str| (n > 0).then(|| trf(what, &[&n]));
         let parts: Vec<String> = [
-            count(changes.changed.len(), "changed"),
-            count(changes.removed.len(), "removed"),
-            count(changes.added.len(), "added"),
+            count(changes.changed.len(), "{} changed"),
+            count(changes.removed.len(), "{} removed"),
+            count(changes.added.len(), "{} added"),
         ]
         .into_iter()
         .flatten()
         .collect();
         let summary = if parts.is_empty() {
-            "the same as now".to_owned()
+            tr("the same as now").to_owned()
         } else {
-            format!("{} since", parts.join(", "))
+            trf("{} since", &[&parts.join(", ")])
         };
         self.version_view = Some(VersionView {
             id,
@@ -2119,7 +2135,7 @@ impl App {
         };
         let targets = export::targets(&self.document, settings.scope, &[]);
         if targets.is_empty() {
-            dialog::show_error("Print", "There is nothing to print.");
+            dialog::show_error(tr("Print"), tr("There is nothing to print."));
             return;
         }
         let Some(gpu) = self.gpu.as_mut() else {
@@ -2149,11 +2165,16 @@ impl App {
                 if !pb_platform::browser::open_file(&path) {
                     dialog::show_error(
                         "Print",
-                        &format!("No app opens PDF files. The file is at {}", path.display()),
+                        &trf(
+                            "No app opens PDF files. The file is at {}",
+                            &[&path.display()],
+                        ),
                     );
                 }
             }
-            Err(err) => dialog::show_error("Print", &format!("Could not make the PDF: {err}")),
+            Err(err) => {
+                dialog::show_error(tr("Print"), &trf("Could not make the PDF: {}", &[&err]))
+            }
         }
     }
 
@@ -2178,7 +2199,7 @@ impl App {
         let selection = self.tools.selection().ids().to_vec();
         let targets = export::targets(&self.document, settings.scope, &selection);
         if targets.is_empty() {
-            dialog::show_error("Export picture", "There is nothing to export.");
+            dialog::show_error(tr("Export"), tr("There is nothing to export."));
             return false;
         }
         let name = match settings.scope {
@@ -2186,9 +2207,9 @@ impl App {
                 Some(ObjectKind::Frame(frame)) if !frame.title.trim().is_empty() => {
                     frame.title.trim().to_owned()
                 }
-                _ => "Frame".to_owned(),
+                _ => tr("Frame").to_owned(),
             },
-            export::Scope::Selection => format!("{} selection", self.session.name()),
+            export::Scope::Selection => trf("{} selection", &[&self.session.name()]),
             export::Scope::Board | export::Scope::Frames => self.session.name(),
         };
         let name = file_name(&name);
@@ -2221,7 +2242,7 @@ impl App {
         match saved {
             Ok(()) => true,
             Err(err) => {
-                dialog::show_error("Export picture", &format!("Could not save the file: {err}"));
+                dialog::show_error(tr("Export"), &trf("Could not save the file: {}", &[&err]));
                 false
             }
         }
@@ -2447,7 +2468,7 @@ impl App {
                             short
                         }
                     })
-                    .unwrap_or_else(|| "An object without text".to_owned());
+                    .unwrap_or_else(|| tr("An object without text").to_owned());
                 Some((id, n, text))
             })
             .collect()
@@ -2565,7 +2586,7 @@ impl App {
             return;
         };
         let id: Arc<str> = self.document.new_line_id().into();
-        let title = format!("Talktrack {}", self.document.talktracks().len() + 1);
+        let title = trf("Talktrack {}", &[&(self.document.talktracks().len() + 1)]);
         let track = recording.finish(Instant::now(), &mut self.document, id, title);
         self.apply(Command::SaveTalktrack(track));
     }
@@ -3170,14 +3191,14 @@ impl App {
         match link {
             Link::Url(url) => {
                 if !pb_platform::browser::open_url(url) {
-                    dialog::show_error("Could not open the link", url);
+                    dialog::show_error(tr("Could not open the link"), url);
                 }
             }
             Link::Object(id) => {
                 let Some(object) = self.document.get(*id) else {
                     dialog::show_error(
-                        "Link target is gone",
-                        "The object this links to has been deleted.",
+                        tr("Link target is gone"),
+                        tr("The object this links to has been deleted."),
                     );
                     return;
                 };
@@ -3496,11 +3517,14 @@ impl App {
         let text = match result {
             Ok(text) if !text.trim().is_empty() => text.trim().to_owned(),
             Ok(_) => {
-                dialog::show_error("Nothing recognized", "No text was found in the strokes.");
+                dialog::show_error(
+                    tr("Nothing recognized"),
+                    tr("No text was found in the strokes."),
+                );
                 return;
             }
             Err(err) => {
-                dialog::show_error("Handwriting recognition failed", &err);
+                dialog::show_error(tr("Handwriting recognition failed"), &err);
                 return;
             }
         };
@@ -3541,8 +3565,8 @@ impl App {
                     self.apply(Command::Create(vec![data.into()]));
                 }
                 Err(err) => {
-                    let message = format!("Recognized \"{text}\": {err}.");
-                    dialog::show_error("Could not calculate", &message);
+                    let message = trf("Recognized \"{}\": {}.", &[&text, &err]);
+                    dialog::show_error(tr("Could not calculate"), &message);
                 }
             },
         }
@@ -4044,7 +4068,13 @@ impl ApplicationHandler<UserEvent> for App {
         );
         self.window = Some(window.clone());
         self.ui = Some(Ui::new(&window));
-        // The theme picked before, or the system's at first.
+        // The language and theme picked before, or the system's at first.
+        let system_lang = pb_platform::locale().and_then(|l| crate::i18n::Lang::from_code(&l));
+        crate::i18n::set_lang(
+            crate::settings::language()
+                .or(system_lang)
+                .unwrap_or(crate::i18n::Lang::En),
+        );
         let system_dark = window.theme() == Some(winit::window::Theme::Dark);
         self.set_dark(crate::settings::dark_theme().unwrap_or(system_dark));
         self.camera.look_at(Point::ZERO, 1.0, self.viewport());
@@ -4565,10 +4595,10 @@ struct ThreadPanel {
 fn time_ago(now_ms: i64, at_ms: i64) -> String {
     let minutes = (now_ms - at_ms).max(0) / 60_000;
     match minutes {
-        0 => "just now".to_owned(),
-        1..60 => format!("{minutes} min ago"),
-        60..1440 => format!("{} h ago", minutes / 60),
-        1440..10080 => format!("{} d ago", minutes / 1440),
+        0 => tr("just now").to_owned(),
+        1..60 => trf("{} min ago", &[&minutes]),
+        60..1440 => trf("{} h ago", &[&(minutes / 60)]),
+        1440..10080 => trf("{} d ago", &[&(minutes / 1440)]),
         _ => {
             // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
             let z = at_ms.div_euclid(86_400_000) + 719_468;
