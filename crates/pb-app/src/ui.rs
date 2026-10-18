@@ -3362,6 +3362,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+Shift+S", "Save as"),
             ("Ctrl+Shift+E", "Export a picture or PDF"),
             ("Ctrl+P", "Print (opens a PDF)"),
+            ("Wheel, Shift+wheel", "Scroll up and down, sideways"),
             ("Space+drag, middle drag", "Pan"),
             ("Ctrl+wheel, Ctrl+= / -", "Zoom"),
             ("Ctrl+0", "Zoom to 100%"),

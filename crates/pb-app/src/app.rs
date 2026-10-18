@@ -3962,6 +3962,8 @@ impl App {
     /// Shows another board (opened or new) from a clean slate.
     fn replace_document(&mut self, document: Document) {
         self.document = document;
+        // The new board's revisions start over: drop what the minimap kept of the old one.
+        self.minimap_marks.borrow_mut().take();
         self.version_view = None;
         self.focus_saved = None;
         self.recording = None;

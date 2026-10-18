@@ -675,6 +675,8 @@ const RU: &[(&str, &str)] = &[
     ("Save as", "Сохранить как"),
     ("Export a picture or PDF", "Экспорт картинки или PDF"),
     ("Print (opens a PDF)", "Печать (открывает PDF)"),
+    ("Wheel, Shift+wheel", "Колесо, Shift+колесо"),
+    ("Scroll up and down, sideways", "Прокрутка вверх-вниз, вбок"),
     (
         "Space+drag, middle drag",
         "Пробел+перетаскивание, средняя кнопка",

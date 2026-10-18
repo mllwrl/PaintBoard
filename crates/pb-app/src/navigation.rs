@@ -10,7 +10,7 @@ use winit::window::CursorIcon;
 const WHEEL_ZOOM_STEP: f64 = 1.15;
 /// Zoom factor for the keyboard zoom shortcuts.
 const KEY_ZOOM_STEP: f64 = 1.25;
-/// Pixels of horizontal pan per wheel notch with Shift held.
+/// Pixels of pan per mouse wheel notch.
 const WHEEL_PAN_STEP: f64 = 60.0;
 
 /// Tracks pointer state and turns input into camera moves. All positions are logical pixels.
@@ -87,19 +87,24 @@ impl Navigation {
         self.space_down = down;
     }
 
-    /// Mouse wheels zoom (Shift pans sideways); touchpad scrolls pan and Ctrl+scroll zooms.
+    /// Mouse wheels and touchpads scroll the board (Shift+wheel sideways); with Ctrl they
+    /// zoom.
     ///
     /// On Windows touchpads also report line deltas, so two-finger scroll zooms there.
     /// TODO: a "mouse / touchpad" navigation setting, like Miro has.
     pub fn wheel(&mut self, camera: &mut Camera, delta: MouseScrollDelta, scale: f64) {
         let anchor = self.cursor.unwrap_or_default();
         match delta {
+            // A mouse wheel scrolls like in a document (Shift: sideways); Ctrl+wheel zooms.
             MouseScrollDelta::LineDelta(x, y) => {
-                if self.modifiers.shift_key() {
+                if self.modifiers.control_key() {
+                    camera.zoom_at(anchor, WHEEL_ZOOM_STEP.powf(f64::from(y)));
+                } else if self.modifiers.shift_key() {
                     let notches = if x != 0.0 { x } else { y };
                     camera.pan(Vec2::new(f64::from(notches) * WHEEL_PAN_STEP, 0.0));
                 } else {
-                    camera.zoom_at(anchor, WHEEL_ZOOM_STEP.powf(f64::from(y)));
+                    let step = Vec2::new(f64::from(x), f64::from(y)) * WHEEL_PAN_STEP;
+                    camera.pan(step);
                 }
             }
             MouseScrollDelta::PixelDelta(pos) => {
