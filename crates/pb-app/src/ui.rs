@@ -2856,15 +2856,26 @@ fn export_window(
                         ui.selectable_value(&mut settings.format, Format::Png, "PNG");
                         ui.selectable_value(&mut settings.format, Format::Jpeg, "JPEG");
                         ui.selectable_value(&mut settings.format, Format::Pdf, "PDF");
+                        ui.separator();
+                        ui.selectable_value(&mut settings.format, Format::Markdown, "Markdown")
+                            .on_hover_text("The text: frames as headings, notes as a list");
+                        ui.selectable_value(&mut settings.format, Format::Csv, "CSV")
+                            .on_hover_text("The first table, for spreadsheets");
                     });
                     ui.end_row();
 
                     ui.label("Size");
-                    ui.horizontal(|ui| {
-                        for scale in [1.0, 2.0, 3.0, 4.0] {
-                            ui.selectable_value(&mut settings.scale, scale, format!("{scale}×"))
+                    ui.add_enabled_ui(!settings.format.is_text(), |ui| {
+                        ui.horizontal(|ui| {
+                            for scale in [1.0, 2.0, 3.0, 4.0] {
+                                ui.selectable_value(
+                                    &mut settings.scale,
+                                    scale,
+                                    format!("{scale}×"),
+                                )
                                 .on_hover_text("Pixels per board unit: 1× is the board at 100%");
-                        }
+                            }
+                        });
                     });
                     ui.end_row();
 

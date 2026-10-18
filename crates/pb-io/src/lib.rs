@@ -5,6 +5,7 @@ pub mod audio;
 pub mod csv;
 pub mod image;
 pub mod mermaid;
+pub mod outline;
 pub mod pdf;
 pub mod preview;
 pub mod svg;

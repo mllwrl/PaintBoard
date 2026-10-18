@@ -2003,9 +2003,11 @@ impl App {
             theme: &self.theme,
             me: &self.me,
         };
-        let saved = export::file(&self.document, &targets, settings, painters).and_then(|bytes| {
-            pb_platform::fs::write_atomic(&path, &bytes).map_err(|err| err.to_string())
-        });
+        let title = self.session.name();
+        let saved =
+            export::file(&self.document, &targets, settings, &title, painters).and_then(|bytes| {
+                pb_platform::fs::write_atomic(&path, &bytes).map_err(|err| err.to_string())
+            });
         match saved {
             Ok(()) => true,
             Err(err) => {

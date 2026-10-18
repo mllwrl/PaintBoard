@@ -1,4 +1,5 @@
-//! Pictures of the board, a frame or the selection, saved as PNG, JPEG or PDF files.
+//! The board, a frame or the selection saved as a picture (PNG, JPEG), a PDF, its text
+//! (Markdown) or a table (CSV).
 
 use std::collections::{HashMap, HashSet};
 
@@ -25,6 +26,10 @@ pub enum Format {
     Png,
     Jpeg,
     Pdf,
+    /// The text, as an outline.
+    Markdown,
+    /// The first table.
+    Csv,
 }
 
 impl Format {
@@ -33,6 +38,8 @@ impl Format {
             Format::Png => "png",
             Format::Jpeg => "jpg",
             Format::Pdf => "pdf",
+            Format::Markdown => "md",
+            Format::Csv => "csv",
         }
     }
 
@@ -41,7 +48,14 @@ impl Format {
             Format::Png => "PNG image",
             Format::Jpeg => "JPEG image",
             Format::Pdf => "PDF document",
+            Format::Markdown => "Markdown",
+            Format::Csv => "CSV table",
         }
+    }
+
+    /// Text rather than a picture: size and background do not apply.
+    pub fn is_text(self) -> bool {
+        matches!(self, Format::Markdown | Format::Csv)
     }
 }
 
@@ -182,13 +196,45 @@ pub struct Painters<'a> {
     pub me: &'a str,
 }
 
-/// The file `settings` ask for, of `targets` (one picture, or a PDF page each).
+/// The objects `target` covers, back to front: shown ones, not hidden.
+fn objects<'a>(doc: &'a Document, target: &Target) -> Vec<&'a pb_core::Object> {
+    let wanted = |o: &&pb_core::Object| match &target.only {
+        Some(only) => only.contains(&o.id),
+        None => target.area.contains(o.data.frame().aabb().center()),
+    };
+    doc.objects()
+        .iter()
+        .filter(wanted)
+        .filter(|o| doc.is_shown(o.id) && !doc.is_hidden(o.id))
+        .collect()
+}
+
+/// The file `settings` ask for, of `targets` (one picture, or a PDF page each); `title`
+/// heads a Markdown outline.
 pub fn file(
     doc: &Document,
     targets: &[Target],
     settings: &Settings,
+    title: &str,
     mut painters: Painters<'_>,
 ) -> Result<Vec<u8>, String> {
+    if settings.format.is_text() {
+        let target = targets.first().ok_or("there is nothing to export")?;
+        let objects = objects(doc, target);
+        if settings.format == Format::Markdown {
+            return Ok(pb_io::outline::markdown(title, &objects).into_bytes());
+        }
+        let mut tables: Vec<_> = objects
+            .iter()
+            .filter_map(|o| match &o.data.kind {
+                ObjectKind::Table(table) => Some((o.data.frame().aabb(), table)),
+                _ => None,
+            })
+            .collect();
+        tables.sort_by(|(a, _), (b, _)| a.y0.total_cmp(&b.y0).then(a.x0.total_cmp(&b.x0)));
+        let (_, table) = tables.first().ok_or("there is no table to export")?;
+        return Ok(pb_io::outline::table_csv(table).into_bytes());
+    }
     if settings.format != Format::Pdf {
         let target = targets.first().ok_or("there is nothing to export")?;
         let (pixels, _) = render(doc, target, settings, &mut painters)?;
@@ -287,7 +333,9 @@ fn render(
 fn encode(pixels: &Pixels, format: Format) -> Result<Vec<u8>, String> {
     let bytes = match format {
         Format::Png => pb_io::image::encode_png(pixels),
-        Format::Jpeg | Format::Pdf => pb_io::image::encode_jpeg(pixels, 92),
+        Format::Jpeg | Format::Pdf | Format::Markdown | Format::Csv => {
+            pb_io::image::encode_jpeg(pixels, 92)
+        }
     };
     bytes.map_err(|err| err.to_string())
 }
