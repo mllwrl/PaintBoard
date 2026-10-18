@@ -178,6 +178,9 @@ pub struct App {
     show_export: bool,
     /// A saved version being looked at instead of the board.
     version_view: Option<VersionView>,
+    /// The UI's size relative to normal, and whether high contrast is on.
+    ui_scale: f32,
+    high_contrast: bool,
     /// The search field should take the keyboard on the next frame.
     focus_search: bool,
     /// Time and screen position of the last left press, to detect double clicks.
@@ -242,6 +245,8 @@ impl App {
             diagram: None,
             show_export: false,
             version_view: None,
+            ui_scale: 1.0,
+            high_contrast: false,
             last_press: None,
             recognition: None,
             next_request: 0,
@@ -532,6 +537,8 @@ impl App {
                 })
             }),
             dark: self.theme.dark,
+            ui_scale: self.ui_scale,
+            high_contrast: self.high_contrast,
             export: self.show_export.then(|| ExportInfo {
                 has_selection: !self.tools.selection().is_empty(),
             }),
@@ -1151,6 +1158,14 @@ impl App {
                 crate::i18n::set_lang(lang);
                 crate::settings::save_language(lang);
                 self.request_redraw();
+            }
+            Action::SetUiScale(scale) => {
+                self.set_view(scale, self.high_contrast);
+                crate::settings::save_view(self.ui_scale, self.high_contrast);
+            }
+            Action::ToggleHighContrast => {
+                self.set_view(self.ui_scale, !self.high_contrast);
+                crate::settings::save_view(self.ui_scale, self.high_contrast);
             }
             Action::ToggleTheme => {
                 let dark = !self.theme.dark;
@@ -2181,6 +2196,17 @@ impl App {
                 dialog::show_error(tr("Print"), &trf("Could not make the PDF: {}", &[&err]))
             }
         }
+    }
+
+    /// Sets the UI's size relative to normal and high contrast.
+    fn set_view(&mut self, scale: f32, high_contrast: bool) {
+        self.ui_scale = scale.clamp(*crate::ui::UI_SCALES.start(), *crate::ui::UI_SCALES.end());
+        self.high_contrast = high_contrast;
+        if let Some(ui) = &mut self.ui {
+            ui.set_scale(self.ui_scale);
+            ui.set_high_contrast(high_contrast);
+        }
+        self.request_redraw();
     }
 
     /// Switches between the dark and the light theme, the board and the UI alike.
@@ -3916,6 +3942,16 @@ impl App {
             KeyCode::KeyO if ctrl => self.open_board(),
             KeyCode::KeyE if ctrl && modifiers.shift_key() => self.open_export(),
             KeyCode::KeyP if ctrl => self.print(),
+            // The UI's size: Ctrl+Alt+= / - / 0 (Ctrl+= and friends zoom the board).
+            KeyCode::Equal if ctrl && modifiers.alt_key() => {
+                self.perform(Action::SetUiScale(self.ui_scale + 0.25));
+            }
+            KeyCode::Minus if ctrl && modifiers.alt_key() => {
+                self.perform(Action::SetUiScale(self.ui_scale - 0.25));
+            }
+            KeyCode::Digit0 if ctrl && modifiers.alt_key() => {
+                self.perform(Action::SetUiScale(1.0));
+            }
             KeyCode::KeyN if ctrl => self.new_board(),
             KeyCode::KeyZ if ctrl && modifiers.shift_key() => self.redo(),
             KeyCode::KeyZ if ctrl => self.undo(),
@@ -4083,6 +4119,8 @@ impl ApplicationHandler<UserEvent> for App {
         );
         let system_dark = window.theme() == Some(winit::window::Theme::Dark);
         self.set_dark(crate::settings::dark_theme().unwrap_or(system_dark));
+        let (scale, contrast) = crate::settings::view();
+        self.set_view(scale, contrast);
         self.camera.look_at(Point::ZERO, 1.0, self.viewport());
 
         let size = window.inner_size();

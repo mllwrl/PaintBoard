@@ -220,6 +220,21 @@ const RU: &[(&str, &str)] = &[
     ("Dark", "Тёмная"),
     ("Dark theme", "Тёмная тема"),
     ("Language: English / Russian", "Язык: английский / русский"),
+    ("View", "Вид"),
+    ("Interface size", "Размер интерфейса"),
+    (
+        "Ctrl+Alt+= / Ctrl+Alt+- / Ctrl+Alt+0",
+        "Ctrl+Alt+= / Ctrl+Alt+- / Ctrl+Alt+0",
+    ),
+    ("High contrast", "Высокий контраст"),
+    (
+        "Black or white text and clear outlines",
+        "Чёрный или белый текст и чёткие рамки",
+    ),
+    (
+        "Interface size: larger / smaller / normal",
+        "Размер интерфейса: больше / меньше / обычный",
+    ),
     ("Map", "Карта"),
     ("Minimap", "Миникарта"),
     ("Layers", "Слои"),

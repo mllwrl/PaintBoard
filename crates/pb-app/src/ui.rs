@@ -173,6 +173,9 @@ pub enum Action {
     ToggleTheme,
     /// Switches the UI between English and Russian.
     ToggleLanguage,
+    /// Sets the UI's size relative to normal.
+    SetUiScale(f32),
+    ToggleHighContrast,
     /// Opens the window for saving a picture of the board.
     OpenExport,
     CloseExport,
@@ -303,6 +306,9 @@ pub struct Model<'a> {
     pub show_templates: bool,
     /// The dark theme is on.
     pub dark: bool,
+    /// The UI's size relative to normal, and whether high contrast is on.
+    pub ui_scale: f32,
+    pub high_contrast: bool,
     /// The export window is open.
     pub export: Option<ExportInfo>,
     /// Saved versions, newest first.
@@ -609,6 +615,29 @@ static DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(
 fn dark() -> bool {
     DARK.load(std::sync::atomic::Ordering::Relaxed)
 }
+
+/// High contrast is on (see [`Ui::set_high_contrast`]).
+static CONTRAST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn high_contrast() -> bool {
+    CONTRAST.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The UI's size relative to normal, as `f32` bits (see [`Ui::set_scale`]).
+static SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3F80_0000);
+
+/// The UI's size relative to normal: UI points per logical pixel of the window.
+fn ui_scale() -> f32 {
+    f32::from_bits(SCALE.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Sizes the UI can take, relative to normal.
+pub const UI_SCALES: std::ops::RangeInclusive<f32> = 0.75..=2.0;
+
+/// A place on the window (logical pixels, as the app measures it) in UI points.
+fn to_points(r: kurbo::Rect) -> kurbo::Rect {
+    r.scale_from_origin(1.0 / f64::from(ui_scale()))
+}
 const BUTTON: f32 = 36.0;
 const MARGIN: f32 = 12.0;
 /// Gap between the selection and its toolbar; leaves room for the rotation knob.
@@ -649,6 +678,8 @@ impl Ui {
         let ctx = Context::default();
         ctx.set_fonts(fonts());
         ctx.set_visuals(egui::Visuals::light());
+        // Ctrl+= / Ctrl+- / Ctrl+0 zoom the board; the UI's size has its own setting.
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let state = egui_winit::State::new(
             ctx.clone(),
             egui::ViewportId::ROOT,
@@ -680,12 +711,51 @@ impl Ui {
 
     /// Switches the UI between the dark and the light look.
     pub fn set_dark(&mut self, dark: bool) {
-        self.ctx.set_visuals(if dark {
+        DARK.store(dark, std::sync::atomic::Ordering::Relaxed);
+        self.apply_visuals();
+    }
+
+    /// Black or white text and clear outlines on panels and buttons.
+    pub fn set_high_contrast(&mut self, on: bool) {
+        CONTRAST.store(on, std::sync::atomic::Ordering::Relaxed);
+        self.apply_visuals();
+    }
+
+    /// Makes the whole UI larger or smaller (the board is zoomed on its own).
+    pub fn set_scale(&mut self, scale: f32) {
+        let scale = scale.clamp(*UI_SCALES.start(), *UI_SCALES.end());
+        SCALE.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        self.ctx.set_zoom_factor(scale);
+    }
+
+    fn apply_visuals(&self) {
+        let dark = dark();
+        let mut visuals = if dark {
             egui::Visuals::dark()
         } else {
             egui::Visuals::light()
-        });
-        DARK.store(dark, std::sync::atomic::Ordering::Relaxed);
+        };
+        if high_contrast() {
+            let (ink, edge) = if dark {
+                (Color32::WHITE, Color32::from_gray(0xC8))
+            } else {
+                (Color32::BLACK, Color32::from_gray(0x40))
+            };
+            visuals.override_text_color = Some(ink);
+            for widget in [
+                &mut visuals.widgets.noninteractive,
+                &mut visuals.widgets.inactive,
+                &mut visuals.widgets.hovered,
+                &mut visuals.widgets.active,
+                &mut visuals.widgets.open,
+            ] {
+                widget.fg_stroke = Stroke::new(1.5, ink);
+                widget.bg_stroke = Stroke::new(1.0, edge);
+            }
+            visuals.selection.stroke = Stroke::new(1.5, ink);
+            visuals.window_stroke = Stroke::new(1.5, edge);
+        }
+        self.ctx.set_visuals(visuals);
     }
 
     pub fn attach_gpu(&mut self, gpu: &Gpu) {
@@ -915,10 +985,12 @@ fn panel() -> Frame {
         })
         .corner_radius(10)
         .inner_margin(6)
-        .stroke(Stroke::new(
-            1.0,
-            Color32::from_gray(if dark() { 0x40 } else { 225 }),
-        ))
+        .stroke(match (dark(), high_contrast()) {
+            (true, true) => Stroke::new(1.5, Color32::from_gray(0xC8)),
+            (false, true) => Stroke::new(1.5, Color32::from_gray(0x40)),
+            (true, false) => Stroke::new(1.0, Color32::from_gray(0x40)),
+            (false, false) => Stroke::new(1.0, Color32::from_gray(225)),
+        })
         .shadow(Shadow {
             offset: [0, 2],
             blur: 12,
@@ -1077,6 +1149,10 @@ fn read_only_toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
         });
 }
 
+/// Room the toolbar leaves at the top and bottom of the window for the board menu and
+/// the view controls.
+const TOOLBAR_CLEARANCE: f32 = 64.0;
+
 fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
     let screen = ctx.content_rect();
     let shapes_button = Area::new(Id::unique("tools"))
@@ -1084,85 +1160,96 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
         .pivot(Align2::LEFT_CENTER)
         .order(Order::Foreground)
         .show(ctx, |ui| {
+            // Between the board menu and the view controls; it scrolls when it does not fit
+            // (a low window, a large UI).
+            let max_height = (screen.height() - 2.0 * TOOLBAR_CLEARANCE).max(BUTTON * 3.0);
             panel()
                 .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing = Vec2::splat(2.0);
-                    let select = model.tool == ToolKind::Select;
-                    if icon_button(ui, select, "Select (V)", paint_cursor).clicked() {
-                        actions.push(Action::Tool(ToolKind::Select));
-                    }
-                    let shape_active = matches!(model.tool, ToolKind::Shape(_));
-                    let shape = match model.tool {
-                        ToolKind::Shape(shape) => shape,
-                        _ => model.last_shape,
-                    };
-                    let shapes = icon_button(ui, shape_active, "Shapes (S, R, O)", |p, r, c| {
-                        paint_shape(p, r, c, shape)
-                    });
-                    if shapes.clicked() && !shape_active {
-                        actions.push(Action::Tool(ToolKind::Shape(shape)));
-                    }
-                    let ink_tools = [
-                        (
-                            ToolKind::Pen,
-                            "Pen (P)",
-                            paint_pen as fn(&Painter, Rect, Color32),
-                        ),
-                        (ToolKind::Marker, "Marker (M)", paint_marker),
-                        (ToolKind::Eraser, "Eraser (E)", paint_eraser),
-                        (ToolKind::Text, "Text (T)", paint_text),
-                        (ToolKind::Sticky, "Sticky note (N)", paint_sticky),
-                        (ToolKind::Connector, "Connector (L)", paint_connector),
-                        (ToolKind::Comment, "Comment (C)", paint_comment),
-                    ];
-                    let mut ink_button = shapes.rect;
-                    for (tool, tooltip, paint) in ink_tools {
-                        let button = icon_button(ui, model.tool == tool, tooltip, paint);
-                        if button.clicked() {
-                            actions.push(Action::Tool(tool));
-                        }
-                        if model.tool == tool {
-                            ink_button = button.rect;
-                        }
-                    }
-                    // Frames, tables, kanban boards, mind maps and documents share a button.
-                    let structure_active = STRUCTURES.iter().any(|(t, ..)| *t == model.tool);
-                    let shown = if structure_active {
-                        model.tool
-                    } else {
-                        model.last_structure
-                    };
-                    let (_, tip, paint) = STRUCTURES
-                        .iter()
-                        .find(|(t, ..)| *t == shown)
-                        .copied()
-                        .unwrap_or(STRUCTURES[0]);
-                    let structures = icon_button(ui, structure_active, tip, paint);
-                    if structures.clicked() && !structure_active {
-                        actions.push(Action::Tool(shown));
-                    }
-                    let image = icon_button(ui, false, "Image (or drop, paste)", paint_image);
-                    if image.clicked() {
-                        actions.push(Action::InsertImage);
-                    }
-                    ui.separator();
-                    let undo = ui.add_enabled_ui(model.can_undo, |ui| {
-                        icon_button(ui, false, "Undo (Ctrl+Z)", |p, r, c| {
-                            paint_turn(p, r, c, false)
+                    egui::ScrollArea::vertical()
+                        .max_height(max_height)
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing = Vec2::splat(2.0);
+                            let select = model.tool == ToolKind::Select;
+                            if icon_button(ui, select, "Select (V)", paint_cursor).clicked() {
+                                actions.push(Action::Tool(ToolKind::Select));
+                            }
+                            let shape_active = matches!(model.tool, ToolKind::Shape(_));
+                            let shape = match model.tool {
+                                ToolKind::Shape(shape) => shape,
+                                _ => model.last_shape,
+                            };
+                            let shapes =
+                                icon_button(ui, shape_active, "Shapes (S, R, O)", |p, r, c| {
+                                    paint_shape(p, r, c, shape)
+                                });
+                            if shapes.clicked() && !shape_active {
+                                actions.push(Action::Tool(ToolKind::Shape(shape)));
+                            }
+                            let ink_tools = [
+                                (
+                                    ToolKind::Pen,
+                                    "Pen (P)",
+                                    paint_pen as fn(&Painter, Rect, Color32),
+                                ),
+                                (ToolKind::Marker, "Marker (M)", paint_marker),
+                                (ToolKind::Eraser, "Eraser (E)", paint_eraser),
+                                (ToolKind::Text, "Text (T)", paint_text),
+                                (ToolKind::Sticky, "Sticky note (N)", paint_sticky),
+                                (ToolKind::Connector, "Connector (L)", paint_connector),
+                                (ToolKind::Comment, "Comment (C)", paint_comment),
+                            ];
+                            let mut ink_button = shapes.rect;
+                            for (tool, tooltip, paint) in ink_tools {
+                                let button = icon_button(ui, model.tool == tool, tooltip, paint);
+                                if button.clicked() {
+                                    actions.push(Action::Tool(tool));
+                                }
+                                if model.tool == tool {
+                                    ink_button = button.rect;
+                                }
+                            }
+                            // Frames, tables, kanban boards, mind maps and documents share a button.
+                            let structure_active =
+                                STRUCTURES.iter().any(|(t, ..)| *t == model.tool);
+                            let shown = if structure_active {
+                                model.tool
+                            } else {
+                                model.last_structure
+                            };
+                            let (_, tip, paint) = STRUCTURES
+                                .iter()
+                                .find(|(t, ..)| *t == shown)
+                                .copied()
+                                .unwrap_or(STRUCTURES[0]);
+                            let structures = icon_button(ui, structure_active, tip, paint);
+                            if structures.clicked() && !structure_active {
+                                actions.push(Action::Tool(shown));
+                            }
+                            let image =
+                                icon_button(ui, false, "Image (or drop, paste)", paint_image);
+                            if image.clicked() {
+                                actions.push(Action::InsertImage);
+                            }
+                            ui.separator();
+                            let undo = ui.add_enabled_ui(model.can_undo, |ui| {
+                                icon_button(ui, false, "Undo (Ctrl+Z)", |p, r, c| {
+                                    paint_turn(p, r, c, false)
+                                })
+                            });
+                            if undo.inner.clicked() {
+                                actions.push(Action::Undo);
+                            }
+                            let redo = ui.add_enabled_ui(model.can_redo, |ui| {
+                                icon_button(ui, false, "Redo (Ctrl+Y)", |p, r, c| {
+                                    paint_turn(p, r, c, true)
+                                })
+                            });
+                            if redo.inner.clicked() {
+                                actions.push(Action::Redo);
+                            }
+                            (shapes.rect, ink_button, structures.rect)
                         })
-                    });
-                    if undo.inner.clicked() {
-                        actions.push(Action::Undo);
-                    }
-                    let redo = ui.add_enabled_ui(model.can_redo, |ui| {
-                        icon_button(ui, false, "Redo (Ctrl+Y)", |p, r, c| {
-                            paint_turn(p, r, c, true)
-                        })
-                    });
-                    if redo.inner.clicked() {
-                        actions.push(Action::Redo);
-                    }
-                    (shapes.rect, ink_button, structures.rect)
+                        .inner
                 })
                 .inner
         })
@@ -1476,6 +1563,27 @@ fn view_controls(ctx: &Context, model: &Model, actions: &mut Vec<Action>) -> Rec
                     {
                         actions.push(Action::ToggleSnap);
                     }
+                    ui.menu_button(tr("View"), |ui| {
+                        ui.label(tr("Interface size"));
+                        ui.horizontal(|ui| {
+                            for scale in [0.75, 1.0, 1.25, 1.5, 1.75, 2.0] {
+                                let on = (model.ui_scale - scale).abs() < 0.01;
+                                let label = format!("{:.0}%", scale * 100.0);
+                                if ui.selectable_label(on, label).clicked() {
+                                    actions.push(Action::SetUiScale(scale));
+                                }
+                            }
+                        });
+                        ui.weak(tr("Ctrl+Alt+= / Ctrl+Alt+- / Ctrl+Alt+0"));
+                        ui.separator();
+                        if ui
+                            .add(Button::selectable(model.high_contrast, tr("High contrast")))
+                            .on_hover_text(tr("Black or white text and clear outlines"))
+                            .clicked()
+                        {
+                            actions.push(Action::ToggleHighContrast);
+                        }
+                    });
                     let lang = crate::i18n::lang().code().to_uppercase();
                     if ui
                         .button(lang)
@@ -1633,7 +1741,7 @@ fn selection_toolbar(
     actions: &mut Vec<Action>,
 ) {
     let Fields { new_tag, link_text } = fields;
-    let r = selection.screen;
+    let r = to_points(selection.screen);
     let center = r.center().x as f32;
     // Above the selection, or below it when there is no room at the top.
     let (anchor, pivot) = if (r.y0 as f32) - SELECTION_GAP > 90.0 {
@@ -2134,7 +2242,7 @@ fn selection_toolbar(
 /// The right-click menu: what can be done with the selection, or on empty board.
 fn context_menu(ctx: &Context, info: ContextMenuInfo, actions: &mut Vec<Action>) {
     let area = Area::new(Id::unique("context menu"))
-        .fixed_pos(Pos2::new(info.pos.0, info.pos.1))
+        .fixed_pos(Pos2::new(info.pos.0, info.pos.1) / ui_scale())
         .order(Order::Foreground)
         .constrain(true)
         .show(ctx, |ui| {
@@ -2263,7 +2371,7 @@ fn comments_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
 fn thread_panel(ctx: &Context, thread: &ThreadView, text: &mut String, actions: &mut Vec<Action>) {
     let accent = Color32::from_rgb(0x25, 0x63, 0xEB);
     Area::new(Id::unique("thread"))
-        .fixed_pos(Pos2::new(thread.pos.0 + 14.0, thread.pos.1 - 10.0))
+        .fixed_pos(Pos2::new(thread.pos.0, thread.pos.1) / ui_scale() + Vec2::new(14.0, -10.0))
         .constrain(true)
         .order(Order::Foreground)
         .show(ctx, |ui| {
@@ -3257,6 +3365,10 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Space+drag, middle drag", "Pan"),
             ("Ctrl+wheel, Ctrl+= / -", "Zoom"),
             ("Ctrl+0", "Zoom to 100%"),
+            (
+                "Ctrl+Alt+= / - / 0",
+                "Interface size: larger / smaller / normal",
+            ),
             ("Home", "Back to the start"),
             ("G / Shift+G", "Grid style / snap to grid"),
             ("F1, ?", "This list"),
@@ -3457,7 +3569,7 @@ fn tag_dot(ui: &mut egui::Ui, color: Rgba) -> Response {
 
 /// Bold, italic, underline, strikethrough and colors for the text being edited, above it.
 fn format_bar(ctx: &Context, format: &TextFormat, actions: &mut Vec<Action>) {
-    let r = format.screen;
+    let r = to_points(format.screen);
     let (anchor, pivot) = if (r.y0 as f32) - SELECTION_GAP > 90.0 {
         (
             Pos2::new(r.center().x as f32, r.y0 as f32 - 12.0),
