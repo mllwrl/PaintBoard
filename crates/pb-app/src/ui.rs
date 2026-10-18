@@ -874,7 +874,7 @@ fn board_menu(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                             ("Open…", "Ctrl+O", Action::Open),
                             ("Save", "Ctrl+S", Action::Save),
                             ("Save as…", "Ctrl+Shift+S", Action::SaveAs),
-                            ("Insert image…", "", Action::InsertImage),
+                            ("Insert file…", "", Action::InsertImage),
                             ("Diagram from text…", "", Action::OpenDiagram),
                             ("Export…", "Ctrl+Shift+E", Action::OpenExport),
                         ];

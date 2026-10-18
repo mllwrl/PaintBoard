@@ -1408,11 +1408,12 @@ impl App {
         }
     }
 
-    /// Asks for image files and places them in the middle of the view.
+    /// Asks for files to add (images, PDF, CSV, Markdown) and places them in the middle of
+    /// the view.
     fn insert_image_files(&mut self) {
         let mut extensions = pb_io::image::EXTENSIONS.to_vec();
-        extensions.push("pdf");
-        let paths = dialog::pick_open_many("Images and PDF", &extensions);
+        extensions.extend(["pdf", "csv", "tsv", "md", "markdown", "txt"]);
+        let paths = dialog::pick_open_many("Images, PDF, tables, documents", &extensions);
         self.insert_files(&paths, None);
     }
 
@@ -1435,6 +1436,29 @@ impl App {
             })
             .collect();
         self.insert_documents(&documents, at);
+        let zoom = self.camera.zoom();
+        let tables = paths.iter().filter(|p| is_table_file(p));
+        for (i, path) in tables.enumerate() {
+            let rows = pb_platform::fs::read(path).map(|bytes| {
+                let text = String::from_utf8_lossy(&bytes);
+                if has_extension(path, "tsv") {
+                    pb_io::csv::parse_tsv(&text)
+                } else {
+                    pb_io::csv::parse(&text)
+                }
+            });
+            // Several tables step down and to the right, so none hides another.
+            let at = at.map(|p| p + Vec2::splat(40.0 * i as f64 / zoom));
+            match rows {
+                Ok(rows) if rows.is_empty() => errors.push(format!("{}: no cells", path.display())),
+                Ok(rows) => {
+                    if let Some(note) = self.insert_table(rows, at) {
+                        errors.push(format!("{}: {note}", path.display()));
+                    }
+                }
+                Err(err) => errors.push(format!("{}: {err}", path.display())),
+            }
+        }
         for path in paths.iter().filter(|p| is_pdf_file(p)) {
             if let Err(err) = self.insert_pdf(path, at) {
                 errors.push(format!("{}: {err}", path.display()));
@@ -1537,8 +1561,19 @@ impl App {
             return;
         }
         let files = clipboard::files();
-        if files.iter().any(|f| pictures::is_image_file(f)) {
+        if files
+            .iter()
+            .any(|f| pictures::is_image_file(f) || is_table_file(f))
+        {
             self.insert_files(&files, at);
+            return;
+        }
+        // Cells copied from a spreadsheet arrive as tab-separated text.
+        if let Some(text) = clipboard::text().filter(|t| t.contains('\t')) {
+            let rows = pb_io::csv::parse_tsv(&text);
+            if let Some(note) = self.insert_table(rows, at) {
+                dialog::show_error("Pasted table", &format!("The table is too large: {note}."));
+            }
             return;
         }
         // A web address copied elsewhere becomes a card for the page. Copying on the board
@@ -1712,6 +1747,95 @@ impl App {
         let mut edit = TextEdit::new_doc(engine, corner, width, size, DOC_TEMPLATE);
         edit.select_all(engine);
         self.start_editing(edit);
+    }
+
+    /// Adds a table of `rows` centered on `at` (world) or in the middle of the view, sized
+    /// to its text, and selects it. Returns a note when it had to be cut.
+    fn insert_table(&mut self, mut rows: pb_io::csv::Rows, at: Option<Point>) -> Option<String> {
+        use pb_core::{Cell, Table};
+
+        let (row_count, col_count) = (rows.len(), rows.first().map_or(0, Vec::len));
+        let note = (row_count > MAX_TABLE_ROWS || col_count > MAX_TABLE_COLS).then(|| {
+            format!(
+                "only the first {} rows and {} columns were added",
+                row_count.min(MAX_TABLE_ROWS),
+                col_count.min(MAX_TABLE_COLS)
+            )
+        });
+        rows.truncate(MAX_TABLE_ROWS);
+        for row in &mut rows {
+            row.truncate(MAX_TABLE_COLS);
+        }
+        let (row_count, col_count) = (rows.len(), rows.first().map_or(0, Vec::len));
+        if row_count == 0 || col_count == 0 {
+            return note;
+        }
+        // Sizes in world units at 100%, scaled for the current zoom below.
+        let (min_w, min_h) = Table::CELL_SIZE;
+        let size = Table::FONT_SIZE;
+        let pad = 2.0 * TABLE_CELL_PAD;
+        let engine = self.text.engine();
+        let widths: Vec<f64> = (0..col_count)
+            .map(|c| {
+                let widest = rows
+                    .iter()
+                    .map(|row| engine.layout(&row[c], size, None).width)
+                    .fold(0.0, f64::max);
+                (widest + pad).clamp(min_w * 0.6, TABLE_MAX_COLUMN)
+            })
+            .collect();
+        let heights: Vec<f64> = rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .zip(&widths)
+                    .filter(|(text, _)| !text.is_empty())
+                    .map(|(text, w)| engine.layout(text, size, Some(w - pad)).height + pad)
+                    .fold(min_h, f64::max)
+            })
+            .collect();
+        let mut table = Table::new(row_count, col_count, || self.document.new_line_id());
+        let rows_lines: Vec<_> = table.rows.to_vec();
+        let cols_lines: Vec<_> = table.cols.to_vec();
+        let mut cells = pb_core::table::Cells::new();
+        for (row, line) in rows.into_iter().zip(&rows_lines) {
+            for (text, col) in row.into_iter().zip(&cols_lines) {
+                if !text.is_empty() {
+                    let cell = Cell {
+                        text: text.into(),
+                        spans: Default::default(),
+                    };
+                    cells.insert((line.id.clone(), col.id.clone()), cell);
+                }
+            }
+        }
+        let weigh = |lines: Vec<pb_core::table::Line>, sizes: &[f64]| {
+            lines
+                .into_iter()
+                .zip(sizes)
+                .map(|(line, &weight)| pb_core::table::Line { weight, ..line })
+                .collect()
+        };
+        table.rows = weigh(rows_lines, &heights);
+        table.cols = weigh(cols_lines, &widths);
+        table.cells = Arc::new(cells);
+        let zoom = self.camera.zoom();
+        let natural = pb_geom::kurbo::Size::new(widths.iter().sum(), heights.iter().sum());
+        let center = at.unwrap_or_else(|| self.camera.visible_world_rect(self.viewport()).center());
+        let mut style = Table::style();
+        style.font_size = Some(size / zoom);
+        let data = ObjectData {
+            kind: ObjectKind::Table(table),
+            bounds: pb_geom::kurbo::Rect::from_center_size(center, natural / zoom),
+            rotation: 0.0,
+            style,
+            tags: Default::default(),
+            link: None,
+        };
+        self.finish_editing();
+        self.tools.set_active(ToolKind::Select);
+        self.apply(Command::Create(vec![data.into()]));
+        note
     }
 
     /// Adds Markdown and text files as documents side by side, at `at` (world) or in the
@@ -4252,6 +4376,26 @@ fn is_pdf_file(path: &std::path::Path) -> bool {
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
 }
+
+fn has_extension(path: &std::path::Path, extension: &str) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case(extension))
+}
+
+/// Whether `path` is a CSV or TSV file, added as a table.
+fn is_table_file(path: &std::path::Path) -> bool {
+    has_extension(path, "csv") || has_extension(path, "tsv")
+}
+
+/// Most rows and columns a table made from a file or paste gets; the rest is cut.
+const MAX_TABLE_ROWS: usize = 500;
+const MAX_TABLE_COLS: usize = 50;
+
+/// Space around cell text, and the widest a column of a pasted table starts out, in world
+/// units at 100%.
+const TABLE_CELL_PAD: f64 = 8.0;
+const TABLE_MAX_COLUMN: f64 = 280.0;
 
 /// Whether `path` is a Markdown or plain text file, added as a document.
 fn is_document_file(path: &std::path::Path) -> bool {

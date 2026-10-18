@@ -1,7 +1,8 @@
-//! Import and export: image files and Mermaid flowcharts for now; later PNG/SVG/PDF
-//! export and Markdown.
+//! Import and export: image, PDF, CSV and audio files, Mermaid flowcharts, web page
+//! previews.
 
 pub mod audio;
+pub mod csv;
 pub mod image;
 pub mod mermaid;
 pub mod pdf;
