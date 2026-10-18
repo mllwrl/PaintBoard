@@ -3303,7 +3303,8 @@ fn diagram_window(
             ctx.request_repaint();
         }
     }
-    if !open {
+    // Esc closes it even from the text field, which keeps the key from the board.
+    if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         actions.push(Action::CloseDiagram);
     }
 }

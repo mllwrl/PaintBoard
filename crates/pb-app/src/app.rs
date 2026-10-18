@@ -4196,6 +4196,7 @@ impl App {
             KeyCode::Escape => {
                 let closed = self.context_menu.take().is_some()
                     || self.thread_panel.take().is_some()
+                    || self.diagram.take().is_some()
                     || std::mem::replace(&mut self.show_templates, false)
                     || std::mem::replace(&mut self.show_export, false)
                     || std::mem::replace(&mut self.show_shortcuts, false);
