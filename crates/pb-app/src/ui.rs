@@ -1007,7 +1007,9 @@ fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: 
         .order(Order::Foreground)
         .show(ctx, |ui| {
             panel().show(ui, |ui| {
-                ui.horizontal(|ui| {
+                // Too wide for the window: the buttons go on in more rows.
+                ui.set_max_width(ctx.content_rect().width() - 2.0 * MARGIN - 16.0);
+                ui.horizontal_wrapped(|ui| {
                     ui.add_space(4.0);
                     ui.strong(model.board);
                     if model.read_only {
@@ -1550,7 +1552,9 @@ fn view_controls(ctx: &Context, model: &Model, actions: &mut Vec<Action>) -> Rec
         .order(Order::Foreground)
         .show(ctx, |ui| {
             panel().show(ui, |ui| {
-                ui.horizontal(|ui| {
+                // Too wide for the window: the buttons go on in more rows.
+                ui.set_max_width(ctx.content_rect().width() - 2.0 * MARGIN - 16.0);
+                ui.horizontal_wrapped(|ui| {
                     if ui
                         .button(tr(model.grid.name()))
                         .on_hover_text(tr("Grid style (G)"))
@@ -1760,10 +1764,13 @@ fn selection_toolbar(
     let bar = Area::new(Id::unique("selection"))
         .fixed_pos(anchor)
         .pivot(pivot)
+        .constrain(true)
         .order(Order::Foreground)
         .show(ctx, |ui| {
             panel().show(ui, |ui| {
-                ui.horizontal(|ui| {
+                // Too wide for the window: the buttons go on in more rows.
+                ui.set_max_width(ctx.content_rect().width() - 2.0 * MARGIN - 16.0);
+                ui.horizontal_wrapped(|ui| {
                     if selection.read_only {
                         if ui.button(tr("Copy")).on_hover_text(tr("Ctrl+C")).clicked() {
                             actions.push(Action::Copy);
@@ -3590,7 +3597,9 @@ fn format_bar(ctx: &Context, format: &TextFormat, actions: &mut Vec<Action>) {
         .order(Order::Foreground)
         .show(ctx, |ui| {
             panel().show(ui, |ui| {
-                ui.horizontal(|ui| {
+                // Too wide for the window: the buttons go on in more rows.
+                ui.set_max_width(ctx.content_rect().width() - 2.0 * MARGIN - 16.0);
+                ui.horizontal_wrapped(|ui| {
                     let m = format.marks;
                     let marks = [
                         (
