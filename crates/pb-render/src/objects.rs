@@ -22,10 +22,6 @@ const SHADOW_COLOR: Color = Color::from_rgba8(0, 0, 0, 0x30);
 /// Drawn in place of an image whose file is missing or cannot be read.
 const PLACEHOLDER_FILL: Color = Color::from_rgb8(0xE4, 0xE4, 0xE0);
 const PLACEHOLDER_LINE: Color = Color::from_rgb8(0xA0, 0xA0, 0x9A);
-/// A frame's hairline edge and its title.
-const FRAME_EDGE: Color = Color::from_rgb8(0xD0, 0xD0, 0xCB);
-const FRAME_TITLE: Color = Color::from_rgb8(0x5F, 0x63, 0x68);
-
 /// Kanban cards and the label of the row that adds them.
 const CARD_FILL: Color = Color::from_rgb8(0xFF, 0xFF, 0xFF);
 const ADD_LABEL: Color = Color::from_rgb8(0x6B, 0x72, 0x80);
@@ -205,6 +201,8 @@ pub(crate) struct Resources<'a> {
     pub zoom: f64,
     /// Frames show their titles above them.
     pub frame_titles: bool,
+    /// A frame's edge and title.
+    pub frame_colors: (Color, Color),
 }
 
 /// Draws one object. `transform` maps world to physical pixels.
@@ -220,6 +218,7 @@ pub(crate) fn draw_object(
         assets,
         zoom,
         frame_titles,
+        frame_colors: (frame_edge, frame_title),
     } = resources;
     let transform = transform * data.frame().transform();
     let style = &data.style;
@@ -417,7 +416,7 @@ pub(crate) fn draw_object(
         ObjectKind::Frame(frame) => {
             let b = data.bounds;
             scene.fill(Fill::NonZero, transform, color(style.fill), None, &b);
-            scene.stroke(&Stroke::new(1.0 / zoom), transform, FRAME_EDGE, None, &b);
+            scene.stroke(&Stroke::new(1.0 / zoom), transform, frame_edge, None, &b);
             if frame_titles && !frame.title.is_empty() {
                 let size = FrameData::TITLE_SIZE / zoom;
                 let layout = text.engine.layout(&frame.title, size, None);
@@ -425,7 +424,7 @@ pub(crate) fn draw_object(
                 let top = b.y0 - FrameData::TITLE_GAP / zoom - layout.height;
                 // A long title is cut at the frame's width.
                 scene.push_clip_layer(Fill::NonZero, transform, &band);
-                draw_text(scene, transform, (b.x0, top), &layout, FRAME_TITLE);
+                draw_text(scene, transform, (b.x0, top), &layout, frame_title);
                 scene.pop_layer();
             }
         }

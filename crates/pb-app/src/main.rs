@@ -6,6 +6,7 @@ mod export;
 mod navigation;
 mod pictures;
 mod session;
+mod settings;
 mod talktrack;
 mod templates;
 mod ui;

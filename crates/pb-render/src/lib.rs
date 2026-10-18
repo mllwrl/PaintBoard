@@ -25,14 +25,23 @@ use vello::kurbo::{Affine, Size};
 use vello::peniko::Color;
 
 pub struct Theme {
+    /// Colors picked for a light board are turned around where they would not show
+    /// (see [`for_dark`]).
+    pub dark: bool,
     pub background: Color,
     pub grid: GridColors,
     pub overlay: OverlayColors,
+    /// A frame's edge and title.
+    pub frame_edge: Color,
+    pub frame_title: Color,
 }
 
 impl Theme {
     pub fn light() -> Self {
         Self {
+            dark: false,
+            frame_edge: Color::from_rgb8(0xD0, 0xD0, 0xCB),
+            frame_title: Color::from_rgb8(0x5F, 0x63, 0x68),
             background: Color::from_rgb8(0xF5, 0xF5, 0xF2),
             grid: GridColors {
                 dot: Color::from_rgb8(0xBD, 0xBD, 0xB8),
@@ -46,6 +55,76 @@ impl Theme {
             },
         }
     }
+
+    pub fn dark() -> Self {
+        Self {
+            dark: true,
+            frame_edge: Color::from_rgb8(0x4A, 0x4D, 0x52),
+            frame_title: Color::from_rgb8(0xA3, 0xA7, 0xAE),
+            background: Color::from_rgb8(0x1E, 0x1F, 0x22),
+            grid: GridColors {
+                dot: Color::from_rgb8(0x48, 0x4A, 0x4F),
+                line: Color::from_rgb8(0x2C, 0x2E, 0x32),
+            },
+            overlay: OverlayColors {
+                accent: Color::from_rgb8(0x6E, 0x95, 0xFF),
+                handle_fill: Color::WHITE,
+                guide: Color::from_rgb8(0xFF, 0x5C, 0x93),
+                // Shows on dark text boxes and light sticky notes alike.
+                caret: Color::from_rgb8(0x6E, 0x95, 0xFF),
+            },
+        }
+    }
+}
+
+/// Fill of frames left white, on a dark board.
+const DARK_FRAME: pb_core::Rgba = pb_core::Rgba::rgb(0x2A, 0x2C, 0x30);
+
+/// `data` as drawn on a dark board, if that differs: near-black lines and text lying on
+/// the board itself (ink, connectors, text, shapes without a fill) turn light, and white
+/// frames dark. Colors on a fill of their own (notes, tables, cards) stay as they are.
+pub fn for_dark(data: &ObjectData) -> Option<ObjectData> {
+    let on_board = match &data.kind {
+        ObjectKind::Ink(_) | ObjectKind::Connector(_) => true,
+        ObjectKind::Text(_) | ObjectKind::Shape(_) => data.style.fill.to_bytes()[3] == 0,
+        ObjectKind::Frame(_) => {
+            if data.style.fill.to_bytes() != [0xFF, 0xFF, 0xFF, 0xFF] {
+                return None;
+            }
+            let mut copy = data.clone();
+            copy.style.fill = DARK_FRAME;
+            return Some(copy);
+        }
+        _ => false,
+    };
+    if !on_board {
+        return None;
+    }
+    let stroke = lighten(data.style.stroke);
+    let text = data.style.text_color.and_then(lighten);
+    if stroke.is_none() && text.is_none() {
+        return None;
+    }
+    let mut copy = data.clone();
+    if let Some(stroke) = stroke {
+        copy.style.stroke = stroke;
+    }
+    if let Some(text) = text {
+        copy.style.text_color = Some(text);
+    }
+    Some(copy)
+}
+
+/// A light counterpart of a dark gray (black included); `None` for other colors.
+fn lighten(color: pb_core::Rgba) -> Option<pb_core::Rgba> {
+    let [r, g, b, a] = color.to_bytes();
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    if max >= 0x60 || max - min > 0x30 {
+        return None;
+    }
+    let flip = |v: u8| 0xF0 - v / 2;
+    let [r, g, b, _] = pb_core::Rgba::rgb(flip(r), flip(g), flip(b)).to_bytes();
+    Some(pb_core::Rgba(u32::from_be_bytes([r, g, b, a])))
 }
 
 /// Everything needed to draw one frame of the canvas.
@@ -178,6 +257,14 @@ pub fn build_scene(
     let others = shown.iter().filter(|(_, d)| !d.kind.is_frame());
     let previews = view.previews.iter().map(|d| (None, d));
     for (id, data) in frames.chain(others).copied().chain(previews) {
+        let adapted;
+        let data = match view.theme.dark.then(|| for_dark(data)).flatten() {
+            Some(copy) => {
+                adapted = copy;
+                &adapted
+            }
+            None => data,
+        };
         let mut opacity = 1.0;
         if !view.plain && !view.filter.matches(data) {
             opacity *= FILTERED_OPACITY;
@@ -222,6 +309,7 @@ pub fn build_scene(
             assets: view.assets,
             zoom,
             frame_titles: view.frame_titles,
+            frame_colors: (view.theme.frame_edge, view.theme.frame_title),
         };
         objects::draw_object(scene, transform, data, resources);
         if !focused {
@@ -255,4 +343,60 @@ pub fn build_scene(
         view.overlay,
         &view.theme.overlay,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use pb_core::{FrameData, Rgba, Style, Text};
+    use vello::kurbo::Rect;
+
+    use super::*;
+
+    fn data(kind: ObjectKind, style: Style) -> ObjectData {
+        ObjectData {
+            kind,
+            bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+            rotation: 0.0,
+            style,
+            tags: Default::default(),
+            link: None,
+        }
+    }
+
+    #[test]
+    fn dark_board_lightens_dark_lines_on_it_and_darkens_white_frames() {
+        let text = ObjectKind::Text(Text {
+            text: "hi".into(),
+            spans: Default::default(),
+            size: 16.0,
+        });
+        let dark_text = Style {
+            fill: Rgba(0),
+            stroke: Rgba::rgb(0x1F, 0x29, 0x37),
+            ..Style::default()
+        };
+        let light = for_dark(&data(text.clone(), dark_text)).unwrap();
+        let [r, g, b, a] = light.style.stroke.to_bytes();
+        assert!(r > 0xC0 && g > 0xC0 && b > 0xC0 && a == 0xFF);
+        // A chosen color, or dark text on a fill of its own, stays.
+        let red = Style {
+            stroke: Rgba::rgb(0xD0, 0x20, 0x20),
+            ..dark_text
+        };
+        assert!(for_dark(&data(text.clone(), red)).is_none());
+        let filled = Style {
+            fill: Rgba::rgb(0xFF, 0xF1, 0x76),
+            ..dark_text
+        };
+        assert!(for_dark(&data(text, filled)).is_none());
+        let frame = ObjectKind::Frame(FrameData { title: "".into() });
+        let white = Style {
+            fill: Rgba::rgb(0xFF, 0xFF, 0xFF),
+            ..Style::default()
+        };
+        assert_eq!(
+            for_dark(&data(frame, white)).unwrap().style.fill,
+            DARK_FRAME
+        );
+    }
 }

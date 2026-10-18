@@ -167,6 +167,8 @@ pub enum Action {
     RemoveVersion(Arc<str>),
     /// Opens a PDF of the board, a page per frame, in the system's viewer to print.
     Print,
+    /// Switches between the dark and the light theme.
+    ToggleTheme,
     /// Opens the window for saving a picture of the board.
     OpenExport,
     CloseExport,
@@ -295,6 +297,8 @@ pub struct Model<'a> {
     pub diagram: Option<Option<String>>,
     /// The template gallery is open.
     pub show_templates: bool,
+    /// The dark theme is on.
+    pub dark: bool,
     /// The export window is open.
     pub export: Option<ExportInfo>,
     /// Saved versions, newest first.
@@ -594,7 +598,13 @@ pub const STICKY_COLORS: [Rgba; 8] = [
 ];
 
 const ACCENT: Color32 = Color32::from_rgb(0x3B, 0x6E, 0xF5);
-const INK: Color32 = Color32::from_rgb(0x1F, 0x29, 0x37);
+
+/// The dark theme is on (see [`Ui::set_dark`]); panels are drawn to match.
+static DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn dark() -> bool {
+    DARK.load(std::sync::atomic::Ordering::Relaxed)
+}
 const BUTTON: f32 = 36.0;
 const MARGIN: f32 = 12.0;
 /// Gap between the selection and its toolbar; leaves room for the rotation knob.
@@ -662,6 +672,16 @@ impl Ui {
             version_name: String::new(),
             repaint_at: None,
         }
+    }
+
+    /// Switches the UI between the dark and the light look.
+    pub fn set_dark(&mut self, dark: bool) {
+        self.ctx.set_visuals(if dark {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        });
+        DARK.store(dark, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn attach_gpu(&mut self, gpu: &Gpu) {
@@ -884,10 +904,17 @@ fn fonts() -> FontDefinitions {
 /// White rounded panel with a soft shadow, like Miro's floating toolbars.
 fn panel() -> Frame {
     Frame::new()
-        .fill(Color32::WHITE)
+        .fill(if dark() {
+            Color32::from_gray(0x2B)
+        } else {
+            Color32::WHITE
+        })
         .corner_radius(10)
         .inner_margin(6)
-        .stroke(Stroke::new(1.0, Color32::from_gray(225)))
+        .stroke(Stroke::new(
+            1.0,
+            Color32::from_gray(if dark() { 0x40 } else { 225 }),
+        ))
         .shadow(Shadow {
             offset: [0, 2],
             blur: 12,
@@ -1444,6 +1471,13 @@ fn view_controls(ctx: &Context, model: &Model, actions: &mut Vec<Action>) -> Rec
                         actions.push(Action::ToggleSnap);
                     }
                     if ui
+                        .selectable_label(model.dark, "Dark")
+                        .on_hover_text("Dark theme")
+                        .clicked()
+                    {
+                        actions.push(Action::ToggleTheme);
+                    }
+                    if ui
                         .selectable_label(model.minimap.is_some(), "Map")
                         .on_hover_text("Minimap")
                         .clicked()
@@ -1529,7 +1563,8 @@ fn minimap(ctx: &Context, map: &Minimap, below: Rect, actions: &mut Vec<Action>)
                     Rect::from_center_size(r.center(), r.size().max(Vec2::splat(1.5)))
                 };
                 let painter = ui.painter_at(rect);
-                painter.rect_filled(rect, 4, Color32::from_gray(246));
+                let background = if dark() { 0x22 } else { 246 };
+                painter.rect_filled(rect, 4, Color32::from_gray(background));
                 for (r, color) in &map.objects {
                     let r = map_rect(*r);
                     painter.rect_filled(r, 0, to_color32(*color));
@@ -3560,14 +3595,14 @@ fn icon_button(
     if selected {
         painter.rect_filled(rect, 8, ACCENT.gamma_multiply(0.15));
     } else if response.hovered() && enabled {
-        painter.rect_filled(rect, 8, Color32::from_gray(238));
+        painter.rect_filled(rect, 8, ui.visuals().widgets.hovered.weak_bg_fill);
     }
     let color = if selected {
         ACCENT
     } else if enabled {
-        INK
+        ui.visuals().strong_text_color()
     } else {
-        Color32::from_gray(190)
+        ui.visuals().weak_text_color()
     };
     paint(painter, rect.shrink(9.0), color);
     response.on_hover_text(tooltip)

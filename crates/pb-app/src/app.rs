@@ -525,6 +525,7 @@ impl App {
                     summary: view.summary.clone(),
                 })
             }),
+            dark: self.theme.dark,
             export: self.show_export.then(|| ExportInfo {
                 has_selection: !self.tools.selection().is_empty(),
             }),
@@ -619,10 +620,13 @@ impl App {
                 {
                     data.style.fill
                 }
+                // Frames and the rest as the board shows them in either theme.
+                ObjectKind::Frame(_) if self.theme.dark => Rgba::rgb(0x2A, 0x2C, 0x30),
                 ObjectKind::Frame(_) => Rgba::rgb(0xFF, 0xFF, 0xFF),
                 ObjectKind::Image(_) => Rgba::rgb(0xB8, 0xB8, 0xB2),
                 // Lines and strokes would show as boxes.
                 ObjectKind::Connector(_) | ObjectKind::Ink(_) => continue,
+                _ if self.theme.dark => Rgba::rgb(0x6A, 0x6D, 0x73),
                 _ => Rgba::rgb(0xC8, 0xC8, 0xC2),
             };
             marks.push((bounds, color));
@@ -1131,6 +1135,11 @@ impl App {
                     }
                     self.apply(Command::RemoveVersion(id));
                 }
+            }
+            Action::ToggleTheme => {
+                let dark = !self.theme.dark;
+                self.set_dark(dark);
+                crate::settings::save_dark_theme(dark);
             }
             Action::OpenExport => self.open_export(),
             Action::Print => self.print(),
@@ -2116,11 +2125,13 @@ impl App {
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
+        // Pictures are always light, like paper.
+        let light = Theme::light();
         let painters = export::Painters {
             gpu,
             text: &mut self.text,
             images: &mut self.images,
-            theme: &self.theme,
+            theme: &light,
             me: &self.me,
         };
         let title = self.session.name();
@@ -2144,6 +2155,15 @@ impl App {
             }
             Err(err) => dialog::show_error("Print", &format!("Could not make the PDF: {err}")),
         }
+    }
+
+    /// Switches between the dark and the light theme, the board and the UI alike.
+    fn set_dark(&mut self, dark: bool) {
+        self.theme = if dark { Theme::dark() } else { Theme::light() };
+        if let Some(ui) = &mut self.ui {
+            ui.set_dark(dark);
+        }
+        self.request_redraw();
     }
 
     fn open_export(&mut self) {
@@ -2184,11 +2204,13 @@ impl App {
         let Some(gpu) = self.gpu.as_mut() else {
             return false;
         };
+        // Pictures are always light, like paper.
+        let light = Theme::light();
         let painters = export::Painters {
             gpu,
             text: &mut self.text,
             images: &mut self.images,
-            theme: &self.theme,
+            theme: &light,
             me: &self.me,
         };
         let title = self.session.name();
@@ -4022,6 +4044,9 @@ impl ApplicationHandler<UserEvent> for App {
         );
         self.window = Some(window.clone());
         self.ui = Some(Ui::new(&window));
+        // The theme picked before, or the system's at first.
+        let system_dark = window.theme() == Some(winit::window::Theme::Dark);
+        self.set_dark(crate::settings::dark_theme().unwrap_or(system_dark));
         self.camera.look_at(Point::ZERO, 1.0, self.viewport());
 
         let size = window.inner_size();
