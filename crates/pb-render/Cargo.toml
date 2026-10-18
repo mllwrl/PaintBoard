@@ -15,3 +15,6 @@ pb-text.workspace = true
 pb-io.workspace = true
 vello.workspace = true
 log.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true

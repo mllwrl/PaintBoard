@@ -3311,6 +3311,7 @@ dependencies = [
  "pb-geom",
  "pb-io",
  "pb-text",
+ "pollster 1.0.1",
  "vello",
 ]
 

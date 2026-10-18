@@ -1,3 +1,5 @@
 /target
 PLAN.md
 MANUAL_CHECKS.md
+# Pictures of failed snapshot tests
+*.actual.png

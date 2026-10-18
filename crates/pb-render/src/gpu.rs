@@ -77,86 +77,151 @@ impl Gpu {
         background: Color,
     ) -> Result<Vec<u8>, String> {
         let handle = &self.context.devices[self.surface.dev_id];
-        let (device, queue) = (&handle.device, &handle.queue);
-        let size = wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        };
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("export"),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let params = RenderParams {
-            base_color: background,
-            width,
-            height,
-            antialiasing_method: AaConfig::Area,
-        };
-        self.renderer
-            .render_to_texture(device, queue, scene, &view, &params)
-            .map_err(|err| err.to_string())?;
+        render_pixels(
+            handle,
+            &mut self.renderer,
+            scene,
+            (width, height),
+            background,
+        )
+    }
+}
 
-        let row = width * 4;
-        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded = row.div_ceil(align) * align;
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("export readback"),
-            size: u64::from(padded) * u64::from(height),
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("export readback"),
-        });
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
+/// A GPU without a window, for drawing scenes into images (tests, tools).
+pub struct Offscreen {
+    context: RenderContext,
+    dev_id: usize,
+    renderer: Renderer,
+}
+
+impl Offscreen {
+    /// `None` when there is no usable GPU (e.g. on a build server).
+    pub async fn new() -> Option<Self> {
+        let mut context = RenderContext::new();
+        let dev_id = context.device(None).await?;
+        let renderer = Renderer::new(
+            &context.devices[dev_id].device,
+            RendererOptions {
+                antialiasing_support: AaSupport::area_only(),
+                ..Default::default()
             },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded),
-                    rows_per_image: None,
-                },
-            },
-            size,
-        );
-        queue.submit([encoder.finish()]);
-        let slice = buffer.slice(..);
-        let (sender, receiver) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
-        device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|err| err.to_string())?;
-        match receiver.try_recv() {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => return Err(err.to_string()),
-            Err(_) => return Err("the GPU did not finish drawing".to_owned()),
-        }
-        let mapped = slice.get_mapped_range().map_err(|err| err.to_string())?;
-        let mut pixels = Vec::with_capacity(row as usize * height as usize);
-        for line in mapped.chunks(padded as usize) {
-            pixels.extend_from_slice(&line[..row as usize]);
-        }
-        drop(mapped);
-        buffer.unmap();
-        Ok(pixels)
+        )
+        .ok()?;
+        Some(Self {
+            context,
+            dev_id,
+            renderer,
+        })
     }
 
+    /// Like [`Gpu::render_image`].
+    pub fn render_image(
+        &mut self,
+        scene: &Scene,
+        width: u32,
+        height: u32,
+        background: Color,
+    ) -> Result<Vec<u8>, String> {
+        let handle = &self.context.devices[self.dev_id];
+        render_pixels(
+            handle,
+            &mut self.renderer,
+            scene,
+            (width, height),
+            background,
+        )
+    }
+}
+
+/// Draws `scene` into a new texture of `size` and reads it back as straight RGBA8 rows.
+fn render_pixels(
+    handle: &vello::util::DeviceHandle,
+    renderer: &mut Renderer,
+    scene: &Scene,
+    (width, height): (u32, u32),
+    background: Color,
+) -> Result<Vec<u8>, String> {
+    let (device, queue) = (&handle.device, &handle.queue);
+    let size = wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("export"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let params = RenderParams {
+        base_color: background,
+        width,
+        height,
+        antialiasing_method: AaConfig::Area,
+    };
+    renderer
+        .render_to_texture(device, queue, scene, &view, &params)
+        .map_err(|err| err.to_string())?;
+
+    let row = width * 4;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded = row.div_ceil(align) * align;
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("export readback"),
+        size: u64::from(padded) * u64::from(height),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("export readback"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: None,
+            },
+        },
+        size,
+    );
+    queue.submit([encoder.finish()]);
+    let slice = buffer.slice(..);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|err| err.to_string())?;
+    match receiver.try_recv() {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => return Err(err.to_string()),
+        Err(_) => return Err("the GPU did not finish drawing".to_owned()),
+    }
+    let mapped = slice.get_mapped_range().map_err(|err| err.to_string())?;
+    let mut pixels = Vec::with_capacity(row as usize * height as usize);
+    for line in mapped.chunks(padded as usize) {
+        pixels.extend_from_slice(&line[..row as usize]);
+    }
+    drop(mapped);
+    buffer.unmap();
+    Ok(pixels)
+}
+
+impl Gpu {
     pub fn resize(&mut self, width: u32, height: u32) {
         // A minimized window reports a zero size, which wgpu cannot configure.
         if width == 0 || height == 0 {

@@ -6,7 +6,7 @@ mod images;
 mod objects;
 mod overlay;
 
-pub use gpu::{FrameTarget, Gpu};
+pub use gpu::{FrameTarget, Gpu, Offscreen};
 pub use grid::{GridColors, GridStyle, draw_grid};
 pub use images::ImageCache;
 pub use objects::{TextRenderer, fitted_font_size, painted_bounds, text_align};
@@ -85,8 +85,9 @@ const DARK_FRAME: pb_core::Rgba = pb_core::Rgba::rgb(0x2A, 0x2C, 0x30);
 /// frames dark. Colors on a fill of their own (notes, tables, cards) stay as they are.
 pub fn for_dark(data: &ObjectData) -> Option<ObjectData> {
     let on_board = match &data.kind {
-        ObjectKind::Ink(_) | ObjectKind::Connector(_) => true,
-        ObjectKind::Text(_) | ObjectKind::Shape(_) => data.style.fill.to_bytes()[3] == 0,
+        // Text objects never paint their fill: their text always lies on the board.
+        ObjectKind::Ink(_) | ObjectKind::Connector(_) | ObjectKind::Text(_) => true,
+        ObjectKind::Shape(_) => data.style.fill.to_bytes()[3] == 0,
         ObjectKind::Frame(_) => {
             if data.style.fill.to_bytes() != [0xFF, 0xFF, 0xFF, 0xFF] {
                 return None;
@@ -367,7 +368,7 @@ pub fn build_scene(
 
 #[cfg(test)]
 mod tests {
-    use pb_core::{FrameData, Rgba, Style, Text};
+    use pb_core::{FrameData, Rgba, ShapeKind, Style, Text};
     use vello::kurbo::Rect;
 
     use super::*;
@@ -465,7 +466,7 @@ mod tests {
         let light = for_dark(&data(text.clone(), dark_text)).unwrap();
         let [r, g, b, a] = light.style.stroke.to_bytes();
         assert!(r > 0xC0 && g > 0xC0 && b > 0xC0 && a == 0xFF);
-        // A chosen color, or dark text on a fill of its own, stays.
+        // A chosen color, or a shape's dark text on a fill of its own, stays.
         let red = Style {
             stroke: Rgba::rgb(0xD0, 0x20, 0x20),
             ..dark_text
@@ -475,7 +476,9 @@ mod tests {
             fill: Rgba::rgb(0xFF, 0xF1, 0x76),
             ..dark_text
         };
-        assert!(for_dark(&data(text, filled)).is_none());
+        assert!(for_dark(&data(ShapeKind::Rectangle.into(), filled)).is_none());
+        // A text object never paints its fill, so its text turns light whatever the fill.
+        assert!(for_dark(&data(text, filled)).is_some());
         let frame = ObjectKind::Frame(FrameData { title: "".into() });
         let white = Style {
             fill: Rgba::rgb(0xFF, 0xFF, 0xFF),
