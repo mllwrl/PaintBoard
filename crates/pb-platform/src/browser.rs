@@ -1,4 +1,4 @@
-//! Opening web pages and mail addresses in the system's default app.
+//! Opening web pages, mail addresses and files in the system's default app.
 
 /// Opens `url` in the default browser (or mail app for `mailto:`). Only `http`, `https`
 /// and `mailto` addresses are opened; returns whether it was.
@@ -12,6 +12,12 @@ pub fn open_url(url: &str) -> bool {
         return false;
     }
     imp::open_url(url)
+}
+
+/// Opens the file at `path` in the app the system uses for its kind; returns whether it
+/// was.
+pub fn open_file(path: &std::path::Path) -> bool {
+    imp::open_url(&path.to_string_lossy())
 }
 
 #[cfg(windows)]

@@ -23,6 +23,11 @@ pub fn app_data_dir() -> io::Result<PathBuf> {
     imp::app_data_dir()
 }
 
+/// Directory for short-lived files (e.g. a PDF to print), created if missing.
+pub fn temp_dir() -> io::Result<PathBuf> {
+    imp::temp_dir()
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod imp {
     use std::ffi::OsString;
@@ -70,6 +75,12 @@ mod imp {
         fs::create_dir_all(&dir)?;
         Ok(dir)
     }
+
+    pub fn temp_dir() -> io::Result<PathBuf> {
+        let dir = std::env::temp_dir().join(super::APP_DIR);
+        fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -91,6 +102,10 @@ mod imp {
 
     pub fn app_data_dir() -> io::Result<PathBuf> {
         let _ = super::APP_DIR;
+        Err(unsupported())
+    }
+
+    pub fn temp_dir() -> io::Result<PathBuf> {
         Err(unsupported())
     }
 }

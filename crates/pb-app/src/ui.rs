@@ -165,6 +165,8 @@ pub enum Action {
     RestoreVersion,
     /// Forgets a saved version.
     RemoveVersion(Arc<str>),
+    /// Opens a PDF of the board, a page per frame, in the system's viewer to print.
+    Print,
     /// Opens the window for saving a picture of the board.
     OpenExport,
     CloseExport,
@@ -916,6 +918,7 @@ fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: 
                             ("Insert file…", "", Action::InsertImage),
                             ("Diagram from text…", "", Action::OpenDiagram),
                             ("Export…", "Ctrl+Shift+E", Action::OpenExport),
+                            ("Print…", "Ctrl+P", Action::Print),
                         ];
                         for (label, shortcut, action) in items {
                             // Inserting changes the board.
@@ -3155,6 +3158,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+N / O / S", "New / open / save"),
             ("Ctrl+Shift+S", "Save as"),
             ("Ctrl+Shift+E", "Export a picture or PDF"),
+            ("Ctrl+P", "Print (opens a PDF)"),
             ("Space+drag, middle drag", "Pan"),
             ("Ctrl+wheel, Ctrl+= / -", "Zoom"),
             ("Ctrl+0", "Zoom to 100%"),

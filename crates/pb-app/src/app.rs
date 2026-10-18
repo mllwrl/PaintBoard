@@ -1132,6 +1132,7 @@ impl App {
                 }
             }
             Action::OpenExport => self.open_export(),
+            Action::Print => self.print(),
             Action::CloseExport => self.show_export = false,
             Action::Export(settings) => {
                 if self.export_picture(&settings) {
@@ -2086,6 +2087,64 @@ impl App {
         });
     }
 
+    /// Writes a PDF of the board (a page per frame, or the whole board without frames) to
+    /// the temporary folder and opens it in the system's viewer, which prints it.
+    fn print(&mut self) {
+        self.finish_editing();
+        let has_frames = self
+            .document
+            .objects()
+            .iter()
+            .any(|o| o.data.kind.is_frame());
+        let settings = export::Settings {
+            scope: if has_frames {
+                export::Scope::Frames
+            } else {
+                export::Scope::Board
+            },
+            format: export::Format::Pdf,
+            // Sharp on paper: a board unit at 100% is a pixel at 96 dpi.
+            scale: 3.0,
+            transparent: false,
+        };
+        let targets = export::targets(&self.document, settings.scope, &[]);
+        if targets.is_empty() {
+            dialog::show_error("Print", "There is nothing to print.");
+            return;
+        }
+        let Some(gpu) = self.gpu.as_mut() else {
+            return;
+        };
+        let painters = export::Painters {
+            gpu,
+            text: &mut self.text,
+            images: &mut self.images,
+            theme: &self.theme,
+            me: &self.me,
+        };
+        let title = self.session.name();
+        let name = file_name(&title);
+        let written =
+            export::file(&self.document, &targets, &settings, &title, painters).and_then(|bytes| {
+                let path = pb_platform::fs::temp_dir()
+                    .map_err(|err| err.to_string())?
+                    .join(format!("{name}.pdf"));
+                pb_platform::fs::write_atomic(&path, &bytes).map_err(|err| err.to_string())?;
+                Ok(path)
+            });
+        match written {
+            Ok(path) => {
+                if !pb_platform::browser::open_file(&path) {
+                    dialog::show_error(
+                        "Print",
+                        &format!("No app opens PDF files. The file is at {}", path.display()),
+                    );
+                }
+            }
+            Err(err) => dialog::show_error("Print", &format!("Could not make the PDF: {err}")),
+        }
+    }
+
     fn open_export(&mut self) {
         self.finish_editing();
         self.context_menu = None;
@@ -2111,11 +2170,7 @@ impl App {
             export::Scope::Selection => format!("{} selection", self.session.name()),
             export::Scope::Board | export::Scope::Frames => self.session.name(),
         };
-        // Characters Windows does not allow in file names.
-        let name: String = name
-            .chars()
-            .map(|c| if r#"<>:"/\|?*"#.contains(c) { '_' } else { c })
-            .collect();
+        let name = file_name(&name);
         let format = settings.format;
         let file_type = dialog::FileType {
             name: format.name(),
@@ -3807,6 +3862,7 @@ impl App {
             KeyCode::KeyS if ctrl => self.session.save(&self.document),
             KeyCode::KeyO if ctrl => self.open_board(),
             KeyCode::KeyE if ctrl && modifiers.shift_key() => self.open_export(),
+            KeyCode::KeyP if ctrl => self.print(),
             KeyCode::KeyN if ctrl => self.new_board(),
             KeyCode::KeyZ if ctrl && modifiers.shift_key() => self.redo(),
             KeyCode::KeyZ if ctrl => self.undo(),
@@ -4519,6 +4575,13 @@ fn is_pdf_file(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+}
+
+/// `name` made fit for a file name: characters Windows does not allow become `_`.
+fn file_name(name: &str) -> String {
+    name.chars()
+        .map(|c| if r#"<>:"/\|?*"#.contains(c) { '_' } else { c })
+        .collect()
 }
 
 fn has_extension(path: &std::path::Path, extension: &str) -> bool {
