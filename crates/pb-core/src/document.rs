@@ -53,6 +53,8 @@ mod key {
     pub const VOTING: &str = "voting";
     /// Root map of talktracks: each in its stored form (see `Talktrack::to_bytes`) by id.
     pub const TALKTRACKS: &str = "talktracks";
+    /// Root map of saved versions: each in its stored form (see `Version::to_bytes`) by id.
+    pub const VERSIONS: &str = "versions";
     /// Root map of layers: `order;flags;name` by layer id, see `Layer::to_value`.
     pub const LAYERS: &str = "layers";
     /// The layer of a top-level object or group, absent for the base layer.
@@ -153,6 +155,8 @@ pub enum Error {
     UnknownObject(ObjectId),
     /// A reply to a thread that does not exist.
     UnknownThread(Arc<str>),
+    /// A saved version that does not exist.
+    UnknownVersion(Arc<str>),
     /// The board was saved by a newer version of the app.
     UnsupportedSchema(i64),
     /// The board is read-only and the command would change it.
@@ -165,6 +169,7 @@ impl fmt::Display for Error {
         match self {
             Self::UnknownObject(id) => write!(f, "object {id} does not exist"),
             Self::UnknownThread(id) => write!(f, "comment thread {id} does not exist"),
+            Self::UnknownVersion(id) => write!(f, "version {id} does not exist"),
             Self::UnsupportedSchema(v) => {
                 write!(
                     f,
@@ -244,6 +249,8 @@ pub struct Document {
     active_layer: Arc<str>,
     /// Recorded talktracks, oldest first; rebuilt with `objects`.
     talktracks: Vec<crate::Talktrack>,
+    /// Saved versions, oldest first; rebuilt with `objects`.
+    versions: Vec<crate::Version>,
 }
 
 /// An object in the spatial index: its world bounds (outline included) and its place in
@@ -408,6 +415,7 @@ impl Document {
             unit_layers: HashMap::new(),
             active_layer: Layer::BASE.into(),
             talktracks: Vec::new(),
+            versions: Vec::new(),
         };
         document.refresh();
         document
@@ -454,6 +462,7 @@ impl Document {
                 _ => None,
             })
             .chain(self.talktracks.iter().filter_map(|t| t.audio))
+            .chain(self.versions.iter().flat_map(|v| v.assets.iter().copied()))
             .collect();
         ids.sort();
         ids.dedup();
@@ -1115,6 +1124,54 @@ impl Document {
                 self.doc.get_map(key::META).insert(key::READ_ONLY, on)?;
                 self.doc.set_next_commit_origin(NOT_UNDONE);
             }
+            Command::SaveVersion {
+                id,
+                name,
+                author,
+                at_ms,
+            } => {
+                self.doc.commit();
+                let version = crate::Version {
+                    id: id.clone(),
+                    name,
+                    author,
+                    at_ms,
+                    frontiers: self.doc.state_frontiers().encode().into(),
+                    assets: self.used_assets().into(),
+                };
+                self.doc
+                    .get_map(key::VERSIONS)
+                    .insert(&id, version.to_bytes())?;
+                self.doc.set_next_commit_origin(NOT_UNDONE);
+            }
+            Command::RemoveVersion(id) => {
+                let map = self.doc.get_map(key::VERSIONS);
+                if map.get(&id).is_some() {
+                    map.delete(&id)?;
+                }
+                self.doc.set_next_commit_origin(NOT_UNDONE);
+            }
+            Command::RestoreVersion(id) => {
+                let version = self.version(&id).ok_or(Error::UnknownVersion(id))?;
+                let frontiers = loro::Frontiers::decode(&version.frontiers)?;
+                // Reverting would forget versions saved later: put the list back after.
+                let saved: Vec<_> = self
+                    .versions
+                    .iter()
+                    .map(|v| (v.id.clone(), v.to_bytes()))
+                    .collect();
+                self.doc.commit();
+                self.doc.revert_to(&frontiers)?;
+                let map = self.doc.get_map(key::VERSIONS);
+                let mut ids = Vec::new();
+                map.for_each(|id, _| ids.push(id.to_owned()));
+                for id in ids {
+                    map.delete(&id)?;
+                }
+                for (id, bytes) in saved {
+                    map.insert(&id, bytes)?;
+                }
+            }
             Command::SaveTalktrack(track) => {
                 self.doc
                     .get_map(key::TALKTRACKS)
@@ -1465,6 +1522,7 @@ impl Document {
         self.roots = self.read_children(TreeParentId::Root, None);
         self.layers = read_layers(&self.doc.get_map(key::LAYERS));
         self.talktracks = read_talktracks(&self.doc.get_map(key::TALKTRACKS));
+        self.versions = read_versions(&self.doc.get_map(key::VERSIONS));
         self.stack_layers();
         self.tags = read_tags(&self.doc.get_map(key::TAGS));
         self.reactions = read_reactions(&self.doc.get_map(key::REACTIONS));
@@ -1531,6 +1589,27 @@ impl Document {
             .map(|(i, o)| (o.id, i))
             .collect();
         self.roots = roots;
+    }
+
+    /// The board's saved versions, oldest first.
+    pub fn versions(&self) -> &[crate::Version] {
+        &self.versions
+    }
+
+    pub fn version(&self, id: &str) -> Option<&crate::Version> {
+        self.versions.iter().find(|v| &*v.id == id)
+    }
+
+    /// The board as it was at version `id`, to look at: a separate copy that shares the
+    /// files of images. Changing it does not change this board.
+    pub fn version_view(&self, id: &str) -> Result<Document> {
+        let version = self
+            .version(id)
+            .ok_or_else(|| Error::UnknownVersion(id.into()))?;
+        let frontiers = loro::Frontiers::decode(&version.frontiers)?;
+        let mut view = Self::from_loro(self.doc.fork_at(&frontiers)?);
+        view.assets = self.assets.clone();
+        Ok(view)
     }
 
     /// The board's talktracks, oldest first.
@@ -2228,6 +2307,20 @@ fn read_reactions(map: &LoroMap) -> HashMap<ObjectId, crate::reaction::Reactions
 }
 
 /// The board's tags from their root map, sorted by name (then id, for a stable order).
+/// The board's saved versions from their root map, oldest first.
+fn read_versions(map: &LoroMap) -> Vec<crate::Version> {
+    let mut versions = Vec::new();
+    map.for_each(|id, v| {
+        if let ValueOrContainer::Value(LoroValue::Binary(bytes)) = v
+            && let Some(version) = crate::Version::from_bytes(id, &bytes)
+        {
+            versions.push(version);
+        }
+    });
+    versions.sort_by(|a, b| a.at_ms.cmp(&b.at_ms).then_with(|| a.id.cmp(&b.id)));
+    versions
+}
+
 /// The board's talktracks from their root map, oldest first.
 fn read_talktracks(map: &LoroMap) -> Vec<crate::Talktrack> {
     let mut tracks = Vec::new();
@@ -3383,6 +3476,92 @@ mod tests {
         assert_eq!(loaded.talktracks(), [track]);
         doc.apply(Command::RemoveTalktrack("t1".into())).unwrap();
         assert!(doc.talktracks().is_empty() && doc.used_assets().is_empty());
+    }
+
+    fn save_version(doc: &mut Document, id: &str, at_ms: i64) {
+        doc.apply(Command::SaveVersion {
+            id: id.into(),
+            name: format!("Version {id}").into(),
+            author: "me".into(),
+            at_ms,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn versions_show_and_restore_the_board_as_it_was() {
+        let mut doc = Document::new();
+        let [a, b, ..] = four(&mut doc);
+        let asset = doc.add_asset(b"fake png".to_vec());
+        let mut picture = rect(100.0, 0.0, 40.0, 30.0);
+        picture.kind = ObjectKind::Image(Image {
+            asset,
+            crop: Rect::new(0.0, 0.0, 1.0, 1.0),
+        });
+        let image = create(&mut doc, picture);
+        save_version(&mut doc, "v1", 10);
+        // Saving a version is not an undo step.
+        assert_eq!(doc.versions().len(), 1);
+        assert!(doc.get(image).is_some());
+        doc.undo().unwrap();
+        assert_eq!(doc.objects().len(), 4);
+        doc.redo().unwrap();
+
+        doc.apply(Command::Delete(vec![a, image])).unwrap();
+        doc.apply(Command::Move {
+            ids: vec![b],
+            delta: kurbo::Vec2::new(500.0, 0.0),
+        })
+        .unwrap();
+        save_version(&mut doc, "v2", 20);
+        // The deleted picture's file stays with the board while a version uses it.
+        assert_eq!(doc.used_assets(), [asset]);
+
+        let view = doc.version_view("v1").unwrap();
+        assert!(view.get(a).is_some() && view.get(image).is_some());
+        assert_eq!(view.get(b).unwrap().data.bounds.x0, 10.0);
+        assert!(view.assets().get(asset).is_some());
+        assert!(doc.get(a).is_none(), "looking does not change the board");
+        let fresh = create(&mut doc, rect(0.0, 50.0, 5.0, 5.0));
+        let changes = crate::version::compare(&view, &doc);
+        assert_eq!(changes.changed, [b]);
+        assert_eq!(changes.removed, [a, image]);
+        assert_eq!(changes.added, [fresh]);
+        doc.undo().unwrap();
+
+        doc.apply(Command::RestoreVersion("v1".into())).unwrap();
+        assert!(doc.get(a).is_some() && doc.get(image).is_some());
+        assert_eq!(doc.get(b).unwrap().data.bounds.x0, 10.0);
+        let ids: Vec<_> = doc.versions().iter().map(|v| v.id.to_string()).collect();
+        assert_eq!(ids, ["v1", "v2"], "later versions are kept");
+        // Restoring is undone in one step.
+        doc.undo().unwrap();
+        assert!(doc.get(a).is_none());
+        assert_eq!(doc.get(b).unwrap().data.bounds.x0, 510.0);
+        assert_eq!(doc.versions().len(), 2);
+
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(loaded.versions(), doc.versions());
+        assert!(loaded.version_view("v1").unwrap().get(a).is_some());
+        doc.apply(Command::RemoveVersion("v2".into())).unwrap();
+        assert_eq!(doc.versions().len(), 1);
+        assert!(matches!(
+            doc.apply(Command::RestoreVersion("v2".into())),
+            Err(Error::UnknownVersion(_))
+        ));
+    }
+
+    #[test]
+    fn versions_can_be_saved_on_a_read_only_board() {
+        let mut doc = Document::new();
+        four(&mut doc);
+        doc.apply(Command::SetReadOnly(true)).unwrap();
+        save_version(&mut doc, "v1", 1);
+        assert_eq!(doc.versions().len(), 1);
+        assert!(matches!(
+            doc.apply(Command::RestoreVersion("v1".into())),
+            Err(Error::ReadOnly)
+        ));
     }
 
     #[test]

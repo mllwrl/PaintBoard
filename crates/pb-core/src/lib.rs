@@ -14,6 +14,7 @@ pub mod rich;
 pub mod search;
 pub mod table;
 pub mod talktrack;
+pub mod version;
 
 pub use asset::{AssetId, Assets};
 pub use command::{Applied, Command, ZOrder};
@@ -33,3 +34,4 @@ pub use reaction::Reaction;
 pub use rich::{Span, Spans, TextMarks};
 pub use table::{Cell, CellRange, Line, Merge, Table};
 pub use talktrack::Talktrack;
+pub use version::Version;

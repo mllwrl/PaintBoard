@@ -196,6 +196,18 @@ pub enum Command {
     },
     /// Protects the board from changes, or lifts that. Not undoable.
     SetReadOnly(bool),
+    /// Saves the board as it is now as a version. Not undoable.
+    SaveVersion {
+        id: Arc<str>,
+        name: Arc<str>,
+        author: Arc<str>,
+        at_ms: i64,
+    },
+    /// Forgets a saved version. Not undoable.
+    RemoveVersion(Arc<str>),
+    /// Brings the board back to a saved version (an undoable change); the list of saved
+    /// versions stays as it is.
+    RestoreVersion(Arc<str>),
     /// Adds a layer, or renames, reorders, hides or locks the layer with its id.
     DefineLayer(Layer),
     /// Removes a layer with everything on it. The base layer stays.
@@ -218,6 +230,8 @@ impl Command {
         matches!(
             self,
             Self::SetReadOnly(_)
+                | Self::SaveVersion { .. }
+                | Self::RemoveVersion(_)
                 | Self::AddComment { .. }
                 | Self::RemoveComment { .. }
                 | Self::SetResolved { .. }

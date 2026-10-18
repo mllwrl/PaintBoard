@@ -33,8 +33,19 @@ use crate::talktrack::{Playback, Recording};
 use crate::ui::{
     Action, CommentView, ContextMenuInfo, ExportInfo, LayersView, LinkInfo, Minimap, Model,
     PlaybackView, STICKY_COLORS, SearchInfo, SelectionInfo, ShapeText, TableInfo, TextFormat,
-    ThreadView, Ui, VotingView,
+    ThreadView, Ui, VersionBanner, VersionItem, VotingView,
 };
+
+/// A saved version shown instead of the board.
+struct VersionView {
+    id: Arc<str>,
+    /// The board as it was.
+    doc: Document,
+    /// Objects changed or removed since, where they were (world).
+    highlights: Vec<pb_geom::Frame>,
+    /// How much changed since, for people.
+    summary: String,
+}
 
 pub enum UserEvent {
     /// GPU initialization finished (asynchronous on the web).
@@ -164,6 +175,8 @@ pub struct App {
     diagram: Option<Option<String>>,
     /// The export window is open.
     show_export: bool,
+    /// A saved version being looked at instead of the board.
+    version_view: Option<VersionView>,
     /// The search field should take the keyboard on the next frame.
     focus_search: bool,
     /// Time and screen position of the last left press, to detect double clicks.
@@ -222,6 +235,7 @@ impl App {
             show_results: false,
             diagram: None,
             show_export: false,
+            version_view: None,
             last_press: None,
             recognition: None,
             next_request: 0,
@@ -382,7 +396,21 @@ impl App {
             overlay.quick_dots.clear();
             overlay.hover = None;
         }
-        let votes = self.vote_badges();
+        let mut votes = self.vote_badges();
+        let mut board = &self.document;
+        let (mut overrides, mut hidden, mut previews) = (overrides, hidden, previews);
+        if let Some(view) = &self.version_view {
+            // The version as it was, what changed since marked, nothing to edit.
+            board = &view.doc;
+            overrides.clear();
+            hidden.clear();
+            previews.clear();
+            votes.clear();
+            overlay = Overlay {
+                search_hits: view.highlights.clone(),
+                ..Overlay::default()
+            };
+        }
         build_scene(
             &mut self.scene,
             &View {
@@ -391,8 +419,8 @@ impl App {
                 scale,
                 grid: self.grid,
                 theme: &self.theme,
-                document: &self.document,
-                assets: self.document.assets(),
+                document: board,
+                assets: board.assets(),
                 overrides: &overrides,
                 hidden: &hidden,
                 previews: &previews,
@@ -473,6 +501,29 @@ impl App {
                 .map(|t| (t.id.clone(), t.title.to_string(), t.duration))
                 .collect(),
             diagram: self.diagram.clone(),
+            versions: {
+                let now = pb_platform::now_ms();
+                self.document
+                    .versions()
+                    .iter()
+                    .rev()
+                    .map(|v| VersionItem {
+                        id: v.id.clone(),
+                        name: v.name.to_string(),
+                        when: time_ago(now, v.at_ms),
+                        author: v.author.to_string(),
+                    })
+                    .collect()
+            },
+            version_view: self.version_view.as_ref().and_then(|view| {
+                let version = self.document.version(&view.id)?;
+                Some(VersionBanner {
+                    name: version.name.to_string(),
+                    when: time_ago(pb_platform::now_ms(), version.at_ms),
+                    author: version.author.to_string(),
+                    summary: view.summary.clone(),
+                })
+            }),
             export: self.show_export.then(|| ExportInfo {
                 has_selection: !self.tools.selection().is_empty(),
             }),
@@ -1045,6 +1096,41 @@ impl App {
                 self.diagram = Some(None);
             }
             Action::CloseDiagram => self.diagram = None,
+            Action::SaveVersion(name) => {
+                let name = name.trim();
+                let name = if name.is_empty() {
+                    format!("Version {}", self.document.versions().len() + 1)
+                } else {
+                    name.to_owned()
+                };
+                self.apply(Command::SaveVersion {
+                    id: self.document.new_line_id().into(),
+                    name: name.into(),
+                    author: self.me.clone(),
+                    at_ms: pb_platform::now_ms(),
+                });
+            }
+            Action::OpenVersion(id) => self.open_version(id),
+            Action::CloseVersion => self.version_view = None,
+            Action::RestoreVersion => {
+                if let Some(view) = self.version_view.take() {
+                    self.tools.clear_selection();
+                    self.apply(Command::RestoreVersion(view.id));
+                }
+            }
+            Action::RemoveVersion(id) => {
+                let name = self.document.version(&id).map(|v| v.name.to_string());
+                let question = format!(
+                    "Forget the version \"{}\"? This cannot be undone; the board itself stays as it is.",
+                    name.unwrap_or_default()
+                );
+                if dialog::ask("Remove version", &question) == dialog::Answer::Yes {
+                    if self.version_view.as_ref().is_some_and(|v| v.id == id) {
+                        self.version_view = None;
+                    }
+                    self.apply(Command::RemoveVersion(id));
+                }
+            }
             Action::OpenExport => self.open_export(),
             Action::CloseExport => self.show_export = false,
             Action::Export(settings) => {
@@ -1954,6 +2040,52 @@ impl App {
 
     /// Adds a Mermaid flowchart in the middle of the view, at a size that reads like
     /// normal text there, as one undo step, and selects it.
+    /// Shows saved version `id` instead of the board, with what changed since marked.
+    fn open_version(&mut self, id: Arc<str>) {
+        self.finish_editing();
+        self.tools.cancel();
+        self.tools.set_active(ToolKind::Select);
+        self.tools.clear_selection();
+        self.context_menu = None;
+        self.thread_panel = None;
+        self.search = None;
+        let doc = match self.document.version_view(&id) {
+            Ok(doc) => doc,
+            Err(err) => {
+                dialog::show_error("Could not show the version", &err.to_string());
+                return;
+            }
+        };
+        let changes = pb_core::version::compare(&doc, &self.document);
+        let highlights = changes
+            .changed
+            .iter()
+            .chain(&changes.removed)
+            .filter_map(|&id| doc.get(id))
+            .map(|o| o.data.frame())
+            .collect();
+        let count = |n: usize, what: &str| (n > 0).then(|| format!("{n} {what}"));
+        let parts: Vec<String> = [
+            count(changes.changed.len(), "changed"),
+            count(changes.removed.len(), "removed"),
+            count(changes.added.len(), "added"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let summary = if parts.is_empty() {
+            "the same as now".to_owned()
+        } else {
+            format!("{} since", parts.join(", "))
+        };
+        self.version_view = Some(VersionView {
+            id,
+            doc,
+            highlights,
+            summary,
+        });
+    }
+
     fn open_export(&mut self) {
         self.finish_editing();
         self.context_menu = None;
@@ -3629,6 +3761,7 @@ impl App {
     /// Shows another board (opened or new) from a clean slate.
     fn replace_document(&mut self, document: Document) {
         self.document = document;
+        self.version_view = None;
         self.focus_saved = None;
         self.recording = None;
         self.playback = None;
@@ -4053,6 +4186,14 @@ impl App {
                     self.playback_key(&event)
                 } else if self.presentation.is_some() {
                     self.presentation_key(&event)
+                } else if self.version_view.is_some() {
+                    // Looking only: Esc goes back to the board.
+                    let escape = event.state == ElementState::Pressed
+                        && event.physical_key == PhysicalKey::Code(KeyCode::Escape);
+                    if escape {
+                        self.version_view = None;
+                    }
+                    escape
                 } else if self.cropping.is_some() {
                     self.crop_key(&event)
                 } else if let Some(edit) = &mut self.editing {
@@ -4143,7 +4284,8 @@ impl App {
                 // can only be panned (middle button) and zoomed.
                 let ui_press = state == ElementState::Pressed && (ui_consumed || over_ui);
                 let presenting = self.playback.is_some()
-                    || self.presentation.is_some() && button != MouseButton::Middle;
+                    || (self.presentation.is_some() || self.version_view.is_some())
+                        && button != MouseButton::Middle;
                 if ui_press || presenting {
                     false
                 } else {

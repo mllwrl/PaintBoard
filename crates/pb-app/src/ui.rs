@@ -156,6 +156,15 @@ pub enum Action {
     InsertTemplate(usize),
     /// Opens the window for making a diagram from text.
     OpenDiagram,
+    /// Saves the board as it is now as a version with this name (blank: a numbered one).
+    SaveVersion(String),
+    /// Shows a saved version instead of the board.
+    OpenVersion(Arc<str>),
+    CloseVersion,
+    /// Brings the board back to the version shown.
+    RestoreVersion,
+    /// Forgets a saved version.
+    RemoveVersion(Arc<str>),
     /// Opens the window for saving a picture of the board.
     OpenExport,
     CloseExport,
@@ -286,6 +295,10 @@ pub struct Model<'a> {
     pub show_templates: bool,
     /// The export window is open.
     pub export: Option<ExportInfo>,
+    /// Saved versions, newest first.
+    pub versions: Vec<VersionItem>,
+    /// The saved version shown instead of the board.
+    pub version_view: Option<VersionBanner>,
     /// Focus mode is on: the board menu, minimap and search step aside.
     pub focus: bool,
     /// Presenting: the frame shown, how many there are, and its title.
@@ -305,6 +318,22 @@ pub struct Model<'a> {
     /// The board's threads: id, a line about it, and whether it is resolved.
     pub threads: Vec<(std::sync::Arc<str>, String, bool)>,
     pub show_resolved: bool,
+}
+
+pub struct VersionItem {
+    pub id: Arc<str>,
+    pub name: String,
+    /// How long ago it was saved, for people.
+    pub when: String,
+    pub author: String,
+}
+
+pub struct VersionBanner {
+    pub name: String,
+    pub when: String,
+    pub author: String,
+    /// How much changed since.
+    pub summary: String,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -594,6 +623,8 @@ pub struct Ui {
     export: crate::export::Settings,
     /// The export window was open in the last frame.
     export_shown: bool,
+    /// Name typed for a version to save.
+    version_name: String,
     repaint_at: Option<Instant>,
 }
 
@@ -626,6 +657,7 @@ impl Ui {
             layer_name: None,
             export: crate::export::Settings::default(),
             export_shown: false,
+            version_name: String::new(),
             repaint_at: None,
         }
     }
@@ -676,6 +708,7 @@ impl Ui {
         let layer_name = &mut self.layer_name;
         let export = &mut self.export;
         let export_shown = &mut self.export_shown;
+        let version_name = &mut self.version_name;
         let output = self.ctx.run_pass(input, |ctx| {
             if let Some(timer) = &model.timer {
                 timer_pill(ctx, timer, &mut actions);
@@ -701,10 +734,16 @@ impl Ui {
                 presentation_bar(ctx, *index, *count, title, model.laser, &mut actions);
                 return;
             }
+            if let Some(version) = &model.version_view {
+                // Nothing but the board as it was and the way back.
+                *popup = None;
+                version_bar(ctx, version, model.read_only, &mut actions);
+                return;
+            }
             if model.focus {
                 focus_bar(ctx, &mut actions);
             } else {
-                board_menu(ctx, model, &mut actions);
+                board_menu(ctx, model, version_name, &mut actions);
             }
             if model.read_only {
                 read_only_toolbar(ctx, model, &mut actions);
@@ -855,7 +894,7 @@ fn panel() -> Frame {
         })
 }
 
-fn board_menu(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
+fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: &mut Vec<Action>) {
     Area::new(Id::unique("board"))
         .fixed_pos(Pos2::new(MARGIN, MARGIN))
         .order(Order::Foreground)
@@ -930,6 +969,9 @@ fn board_menu(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                         actions.push(Action::Present);
                     }
                     ui.menu_button("Talktracks", |ui| talktracks_menu(ui, model, actions));
+                    ui.menu_button("History", |ui| {
+                        history_menu(ui, model, version_name, actions)
+                    });
                     ui.menu_button("Vote", |ui| voting_menu(ui, model.voting, &mut *actions));
                     ui.menu_button("Timer", |ui| {
                         for minutes in [1, 3, 5, 10, 15, 30] {
@@ -2564,6 +2606,92 @@ fn talktracks_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) 
             }
         });
     }
+}
+
+/// Saving versions of the board and going back to them.
+fn history_menu(ui: &mut egui::Ui, model: &Model, name: &mut String, actions: &mut Vec<Action>) {
+    ui.horizontal(|ui| {
+        let field = ui.add(
+            egui::TextEdit::singleline(name)
+                .hint_text("Version name")
+                .desired_width(170.0),
+        );
+        let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if ui
+            .button("Save version")
+            .on_hover_text("Remember the board as it is now")
+            .clicked()
+            || entered
+        {
+            actions.push(Action::SaveVersion(std::mem::take(name)));
+            ui.close();
+        }
+    });
+    ui.separator();
+    if model.versions.is_empty() {
+        ui.weak("No saved versions yet");
+    }
+    egui::ScrollArea::vertical()
+        .max_height(320.0)
+        .show(ui, |ui| {
+            for version in &model.versions {
+                ui.horizontal(|ui| {
+                    let label = format!("{}  ·  {}", version.name, version.when);
+                    let hint = format!("Saved by {}. Look at the board as it was", version.author);
+                    if ui
+                        .add(Button::new(label).frame(false))
+                        .on_hover_text(hint)
+                        .clicked()
+                    {
+                        actions.push(Action::OpenVersion(version.id.clone()));
+                        ui.close();
+                    }
+                    if ui
+                        .small_button("×")
+                        .on_hover_text("Forget this version")
+                        .clicked()
+                    {
+                        actions.push(Action::RemoveVersion(version.id.clone()));
+                    }
+                });
+            }
+        });
+}
+
+/// Shown at the top while a saved version is looked at.
+fn version_bar(ctx: &Context, version: &VersionBanner, read_only: bool, actions: &mut Vec<Action>) {
+    let screen = ctx.content_rect();
+    Area::new(Id::unique("version"))
+        .fixed_pos(Pos2::new(screen.center().x, MARGIN))
+        .pivot(Align2::CENTER_TOP)
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            panel().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong(&version.name);
+                    ui.label(format!("saved {} by {}", version.when, version.author));
+                    ui.separator();
+                    ui.weak(&version.summary)
+                        .on_hover_text("Changed and removed objects are outlined");
+                    ui.separator();
+                    if ui
+                        .add_enabled(!read_only, Button::new("Restore"))
+                        .on_hover_text("Bring the board back to this version (Ctrl+Z undoes it)")
+                        .on_disabled_hover_text("The board is read-only")
+                        .clicked()
+                    {
+                        actions.push(Action::RestoreVersion);
+                    }
+                    if ui
+                        .button("Close")
+                        .on_hover_text("Back to the board (Esc)")
+                        .clicked()
+                    {
+                        actions.push(Action::CloseVersion);
+                    }
+                });
+            });
+        });
 }
 
 /// Shows that a talktrack is being recorded, with the time and the buttons to stop.
