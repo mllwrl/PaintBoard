@@ -12,6 +12,7 @@ mod navigation;
 mod pictures;
 mod session;
 mod settings;
+mod sharing;
 mod talktrack;
 mod templates;
 mod ui;

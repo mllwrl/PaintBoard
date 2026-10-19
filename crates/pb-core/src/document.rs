@@ -249,6 +249,9 @@ pub struct Document {
     show_hidden: bool,
     /// The board is protected from changes; rebuilt with `objects`.
     read_only: bool,
+    /// This copy may only look (a shared board opened with a view link): no command at
+    /// all is applied. Not stored.
+    view_only: bool,
     /// The board's layers, bottom to top, the base layer among them; rebuilt with `objects`.
     layers: Vec<Layer>,
     /// The layers of top-level objects and groups not on the base layer.
@@ -443,6 +446,7 @@ impl Document {
             focus: None,
             show_hidden: false,
             read_only: false,
+            view_only: false,
             layers: vec![Layer::base()],
             unit_layers: HashMap::new(),
             active_layer: Layer::BASE.into(),
@@ -605,7 +609,7 @@ impl Document {
             Some(object) => object.locked,
             None => self.groups.get(&id).is_some_and(|g| g.locked),
         };
-        self.read_only || own || self.parent(id).is_some_and(|p| self.is_locked_here(p))
+        self.read_only() || own || self.parent(id).is_some_and(|p| self.is_locked_here(p))
     }
 
     /// Whether `id` or any group around it is hidden.
@@ -710,7 +714,7 @@ impl Document {
     }
 
     pub fn apply(&mut self, command: Command) -> Result<Applied> {
-        if self.read_only && !command.allowed_read_only() {
+        if self.view_only || (self.read_only && !command.allowed_read_only()) {
             return Err(Error::ReadOnly);
         }
         let mut applied = Applied::default();
@@ -1321,16 +1325,26 @@ impl Document {
     }
 
     pub fn can_undo(&self) -> bool {
-        !self.read_only && self.undo.can_undo()
+        !self.read_only() && self.undo.can_undo()
     }
 
     pub fn can_redo(&self) -> bool {
-        !self.read_only && self.undo.can_redo()
+        !self.read_only() && self.undo.can_redo()
     }
 
     /// Whether the board is protected from changes (see [`Command::allowed_read_only`]).
     pub fn read_only(&self) -> bool {
-        self.read_only
+        self.read_only || self.view_only
+    }
+
+    /// Whether this copy may only look, changing nothing (see [`Document::set_view_only`]).
+    pub fn view_only(&self) -> bool {
+        self.view_only
+    }
+
+    /// Lets this copy only look: for a shared board opened with a view link.
+    pub fn set_view_only(&mut self, view_only: bool) {
+        self.view_only = view_only;
     }
 
     /// Starts merging the following commands into one undo step, e.g. while a slider is
@@ -1348,7 +1362,7 @@ impl Document {
 
     /// Reverts the last local command. Returns false if there was nothing to undo.
     pub fn undo(&mut self) -> Result<bool> {
-        if self.read_only {
+        if self.read_only() {
             return Ok(false);
         }
         let done = self.undo.undo()?;
@@ -1360,7 +1374,7 @@ impl Document {
 
     /// Re-applies the last undone command. Returns false if there was nothing to redo.
     pub fn redo(&mut self) -> Result<bool> {
-        if self.read_only {
+        if self.read_only() {
             return Ok(false);
         }
         let done = self.undo.redo()?;

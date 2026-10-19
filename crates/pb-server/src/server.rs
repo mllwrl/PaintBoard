@@ -133,12 +133,32 @@ impl Shared {
 pub fn router(shared: Arc<Shared>) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
-        .route("/boards", post(create_board))
+        .route("/boards", post(create_board).options(allow_other_sites))
         .route("/ws", get(connect))
         .with_state(shared)
 }
 
+/// The web version may be served from another site than the server: let browsers ask.
+fn cors(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert("access-control-allow-origin", "*".parse().expect("valid"));
+    headers.insert("access-control-allow-methods", "POST".parse().expect("valid"));
+    headers.insert(
+        "access-control-allow-headers",
+        "x-create-key".parse().expect("valid"),
+    );
+    response
+}
+
+async fn allow_other_sites() -> Response {
+    cors(StatusCode::NO_CONTENT.into_response())
+}
+
 async fn create_board(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Response {
+    cors(make_board(&shared, &headers))
+}
+
+fn make_board(shared: &Shared, headers: &HeaderMap) -> Response {
     if let Some(key) = &shared.create_key {
         let given = headers.get("x-create-key").and_then(|v| v.to_str().ok());
         if given != Some(key.as_str()) {

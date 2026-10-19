@@ -73,6 +73,11 @@ pub enum UserEvent {
     /// The clipboard can be read now (later than asked on the web): paste centered on
     /// this point, or where the copy came from.
     Paste(Option<Point>),
+    /// Something came from the server of the shared board, or its connection changed.
+    Network,
+    /// The server answered the request to make a shared board: its address, and the
+    /// answer.
+    BoardMade(String, Result<String, String>),
     /// A board file was picked to open (later than asked on the web).
     BoardPicked(PathBuf),
     /// Files were picked to add to the board.
@@ -230,6 +235,12 @@ pub struct App {
     /// Time and screen position of the last left press, to detect double clicks.
     last_press: Option<(Instant, Point)>,
     recognition: Option<PendingRecognition>,
+    /// The board shared through a server, while it is.
+    sharing: Option<crate::sharing::Sharing>,
+    /// The sharing window is open; a board is being made on the server; what went wrong.
+    share_window: bool,
+    making_shared: bool,
+    share_error: Option<String>,
     /// A file being exported in the browser, and what to do with it once made.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     making: Option<(export::Job, Made)>,
@@ -310,6 +321,10 @@ impl App {
             last_press: None,
             recognition: None,
             making: None,
+            sharing: None,
+            share_window: false,
+            making_shared: false,
+            share_error: None,
             next_request: 0,
             shown_title: String::new(),
         }
@@ -538,7 +553,13 @@ impl App {
             self.ink_panel_for = Some(self.tools.active());
             self.ink_panel = true;
         }
+        let (share_window, share_badge) = self.share_model();
+        let (cursors, their_selections) = self.others_on_screen();
         let model = Model {
+            share_window,
+            share_badge,
+            cursors,
+            their_selections,
             board: &board,
             web: cfg!(target_arch = "wasm32"),
             stored_boards: Session::stored_boards(),
@@ -1140,6 +1161,19 @@ impl App {
             Action::Redo => self.redo(),
             Action::NewBoard => self.new_board(),
             Action::Open => self.open_board(),
+            Action::ToggleShare => {
+                self.share_window = !self.share_window;
+                self.share_error = None;
+            }
+            Action::CreateShared(server) => self.create_shared(&server),
+            Action::JoinShared(link) => self.join_shared(&link),
+            Action::StopSharing => self.stop_sharing(),
+            Action::RetrySharing => {
+                if let Some(sharing) = &mut self.sharing {
+                    sharing.retry();
+                }
+            }
+            Action::CopyText(text) => clipboard::set_text(&text),
             Action::OpenFile(path) => self.open_file(path),
             #[cfg(target_arch = "wasm32")]
             Action::DownloadBoard => self.session.download(&self.document),
@@ -4036,6 +4070,203 @@ impl App {
         }
     }
 
+    /// Asks the server at `server` (as typed) to make a shared board of this one; it is
+    /// shared once the server answers ([`App::board_made`]).
+    fn create_shared(&mut self, server: &str) {
+        let Some(server) = crate::sharing::server_address(server) else {
+            self.share_error = Some(tr("That is not a server address.").to_owned());
+            return;
+        };
+        crate::settings::save_server(&server);
+        self.making_shared = true;
+        self.share_error = None;
+        let proxy = self.proxy.clone();
+        let url = format!("{server}/boards");
+        pb_platform::net::post(&url, None, move |answer| {
+            let _ = proxy.send_event(UserEvent::BoardMade(server, answer));
+        });
+    }
+
+    fn board_made(&mut self, server: &str, answer: Result<String, String>) {
+        self.making_shared = false;
+        let links = answer.and_then(|body| {
+            crate::sharing::made_links(server, &body)
+                .ok_or_else(|| tr("The server's answer is not understood.").to_owned())
+        });
+        match links {
+            Ok((edit, view)) => self.start_sharing(edit, Some(view)),
+            Err(err) => {
+                self.share_error = Some(trf("Could not share the board: {}", &[&err]));
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Opens the shared board at `link` in place of this one.
+    fn join_shared(&mut self, link: &str) {
+        let Some(link) = crate::sharing::Link::parse(link) else {
+            self.share_error = Some(tr("That is not a link to a shared board.").to_owned());
+            return;
+        };
+        self.finish_editing();
+        self.end_style_drag();
+        let Some(document) = self.session.new_board(&self.document) else {
+            return;
+        };
+        self.replace_document(document);
+        crate::settings::save_server(&link.server);
+        self.start_sharing(link, None);
+    }
+
+    fn start_sharing(
+        &mut self,
+        link: crate::sharing::Link,
+        view_link: Option<crate::sharing::Link>,
+    ) {
+        let proxy = self.proxy.clone();
+        self.share_error = None;
+        self.sharing = Some(crate::sharing::Sharing::start(
+            link,
+            view_link,
+            &self.me,
+            move || {
+                let _ = proxy.send_event(UserEvent::Network);
+            },
+        ));
+    }
+
+    fn stop_sharing(&mut self) {
+        self.sharing = None;
+        self.document.stop_sharing();
+        self.document.set_view_only(false);
+        self.tools.sync(&self.document);
+    }
+
+    /// Exchanges changes and pointers with the server of the shared board.
+    fn tick_sharing(&mut self, now: Instant) {
+        if self.sharing.is_none() {
+            return;
+        }
+        let viewport = self.viewport();
+        let cursor = self
+            .navigation
+            .hovered_cursor()
+            .map(|c| self.camera.screen_to_world(c));
+        let view = self.camera.visible_world_rect(viewport);
+        let selection = self.tools.selection().ids().to_vec();
+        let Some(sharing) = &mut self.sharing else {
+            return;
+        };
+        sharing.set_presence(cursor, &selection, [view.x0, view.y0, view.x1, view.y1]);
+        let ticked = sharing.tick(&mut self.document, now);
+        if let Some(error) = ticked.error {
+            self.share_error = Some(error);
+            self.request_redraw();
+        }
+        if ticked.changed {
+            self.tools.sync(&self.document);
+            self.request_redraw();
+        }
+    }
+
+    /// The sharing window's contents (when open) and the top bar's badge (when shared).
+    fn share_model(&self) -> (Option<crate::ui::ShareView>, Option<(String, bool)>) {
+        use crate::sharing::Status;
+
+        let shared = self.sharing.as_ref().map(|sharing| {
+            let (status, online, offline, can_edit) = match &sharing.status {
+                Status::Connecting => (tr("Connecting…").to_owned(), false, false, true),
+                Status::Online { can_edit } => (
+                    if sharing.people.is_empty() {
+                        tr("Online: only you here").to_owned()
+                    } else {
+                        trf("Online: {} more here", &[&sharing.people.len()])
+                    },
+                    true,
+                    false,
+                    *can_edit,
+                ),
+                Status::Offline(reason) => (
+                    trf(
+                        "Offline: {}. Changes are kept and sent once back.",
+                        &[reason],
+                    ),
+                    false,
+                    true,
+                    true,
+                ),
+            };
+            let people = sharing
+                .people
+                .iter()
+                .map(|(client, p)| (p.name.clone(), crate::sharing::color_of(*client)))
+                .collect();
+            let edit_link =
+                (sharing.view_link.is_some() || can_edit).then(|| sharing.link.to_string());
+            let view_link = sharing
+                .view_link
+                .as_ref()
+                .map(ToString::to_string)
+                .or_else(|| (!can_edit).then(|| sharing.link.to_string()));
+            crate::ui::SharedView {
+                status,
+                online,
+                offline,
+                can_edit,
+                edit_link: edit_link.filter(|_| can_edit),
+                view_link,
+                people,
+            }
+        });
+        let badge = shared.as_ref().map(|s| {
+            let text = if s.online {
+                format!("{}", s.people.len() + 1)
+            } else {
+                tr("Offline").to_owned()
+            };
+            (text, s.online)
+        });
+        let window = self.share_window.then(|| crate::ui::ShareView {
+            shared,
+            server: crate::settings::server(),
+            making: self.making_shared,
+            error: self.share_error.clone(),
+        });
+        (window, badge)
+    }
+
+    /// Where the others' pointers and selections are on the window.
+    #[allow(clippy::type_complexity)]
+    fn others_on_screen(&self) -> (Vec<(Point, String, u32)>, Vec<(pb_geom::kurbo::Rect, u32)>) {
+        let Some(sharing) = &self.sharing else {
+            return (Vec::new(), Vec::new());
+        };
+        let mut cursors = Vec::new();
+        let mut selections = Vec::new();
+        for (client, person) in &sharing.people {
+            let color = crate::sharing::color_of(*client);
+            if let Some((x, y)) = person.cursor {
+                let at = self.camera.world_to_screen(Point::new(x, y));
+                cursors.push((at, person.name.clone(), color));
+            }
+            for id in &person.selection {
+                let Some(object) = self
+                    .document
+                    .objects()
+                    .iter()
+                    .find(|o| o.id.to_string() == *id)
+                else {
+                    continue;
+                };
+                let r = object.data.frame().aabb();
+                let a = self.camera.world_to_screen(Point::new(r.x0, r.y0));
+                let b = self.camera.world_to_screen(Point::new(r.x1, r.y1));
+                selections.push((pb_geom::kurbo::Rect::from_points(a, b), color));
+            }
+        }
+        (cursors, selections)
+    }
+
     /// Asks for a board to open; [`App::open_file`] opens it once picked.
     fn open_board(&mut self) {
         let proxy = self.proxy.clone();
@@ -4330,6 +4561,8 @@ impl App {
 
     /// Shows another board (opened or new) from a clean slate.
     fn replace_document(&mut self, document: Document) {
+        // Sharing was of the board being replaced.
+        self.sharing = None;
         self.document = document;
         // The new board's revisions start over: drop what the minimap kept of the old one.
         self.minimap_marks.borrow_mut().take();
@@ -4615,6 +4848,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.insert_files(&paths, at);
         }
         let now = Instant::now();
+        self.tick_sharing(now);
         self.session.tick(&self.document, now);
         // The GPU reports back between frames: keep them coming until the file is made.
         if self.step_making() {
@@ -4658,6 +4892,7 @@ impl ApplicationHandler<UserEvent> for App {
             blink,
             timer.filter(|&at| at > now),
             sampling,
+            self.sharing.as_ref().and_then(|s| s.deadline()),
         ]
         .into_iter()
         .flatten()
@@ -4685,6 +4920,9 @@ impl ApplicationHandler<UserEvent> for App {
             // Waking up is all it takes: `about_to_wait` ticks the session.
             UserEvent::Saved => {}
             UserEvent::Paste(at) => self.paste_now(at),
+            // Waking up is all it takes: `about_to_wait` ticks the sharing.
+            UserEvent::Network => {}
+            UserEvent::BoardMade(server, answer) => self.board_made(&server, answer),
             UserEvent::BoardPicked(path) => self.open_file(path),
             UserEvent::FilesDropped(paths, at) => {
                 let at = self.camera.screen_to_world(at);

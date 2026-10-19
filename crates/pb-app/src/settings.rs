@@ -52,6 +52,25 @@ pub fn save_view(scale: f32, high_contrast: bool) {
     }
 }
 
+/// File with the address of the server boards were last shared through.
+const SERVER_FILE: &str = "server.txt";
+
+/// The server boards were last shared through; empty if none yet.
+pub fn server() -> String {
+    pb_platform::fs::app_data_dir()
+        .and_then(|dir| pb_platform::fs::read(&dir.join(SERVER_FILE)))
+        .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned())
+        .unwrap_or_default()
+}
+
+pub fn save_server(server: &str) {
+    let saved = pb_platform::fs::app_data_dir()
+        .and_then(|dir| pb_platform::fs::write_atomic(&dir.join(SERVER_FILE), server.as_bytes()));
+    if let Err(err) = saved {
+        log::warn!("server address not saved: {err}");
+    }
+}
+
 /// The theme picked last time: `Some(true)` for dark, `None` if never picked.
 pub fn dark_theme() -> Option<bool> {
     let dir = pb_platform::fs::app_data_dir().ok()?;

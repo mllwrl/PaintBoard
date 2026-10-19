@@ -327,7 +327,10 @@ mod imp {
         paths
     }
 
-    pub fn on_files_dropped(dropped: Box<dyn Fn(Vec<PathBuf>, (f64, f64))>) {
+    /// Called with dropped files and where they were dropped.
+    type Dropped = Box<dyn Fn(Vec<PathBuf>, (f64, f64))>;
+
+    pub fn on_files_dropped(dropped: Dropped) {
         let Some(window) = window() else {
             return;
         };

@@ -40,6 +40,17 @@ pub enum Action {
     Redo,
     NewBoard,
     Open,
+    /// Opens or closes the sharing window.
+    ToggleShare,
+    /// Makes a shared board of this one on the server at this address.
+    CreateShared(String),
+    /// Opens the shared board at this link (in place of this one).
+    JoinShared(String),
+    StopSharing,
+    /// Connects to the server again now.
+    RetrySharing,
+    /// Puts text on the clipboard (a link to share).
+    CopyText(String),
     /// Opens this board (one kept in the browser).
     OpenFile(std::path::PathBuf),
     /// Lets the browser download the board as a file (web only).
@@ -300,6 +311,14 @@ pub struct Model<'a> {
     /// The right-click menu, when it is open.
     pub context_menu: Option<ContextMenuInfo>,
     pub show_shortcuts: bool,
+    /// The sharing window, when open.
+    pub share_window: Option<ShareView>,
+    /// The board is shared: how it is going, for the top bar.
+    pub share_badge: Option<(String, bool)>,
+    /// Other people's pointers (window position, logical pixels), names and colors.
+    pub cursors: Vec<(kurbo::Point, String, u32)>,
+    /// Outlines of what others have selected (window rect, logical pixels) and their color.
+    pub their_selections: Vec<(kurbo::Rect, u32)>,
     /// How many objects are hidden, and whether they are shown faded.
     pub hidden: (usize, bool),
     /// The board is read-only: only looking and commenting.
@@ -685,6 +704,9 @@ pub struct Ui {
     export_shown: bool,
     /// Name typed for a version to save.
     version_name: String,
+    /// Server address and shared link typed in the sharing window.
+    server_text: String,
+    share_link_text: String,
     repaint_at: Option<Instant>,
 }
 
@@ -720,6 +742,8 @@ impl Ui {
             export: crate::export::Settings::default(),
             export_shown: false,
             version_name: String::new(),
+            server_text: String::new(),
+            share_link_text: String::new(),
             repaint_at: None,
         }
     }
@@ -830,7 +854,10 @@ impl Ui {
         let export = &mut self.export;
         let export_shown = &mut self.export_shown;
         let version_name = &mut self.version_name;
+        let server_text = &mut self.server_text;
+        let share_link_text = &mut self.share_link_text;
         let output = self.ctx.run_pass(input, |ctx| {
+            others(ctx, model);
             if let Some(timer) = &model.timer {
                 timer_pill(ctx, timer, &mut actions);
             }
@@ -919,11 +946,21 @@ impl Ui {
             if model.show_templates {
                 templates_window(ctx, &mut actions);
             }
+            if let Some(view) = &model.share_window {
+                share_window(ctx, view, server_text, share_link_text, &mut actions);
+            }
             match &model.thread {
                 Some(thread) => thread_panel(ctx, thread, comment_text, &mut actions),
                 None => comment_text.clear(),
             }
         });
+        // egui has no clipboard of its own in the browser.
+        #[cfg(target_arch = "wasm32")]
+        for command in &output.platform_output.commands {
+            if let egui::OutputCommand::CopyText(text) = command {
+                pb_platform::clipboard::set_text(text);
+            }
+        }
         self.state
             .handle_platform_output(window, output.platform_output);
         self.textures.append(output.textures_delta);
@@ -1175,9 +1212,211 @@ fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: 
                     {
                         actions.push(Action::ToggleShortcuts);
                     }
+                    ui.separator();
+                    let share = match &model.share_badge {
+                        Some((text, online)) => {
+                            let color = if *online {
+                                Color32::from_rgb(0x16, 0xA3, 0x4A)
+                            } else {
+                                Color32::from_rgb(0xD9, 0x77, 0x06)
+                            };
+                            RichText::new(format!("● {text}")).color(color)
+                        }
+                        None => RichText::new(tr("Share")),
+                    };
+                    if ui
+                        .button(share)
+                        .on_hover_text(tr("Work on this board together through a server"))
+                        .clicked()
+                    {
+                        actions.push(Action::ToggleShare);
+                    }
                 });
             });
         });
+}
+
+/// What the sharing window shows.
+pub struct ShareView {
+    /// Shared: how it is going, the links and who is there.
+    pub shared: Option<SharedView>,
+    /// The server address last used.
+    pub server: String,
+    /// A board is being made on the server.
+    pub making: bool,
+    /// What went wrong last.
+    pub error: Option<String>,
+}
+
+pub struct SharedView {
+    pub status: String,
+    pub online: bool,
+    pub offline: bool,
+    pub can_edit: bool,
+    pub edit_link: Option<String>,
+    pub view_link: Option<String>,
+    /// Names and colors of the others on the board.
+    pub people: Vec<(String, u32)>,
+}
+
+fn rgb(color: u32) -> Color32 {
+    Color32::from_rgb((color >> 16) as u8, (color >> 8) as u8, color as u8)
+}
+
+fn share_window(
+    ctx: &Context,
+    view: &ShareView,
+    server_text: &mut String,
+    link_text: &mut String,
+    actions: &mut Vec<Action>,
+) {
+    let mut open = true;
+    egui::Window::new(tr("Share"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .order(Order::Foreground)
+        .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.set_max_width(460.0);
+            if let Some(shared) = &view.shared {
+                ui.horizontal(|ui| {
+                    let color = if shared.online {
+                        Color32::from_rgb(0x16, 0xA3, 0x4A)
+                    } else {
+                        Color32::from_rgb(0xD9, 0x77, 0x06)
+                    };
+                    ui.colored_label(color, "●");
+                    ui.label(&shared.status);
+                    if shared.offline && ui.button(tr("Try again")).clicked() {
+                        actions.push(Action::RetrySharing);
+                    }
+                });
+                if !shared.can_edit && shared.online {
+                    ui.weak(tr("You can look at this board but not change it."));
+                }
+                if !shared.people.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(tr("Here now:"));
+                        for (name, color) in &shared.people {
+                            ui.colored_label(rgb(*color), name);
+                        }
+                    });
+                }
+                ui.add_space(6.0);
+                let link_row = |ui: &mut egui::Ui, label: &str, hint: &str, link: &str, actions: &mut Vec<Action>| {
+                    ui.label(label).on_hover_text(hint);
+                    ui.horizontal(|ui| {
+                        let mut shown = link.to_owned();
+                        ui.add(egui::TextEdit::singleline(&mut shown).desired_width(340.0));
+                        if ui.button(tr("Copy")).clicked() {
+                            actions.push(Action::CopyText(link.to_owned()));
+                        }
+                    });
+                };
+                if let Some(link) = &shared.edit_link {
+                    link_row(ui, tr("Link to edit"), tr("Whoever has it can change the board"), link, actions);
+                }
+                if let Some(link) = &shared.view_link {
+                    link_row(ui, tr("Link to look"), tr("Whoever has it can only look"), link, actions);
+                }
+                ui.add_space(6.0);
+                if ui
+                    .button(tr("Stop sharing"))
+                    .on_hover_text(tr("Keep working on this copy alone"))
+                    .clicked()
+                {
+                    actions.push(Action::StopSharing);
+                }
+            } else {
+                ui.label(tr("Put this board on a server to work on it together: everyone with the link sees changes as they are made."));
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(tr("Server"));
+                    if server_text.is_empty() {
+                        server_text.clone_from(&view.server);
+                    }
+                    ui.add(
+                        egui::TextEdit::singleline(server_text)
+                            .hint_text("boards.example.com")
+                            .desired_width(260.0),
+                    );
+                });
+                let can_make = !view.making && !server_text.trim().is_empty();
+                let label = if view.making { tr("Making the board…") } else { tr("Share this board") };
+                if ui.add_enabled(can_make, Button::new(label)).clicked() {
+                    actions.push(Action::CreateShared(server_text.trim().to_owned()));
+                }
+                ui.separator();
+                ui.label(tr("Or open a board someone shared with you:"));
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(link_text)
+                            .hint_text("https://…/board/…?key=…")
+                            .desired_width(300.0),
+                    );
+                    if ui
+                        .add_enabled(!link_text.trim().is_empty(), Button::new(tr("Open")))
+                        .clicked()
+                    {
+                        actions.push(Action::JoinShared(link_text.trim().to_owned()));
+                    }
+                });
+            }
+            if let Some(error) = &view.error {
+                ui.add_space(4.0);
+                ui.colored_label(Color32::from_rgb(0xDC, 0x26, 0x26), error);
+            }
+        });
+    if !open {
+        actions.push(Action::ToggleShare);
+    }
+}
+
+/// Other people's pointers with their names, and outlines of what they selected.
+fn others(ctx: &Context, model: &Model) {
+    if model.cursors.is_empty() && model.their_selections.is_empty() {
+        return;
+    }
+    let painter = ctx.layer_painter(egui::LayerId::new(Order::Middle, Id::unique("others")));
+    for (rect, color) in &model.their_selections {
+        let r = to_points(*rect);
+        let rect = egui::Rect::from_min_max(
+            Pos2::new(r.x0 as f32, r.y0 as f32),
+            Pos2::new(r.x1 as f32, r.y1 as f32),
+        );
+        painter.rect_stroke(
+            rect.expand(3.0),
+            2.0,
+            egui::Stroke::new(2.0, rgb(*color)),
+            egui::StrokeKind::Outside,
+        );
+    }
+    for (at, name, color) in &model.cursors {
+        let p = to_points(kurbo::Rect::from_origin_size(*at, (0.0, 0.0)));
+        let at = Pos2::new(p.x0 as f32, p.y0 as f32);
+        let color = rgb(*color);
+        // An arrow like the system's pointer.
+        let arrow = vec![
+            at,
+            at + egui::vec2(0.0, 16.0),
+            at + egui::vec2(4.5, 12.0),
+            at + egui::vec2(11.0, 12.0),
+        ];
+        painter.add(egui::Shape::convex_polygon(
+            arrow,
+            color,
+            egui::Stroke::new(1.0, Color32::WHITE),
+        ));
+        let font = egui::FontId::proportional(12.0);
+        let galley = painter.layout_no_wrap(name.clone(), font, Color32::WHITE);
+        let label = egui::Rect::from_min_size(
+            at + egui::vec2(10.0, 16.0),
+            galley.size() + egui::vec2(10.0, 4.0),
+        );
+        painter.rect_filled(label, 4.0, color);
+        painter.galley(label.min + egui::vec2(5.0, 2.0), galley, Color32::WHITE);
+    }
 }
 
 /// The toolbar of a read-only board: selecting and commenting.

@@ -130,6 +130,63 @@ const RU: &[(&str, &str)] = &[
     ("New board", "Новая доска"),
     ("Open…", "Открыть…"),
     ("Download board", "Скачать доску"),
+    ("Share", "Поделиться"),
+    (
+        "Work on this board together through a server",
+        "Работать над доской вместе через сервер",
+    ),
+    ("Try again", "Повторить"),
+    (
+        "You can look at this board but not change it.",
+        "Эту доску можно смотреть, но не менять.",
+    ),
+    ("Here now:", "Сейчас здесь:"),
+    ("Link to edit", "Ссылка для правки"),
+    (
+        "Whoever has it can change the board",
+        "У кого она есть, может менять доску",
+    ),
+    ("Link to look", "Ссылка для просмотра"),
+    (
+        "Whoever has it can only look",
+        "У кого она есть, может только смотреть",
+    ),
+    ("Stop sharing", "Перестать делиться"),
+    (
+        "Keep working on this copy alone",
+        "Продолжить работать с этой копией одному",
+    ),
+    (
+        "Put this board on a server to work on it together: everyone with the link sees changes as they are made.",
+        "Выложите доску на сервер, чтобы работать вместе: все, у кого есть ссылка, видят правки сразу.",
+    ),
+    ("Making the board…", "Создаю доску…"),
+    ("Share this board", "Поделиться этой доской"),
+    (
+        "Or open a board someone shared with you:",
+        "Или откройте доску, которой с вами поделились:",
+    ),
+    ("That is not a server address.", "Это не адрес сервера."),
+    (
+        "The server's answer is not understood.",
+        "Ответ сервера непонятен.",
+    ),
+    (
+        "That is not a link to a shared board.",
+        "Это не ссылка на общую доску.",
+    ),
+    ("Connecting…", "Подключаюсь…"),
+    ("Online: only you here", "В сети: здесь только вы"),
+    ("Offline", "Не в сети"),
+    (
+        "Could not share the board: {}",
+        "Не удалось поделиться доской: {}",
+    ),
+    ("Online: {} more here", "В сети: здесь ещё {}"),
+    (
+        "Offline: {}. Changes are kept and sent once back.",
+        "Не в сети: {}. Правки сохранятся и отправятся, когда связь вернётся.",
+    ),
     (
         "Save the board as a .pboard file on this computer",
         "Сохранить доску файлом .pboard на этот компьютер",
