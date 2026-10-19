@@ -1,0 +1,5 @@
+# Caddy in front of the server: HTTPS certificates are fetched automatically, so links
+# work as wss://board.example.com. Replace the domain with yours.
+board.example.com {
+	reverse_proxy localhost:8080
+}
