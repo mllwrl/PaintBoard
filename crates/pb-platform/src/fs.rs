@@ -35,6 +35,29 @@ pub fn app_data_dir() -> io::Result<PathBuf> {
     imp::app_data_dir()
 }
 
+/// The files directly in `dir`, by name; empty if there is no such directory.
+pub fn list(dir: &Path) -> Vec<PathBuf> {
+    imp::list(dir)
+}
+
+/// Where boards saved in the browser are kept (in the app data directory).
+#[cfg(target_arch = "wasm32")]
+pub fn boards_dir() -> io::Result<PathBuf> {
+    Ok(app_data_dir()?.join("boards"))
+}
+
+/// Files written here are downloaded by the browser instead of kept.
+#[cfg(target_arch = "wasm32")]
+pub fn downloads_dir() -> PathBuf {
+    PathBuf::from(imp::DOWNLOADS)
+}
+
+/// Where files picked in the browser are put while the app reads them.
+#[cfg(target_arch = "wasm32")]
+pub fn uploads_dir() -> PathBuf {
+    PathBuf::from("/uploads")
+}
+
 /// Directory for short-lived files (e.g. a PDF to print), created if missing.
 pub fn temp_dir() -> io::Result<PathBuf> {
     imp::temp_dir()
@@ -96,6 +119,19 @@ mod imp {
         fs::remove_file(path)
     }
 
+    pub fn list(dir: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut files: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+            .map(|e| e.path())
+            .collect();
+        files.sort();
+        files
+    }
+
     pub fn temp_dir() -> io::Result<PathBuf> {
         let dir = std::env::temp_dir().join(super::APP_DIR);
         fs::create_dir_all(&dir)?;
@@ -116,11 +152,12 @@ mod imp {
     use std::path::{Path, PathBuf};
 
     use js_sys::{AsyncIterator, Promise, Reflect, Uint8Array};
+    use wasm_bindgen::closure::Closure;
     use wasm_bindgen::{JsCast, JsValue};
     use wasm_bindgen_futures::JsFuture;
     use web_sys::{
-        File, FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemGetDirectoryOptions,
-        FileSystemGetFileOptions, FileSystemWritableFileStream,
+        Blob, File, FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemGetDirectoryOptions,
+        FileSystemGetFileOptions, FileSystemWritableFileStream, HtmlAnchorElement, Url,
     };
 
     thread_local! {
@@ -154,7 +191,26 @@ mod imp {
         FILES.with_borrow(|files| files.contains_key(path))
     }
 
+    /// Files written under this directory are handed to the browser as downloads.
+    pub const DOWNLOADS: &str = "/downloads";
+
+    pub fn list(dir: &Path) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = FILES.with_borrow(|files| {
+            files
+                .keys()
+                .filter(|p| p.parent() == Some(dir))
+                .cloned()
+                .collect()
+        });
+        files.sort();
+        files
+    }
+
     pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+        if path.parent() == Some(Path::new(DOWNLOADS)) {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            return download(&name, bytes).map_err(js_error);
+        }
         FILES.with_borrow_mut(|files| files.insert(path.to_owned(), bytes.to_vec()));
         persist(path, Some(bytes.to_vec()));
         Ok(())
@@ -174,6 +230,28 @@ mod imp {
 
     pub fn temp_dir() -> io::Result<PathBuf> {
         Ok(Path::new("/tmp").join(super::APP_DIR))
+    }
+
+    /// Lets the browser save `bytes` as a download named `name`.
+    fn download(name: &str, bytes: &[u8]) -> Result<(), JsValue> {
+        let window = web_sys::window().ok_or("no window")?;
+        let document = window.document().ok_or("no document")?;
+        let parts = js_sys::Array::of1(&Uint8Array::from(bytes));
+        let blob = Blob::new_with_u8_array_sequence(&parts)?;
+        let url = Url::create_object_url_with_blob(&blob)?;
+        let link: HtmlAnchorElement = document.create_element("a")?.unchecked_into();
+        link.set_href(&url);
+        link.set_download(name);
+        link.click();
+        // The download has started from the URL; it is not needed any more.
+        let revoke = Closure::once_into_js(move || {
+            let _ = Url::revoke_object_url(&url);
+        });
+        window.set_timeout_with_callback_and_timeout_and_arguments_0(
+            revoke.unchecked_ref(),
+            60_000,
+        )?;
+        Ok(())
     }
 
     /// Queues the change for OPFS if `path` is under the app data directory.

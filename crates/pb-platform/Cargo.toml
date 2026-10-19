@@ -44,8 +44,11 @@ windows-numerics = "0.3"
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures.workspace = true
-# The origin private file system (OPFS), where the web version keeps its files.
+# The origin private file system (OPFS), where the web version keeps its files, and the
+# browser's file picker, downloads and dialogs.
 web-sys = { version = "0.3", features = [
+    "Blob",
+    "Document",
     "File",
     "FileSystemDirectoryHandle",
     "FileSystemFileHandle",
@@ -53,7 +56,11 @@ web-sys = { version = "0.3", features = [
     "FileSystemGetFileOptions",
     "FileSystemHandle",
     "FileSystemWritableFileStream",
+    "FileList",
+    "HtmlAnchorElement",
+    "HtmlInputElement",
     "Navigator",
     "StorageManager",
+    "Url",
     "Window",
 ] }
