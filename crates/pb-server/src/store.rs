@@ -99,6 +99,22 @@ impl Store {
         Ok(new)
     }
 
+    pub fn board_count(&self) -> rusqlite::Result<usize> {
+        self.db
+            .query_row("SELECT COUNT(*) FROM boards", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|n| n as usize)
+    }
+
+    /// Writes a consistent copy of the whole database to `path` (replaced if there).
+    pub fn back_up(&self, path: &Path) -> rusqlite::Result<()> {
+        let _ = std::fs::remove_file(path);
+        self.db
+            .execute("VACUUM INTO ?1", params![path.to_string_lossy()])
+            .map(drop)
+    }
+
     /// What `token` allows on `board`; `None` if nothing.
     pub fn access(&self, board: &str, token: &str) -> rusqlite::Result<Option<Access>> {
         let edit: Option<bool> = self

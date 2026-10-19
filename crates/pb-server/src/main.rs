@@ -7,6 +7,9 @@
 //! - `PB_WEB`: the built web version (`target/web`) to serve, so a board's link opens it
 //!   in a browser.
 //!
+//! - `PB_MAX_BOARDS`: the most boards the server keeps (no limit if unset);
+//! - `PB_BACKUP`: a folder for a daily copy of the database (the newest 7 are kept).
+//!
 //! Put it behind a proxy with TLS (e.g. Caddy) so links work over `wss://`.
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -36,7 +39,26 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let shared = server::Shared::with_web(store, create_key, web);
+    let mut shared = server::Shared::with_web(store, create_key, web);
+    if let Some(max) = std::env::var("PB_MAX_BOARDS")
+        .ok()
+        .and_then(|m| m.parse().ok())
+    {
+        std::sync::Arc::get_mut(&mut shared)
+            .expect("not shared yet")
+            .max_boards = Some(max);
+    }
+    if let Some(dir) = std::env::var_os("PB_BACKUP").map(PathBuf::from) {
+        let backer = shared.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(std::time::Duration::from_secs(86_400));
+            loop {
+                every.tick().await;
+                let (shared, dir) = (backer.clone(), dir.clone());
+                let _ = tokio::task::spawn_blocking(move || shared.back_up(&dir, 7)).await;
+            }
+        });
+    }
     let saver = shared.clone();
     tokio::spawn(async move {
         let mut every = tokio::time::interval(server::SAVE_EVERY);

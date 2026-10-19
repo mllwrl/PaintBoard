@@ -21,6 +21,39 @@ use crate::store::{Access, Store};
 /// How long a new connection has to say which board it wants.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Messages a connection may send per second on average, and at once: typing and
+/// pointer moves stay well below; a client flooding the server is cut off.
+const RATE: f64 = 200.0;
+const BURST: f64 = 600.0;
+
+/// Allows messages at [`RATE`] per second with bursts of up to [`BURST`].
+struct Bucket {
+    tokens: f64,
+    at: std::time::Instant,
+}
+
+impl Bucket {
+    fn new() -> Self {
+        Self {
+            tokens: BURST,
+            at: std::time::Instant::now(),
+        }
+    }
+
+    /// Takes one message; false if over the limit.
+    fn take(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        let refill = now.duration_since(self.at).as_secs_f64() * RATE;
+        self.tokens = (self.tokens + refill).min(BURST);
+        self.at = now;
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
+        true
+    }
+}
+
 /// How often changed boards are written to the database.
 pub const SAVE_EVERY: Duration = Duration::from_secs(2);
 
@@ -34,6 +67,8 @@ pub struct Shared {
     create_key: Option<String>,
     /// The built web version to serve, so links open the board in a browser.
     web: Option<std::path::PathBuf>,
+    /// The most boards the server keeps; `None` for no limit.
+    pub max_boards: Option<usize>,
 }
 
 /// A board in memory and the connections to it.
@@ -61,6 +96,7 @@ impl Shared {
             next_client: AtomicU64::new(1),
             create_key,
             web,
+            max_boards: None,
         })
     }
 
@@ -110,6 +146,43 @@ impl Shared {
         match saved {
             Ok(()) => live.saved_assets.extend(new.iter().map(|(id, _)| *id)),
             Err(err) => log::error!("could not save board {board}: {err}"),
+        }
+    }
+
+    /// Copies the database to `dir` as `paintboard-<day>.db`, keeping the newest `keep`.
+    pub fn back_up(&self, dir: &std::path::Path, keep: usize) {
+        let day = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() / 86_400);
+        let target = dir.join(format!("paintboard-{day}.db"));
+        let made = std::fs::create_dir_all(dir)
+            .map_err(|e| e.to_string())
+            .and_then(|()| {
+                self.store
+                    .lock()
+                    .expect("store lock")
+                    .back_up(&target)
+                    .map_err(|e| e.to_string())
+            });
+        match made {
+            Ok(()) => log::info!("backed up to {}", target.display()),
+            Err(err) => log::error!("backup failed: {err}"),
+        }
+        let mut old: Vec<_> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("paintboard-") && n.ends_with(".db"))
+            })
+            .collect();
+        old.sort();
+        let extra = old.len().saturating_sub(keep);
+        for path in &old[..extra] {
+            let _ = std::fs::remove_file(path);
         }
     }
 
@@ -226,7 +299,18 @@ fn make_board(shared: &Shared, headers: &HeaderMap) -> Response {
             return (StatusCode::FORBIDDEN, "a key is needed to make boards").into_response();
         }
     }
-    let made = shared.store.lock().expect("store lock").create_board();
+    let store = shared.store.lock().expect("store lock");
+    if let Some(max) = shared.max_boards
+        && store.board_count().unwrap_or(0) >= max
+    {
+        return (
+            StatusCode::INSUFFICIENT_STORAGE,
+            "the server has no room for more boards",
+        )
+            .into_response();
+    }
+    let made = store.create_board();
+    drop(store);
     match made {
         Ok(new) => {
             log::info!("board {} made", new.board);
@@ -335,11 +419,17 @@ async fn serve(mut socket: WebSocket, shared: Arc<Shared>) {
         return refuse(socket, &err).await;
     }
     log::info!("{name} ({client}) joined board {board}");
+    let mut bucket = Bucket::new();
 
     loop {
         tokio::select! {
             incoming = receive(&mut socket) => {
                 let Some(incoming) = incoming else { break };
+                let incoming = if bucket.take() {
+                    incoming
+                } else {
+                    Err("too many messages: slow down".to_owned())
+                };
                 let result = incoming.and_then(|message| {
                     let mut live = live.lock().expect("room lock");
                     let out = live.room.receive(client, message)?;

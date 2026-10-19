@@ -16,6 +16,9 @@ use crate::message::{ClientId, Message, Presence};
 /// The largest picture or file the room takes.
 pub const MAX_ASSET: usize = 64 << 20;
 
+/// The most all of a board's pictures and files may take together.
+pub const MAX_ASSETS_TOTAL: usize = 512 << 20;
+
 /// Messages to send: to whom, and what.
 pub type Outgoing = Vec<(ClientId, Message)>;
 
@@ -161,6 +164,10 @@ impl Room {
                 }
                 if bytes.len() > MAX_ASSET {
                     return Err("the file is too large".into());
+                }
+                let total: usize = self.assets.values().map(|a| a.len()).sum();
+                if total + bytes.len() > MAX_ASSETS_TOTAL {
+                    return Err("the board has no room for more pictures and files".into());
                 }
                 let id = AssetId::of(&bytes);
                 if self.assets.contains_key(&id) {

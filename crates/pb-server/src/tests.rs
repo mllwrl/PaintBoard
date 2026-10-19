@@ -245,3 +245,73 @@ async fn links_open_the_web_version() {
     assert!(get_page(&addr, "/health").await.1.contains("ok"));
     std::fs::remove_dir_all(&web).unwrap();
 }
+
+#[tokio::test]
+async fn floods_are_cut_off() {
+    let (addr, _) = start(None).await;
+    let body = make_board(&addr, None).await.1;
+    let (board, edit) = (field(&body, "board"), field(&body, "edit"));
+    let mut a = Peer::join(&addr, &board, &edit, doc(1)).await;
+    a.pump().await;
+    // The server cuts the connection, possibly while this is still sending.
+    let mut cut = false;
+    for _ in 0..3000 {
+        let frame = Message::Presence(pb_sync::Presence::default()).encode();
+        if a.socket
+            .send(tungstenite::Message::Binary(frame.into()))
+            .await
+            .is_err()
+        {
+            cut = true;
+            break;
+        }
+    }
+    if !cut {
+        a.pump().await;
+    }
+    let told = a
+        .events
+        .iter()
+        .any(|e| matches!(e, Event::Error(text) if text.contains("too many")));
+    assert!(cut || told);
+}
+
+#[tokio::test]
+async fn the_number_of_boards_can_be_limited() {
+    let mut shared = Shared::new(Store::in_memory().unwrap(), None);
+    std::sync::Arc::get_mut(&mut shared).unwrap().max_boards = Some(1);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move { axum::serve(listener, router(shared)).await.unwrap() });
+    assert!(make_board(&addr, None).await.0.contains("200"));
+    assert!(make_board(&addr, None).await.0.contains("507"));
+}
+
+#[test]
+fn backups_keep_the_newest() {
+    let dir = std::env::temp_dir().join(format!("pb-backup-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for day in ["paintboard-1.db", "paintboard-2.db", "paintboard-3.db"] {
+        std::fs::write(dir.join(day), "old").unwrap();
+    }
+    let store = Store::in_memory().unwrap();
+    let made = store.create_board().unwrap();
+    let shared = Shared::new(store, None);
+    shared.back_up(&dir, 2);
+    let mut names: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names.len(), 2);
+    // Today's copy is a working database with the board in it.
+    let copy = names
+        .iter()
+        .find(|n| !n.starts_with("paintboard-3"))
+        .unwrap();
+    let copy = Store::open(&dir.join(copy)).unwrap();
+    assert!(copy.load(&made.board).unwrap().is_some());
+    drop(copy);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
