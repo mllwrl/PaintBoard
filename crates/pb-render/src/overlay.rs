@@ -60,6 +60,9 @@ pub struct Overlay {
     pub comment_pins: Vec<(Point, bool, bool)>,
     /// Top right corners of objects with links (world); their badges sit beside them.
     pub link_badges: Vec<Point>,
+    /// Page turning buttons of books: the middle of the page's side (world) and the way out
+    /// of the page from there; the button sits outside, its arrow pointing that way.
+    pub page_turns: Vec<(Point, Vec2)>,
     pub quick_dot_radius: f64,
 }
 
@@ -100,6 +103,16 @@ pub const LINK_BADGE_OFFSET: f64 = 4.0;
 pub fn link_badge_center(corner: Point, scale: f64) -> Point {
     let d = (LINK_BADGE_OFFSET + LINK_BADGE_RADIUS) * scale;
     corner + Vec2::new(d, -d)
+}
+
+/// Page turning buttons: radius, and the gap between them and the page, in logical pixels.
+pub const PAGE_TURN_RADIUS: f64 = 14.0;
+const PAGE_TURN_GAP: f64 = 6.0;
+
+/// Where the page turning button by `edge` (physical pixels) is drawn, `outward` from the
+/// page (a unit vector), at display `scale`.
+pub fn page_turn_center(edge: Point, outward: Vec2, scale: f64) -> Point {
+    edge + outward * ((PAGE_TURN_RADIUS + PAGE_TURN_GAP) * scale)
 }
 
 /// Handle radius in logical pixels.
@@ -340,6 +353,23 @@ pub fn draw_overlay(
                 * Affine::rotate(-std::f64::consts::FRAC_PI_4);
             scene.stroke(&handle_stroke, at, colors.accent, None, &link);
         }
+    }
+    for &(edge, outward) in &overlay.page_turns {
+        let center = page_turn_center(to_px(edge), outward, scale);
+        let r = PAGE_TURN_RADIUS * scale;
+        let button = Circle::new(center, r);
+        scene.fill(Fill::NonZero, id, colors.handle_fill, None, &button);
+        scene.stroke(&handle_stroke, id, colors.accent, None, &button);
+        // A chevron pointing away from the page.
+        let across = Vec2::new(-outward.y, outward.x) * (r * 0.38);
+        let tip = center + outward * (r * 0.22);
+        let back = center - outward * (r * 0.2);
+        let mut chevron = BezPath::new();
+        chevron.move_to(back + across);
+        chevron.line_to(tip);
+        chevron.line_to(back - across);
+        let line = Stroke::new(2.2 * scale).with_caps(Cap::Round);
+        scene.stroke(&line, id, colors.accent, None, &chevron);
     }
     if let Some(edit) = &overlay.text_edit {
         let selection = colors.accent.multiply_alpha(0.25);

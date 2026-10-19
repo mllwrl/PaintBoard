@@ -203,6 +203,7 @@ mod tests {
             kind: pb_core::ObjectKind::Image(pb_core::Image {
                 asset,
                 crop: Rect::new(0.0, 0.0, 1.0, 1.0),
+                book: None,
             }),
             bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
             rotation: 0.0,

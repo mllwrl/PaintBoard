@@ -289,6 +289,21 @@ const RU: &[(&str, &str)] = &[
         "Заново получить заголовок и описание страницы",
     ),
     ("Crop", "Кадрировать"),
+    ("Previous page (PageUp)", "Предыдущая страница (PageUp)"),
+    ("Next page (PageDown)", "Следующая страница (PageDown)"),
+    (
+        "Page: type a number or drag",
+        "Страница: введите номер или потяните",
+    ),
+    ("of {}", "из {}"),
+    (
+        "Next / previous page of a selected PDF book",
+        "Следующая / предыдущая страница выделенной PDF-книги",
+    ),
+    (
+        "Could not turn the page",
+        "Не удалось перелистнуть страницу",
+    ),
     (
         "Double click or Enter; Enter or a click outside to finish, Esc to cancel",
         "Двойной щелчок или Enter; Enter или щелчок мимо — готово, Esc — отмена",
@@ -763,14 +778,6 @@ const RU: &[(&str, &str)] = &[
     (
         "Some files could not be added",
         "Некоторые файлы не удалось добавить",
-    ),
-    (
-        "Only the first pages were added",
-        "Добавлены только первые страницы",
-    ),
-    (
-        "{} has {} pages; the first {} are on the board.",
-        "{}: страниц {}, на доску добавлены первые {}.",
     ),
     ("Could not paste the image", "Не удалось вставить картинку"),
     ("Pasted table", "Вставленная таблица"),

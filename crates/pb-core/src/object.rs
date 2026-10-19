@@ -664,6 +664,8 @@ pub struct Image {
     /// The part of the picture shown, as fractions of its width and height: [`Image::FULL`]
     /// shows all of it.
     pub crop: Rect,
+    /// For a PDF shown a page at a time: the file and the page; `asset` is that page.
+    pub book: Option<Book>,
 }
 
 impl Image {
@@ -673,8 +675,20 @@ impl Image {
         Self {
             asset,
             crop: Self::FULL,
+            book: None,
         }
     }
+}
+
+/// A PDF on the board like a book: one page shown at a time, turned in place.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Book {
+    /// The PDF file, in [`crate::Assets`].
+    pub pdf: AssetId,
+    /// The page shown, from 0.
+    pub page: u32,
+    /// How many pages the file has.
+    pub pages: u32,
 }
 
 /// A point of a freehand stroke, relative to the object's bounds: `(0, 0)` is the top-left

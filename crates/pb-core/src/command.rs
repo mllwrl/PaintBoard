@@ -4,8 +4,8 @@ use kurbo::{Rect, Vec2};
 use pb_geom::Frame;
 
 use crate::{
-    Card, Cell, Column, Comment, ConnectorChange, Content, Embed, Label, Layer, Line, Link, Merge,
-    Node, ObjectId, Reaction, Spans, StyleChange, Tag, ThreadAnchor,
+    AssetId, Card, Cell, Column, Comment, ConnectorChange, Content, Embed, Label, Layer, Line,
+    Link, Merge, Node, ObjectId, Reaction, Spans, StyleChange, Tag, ThreadAnchor,
 };
 
 /// A user-level edit. Each applied command is one undo step and, later, one unit of sync.
@@ -51,6 +51,14 @@ pub enum Command {
     SetCrop {
         id: ObjectId,
         crop: Rect,
+        bounds: Rect,
+    },
+    /// Shows another page of a book (see `Image::book`): `asset` is that page's picture,
+    /// shown whole over `bounds`. Takes a book only.
+    TurnPage {
+        id: ObjectId,
+        page: u32,
+        asset: AssetId,
         bounds: Rect,
     },
     /// Changes connectors' ends, route or arrowheads; other ids are ignored.
@@ -243,6 +251,8 @@ impl Command {
                 | Self::Vote { .. }
                 | Self::SaveTalktrack(_)
                 | Self::RemoveTalktrack(_)
+                // Reading a book does not change what it says.
+                | Self::TurnPage { .. }
         )
     }
 }

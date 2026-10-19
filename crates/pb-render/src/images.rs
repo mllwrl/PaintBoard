@@ -30,6 +30,12 @@ impl ImageCache {
         brush.as_ref()
     }
 
+    /// Drops the decoded image of `id`, e.g. a book's page turned away from: decoded pages
+    /// are large, and a book has many.
+    pub fn forget(&mut self, id: AssetId) {
+        self.decoded.remove(&id);
+    }
+
     /// Drops all decoded images (another board was opened).
     pub fn clear(&mut self) {
         self.decoded.clear();

@@ -35,10 +35,13 @@ impl Clipboard {
         self.assets = items
             .iter()
             .flat_map(Content::shapes)
-            .filter_map(|data| match data.kind {
-                ObjectKind::Image(image) => doc.assets().get(image.asset).cloned(),
-                _ => None,
+            .flat_map(|data| match data.kind {
+                // A book needs its PDF too, to turn pages.
+                ObjectKind::Image(image) => [Some(image.asset), image.book.map(|b| b.pdf)],
+                _ => [None, None],
             })
+            .flatten()
+            .filter_map(|asset| doc.assets().get(asset).cloned())
             .collect();
         self.items = items;
         self.pastes = 0;

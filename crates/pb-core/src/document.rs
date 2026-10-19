@@ -22,9 +22,9 @@ use crate::rich::{self, Span, Spans};
 
 use crate::command::reorder;
 use crate::{
-    Applied, AssetId, Assets, Command, Connector, Content, End, FrameData, Group, HAlign, Image,
-    Ink, Layer, Line, Link, Object, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Sticky, Style,
-    StyleChange, Tag, Tags, Text, VAlign, ZOrder,
+    Applied, AssetId, Assets, Book, Command, Connector, Content, End, FrameData, Group, HAlign,
+    Image, Ink, Layer, Line, Link, Object, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Sticky,
+    Style, StyleChange, Tag, Tags, Text, VAlign, ZOrder,
 };
 
 /// Font size of text objects stored without one.
@@ -102,6 +102,11 @@ mod key {
     pub const CROP_Y0: &str = "cropY0";
     pub const CROP_X1: &str = "cropX1";
     pub const CROP_Y1: &str = "cropY1";
+    /// A book (an image showing a PDF a page at a time, see `Book`): the PDF's hash, the
+    /// page shown and the number of pages.
+    pub const PDF: &str = "pdf";
+    pub const PAGE: &str = "page";
+    pub const PAGES: &str = "pages";
     /// Connectors: route and arrowheads...
     pub const ROUTE: &str = "route";
     pub const START_CAP: &str = "startCap";
@@ -486,6 +491,10 @@ impl Document {
                 ObjectKind::Image(image) => Some(image.asset),
                 _ => None,
             })
+            .chain(self.objects.iter().filter_map(|o| match &o.data.kind {
+                ObjectKind::Image(image) => image.book.map(|b| b.pdf),
+                _ => None,
+            }))
             .chain(self.talktracks.iter().filter_map(|t| t.audio))
             .chain(self.versions.iter().flat_map(|v| v.assets.iter().copied()))
             .collect();
@@ -1024,6 +1033,25 @@ impl Document {
                 }
                 let meta = self.tree.get_meta(self.nodes[&id])?;
                 write_crop(&meta, crop)?;
+                write_bounds(&meta, bounds.abs())?;
+            }
+            Command::TurnPage {
+                id,
+                page,
+                asset,
+                bounds,
+            } => {
+                let Some(ObjectKind::Image(Image {
+                    book: Some(book), ..
+                })) = self.get(id).map(|o| &o.data.kind)
+                else {
+                    return Err(Error::UnknownObject(id));
+                };
+                let page = page.min(book.pages.saturating_sub(1));
+                let meta = self.tree.get_meta(self.nodes[&id])?;
+                meta.insert(key::ASSET, asset.to_string())?;
+                meta.insert(key::PAGE, i64::from(page))?;
+                write_crop(&meta, Image::FULL)?;
                 write_bounds(&meta, bounds.abs())?;
             }
             Command::SetConnector { ids, change } => {
@@ -2094,6 +2122,11 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
         ObjectKind::Image(image) => {
             meta.insert(key::ASSET, image.asset.to_string())?;
             write_crop(meta, image.crop)?;
+            if let Some(book) = image.book {
+                meta.insert(key::PDF, book.pdf.to_string())?;
+                meta.insert(key::PAGE, i64::from(book.page))?;
+                meta.insert(key::PAGES, i64::from(book.pages))?;
+            }
         }
         ObjectKind::Connector(c) => {
             let all = crate::ConnectorChange {
@@ -3051,7 +3084,23 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
                 (Some(x0), Some(y0), Some(x1), Some(y1)) => Rect::new(x0, y0, x1, y1),
                 _ => Image::FULL,
             };
-            ObjectKind::Image(Image { asset, crop })
+            let int = |k| match meta.get(k) {
+                Some(ValueOrContainer::Value(LoroValue::I64(v))) => u32::try_from(v).ok(),
+                _ => None,
+            };
+            let book = match (meta.get(key::PDF), int(key::PAGES)) {
+                (Some(ValueOrContainer::Value(LoroValue::String(pdf))), Some(pages))
+                    if pages > 0 =>
+                {
+                    AssetId::parse(&pdf).map(|pdf| Book {
+                        pdf,
+                        page: int(key::PAGE).unwrap_or(0).min(pages - 1),
+                        pages,
+                    })
+                }
+                _ => None,
+            };
+            ObjectKind::Image(Image { asset, crop, book })
         }
         ValueOrContainer::Value(LoroValue::String(s)) => {
             let text = match meta.get(key::TEXT) {
@@ -3643,6 +3692,7 @@ mod tests {
         picture.kind = ObjectKind::Image(Image {
             asset,
             crop: Rect::new(0.0, 0.0, 1.0, 1.0),
+            book: None,
         });
         let image = create(&mut doc, picture);
         save_version(&mut doc, "v1", 10);
@@ -4849,6 +4899,7 @@ mod tests {
         data.kind = ObjectKind::Image(Image {
             asset,
             crop: Rect::new(0.25, 0.0, 1.0, 0.5),
+            book: None,
         });
         let id = create(&mut doc, data.clone());
         create(&mut doc, data.clone());
@@ -4860,7 +4911,14 @@ mod tests {
         let bounds = Rect::new(5.0, 5.0, 25.0, 20.0);
         doc.apply(Command::SetCrop { id, crop, bounds }).unwrap();
         let stored = &doc.get(id).unwrap().data;
-        assert_eq!(stored.kind, ObjectKind::Image(Image { asset, crop }));
+        assert_eq!(
+            stored.kind,
+            ObjectKind::Image(Image {
+                asset,
+                crop,
+                book: None
+            })
+        );
         assert_eq!(stored.bounds, bounds);
         let square = doc.roots()[2];
         assert!(
@@ -4875,6 +4933,68 @@ mod tests {
         doc.apply(Command::Delete(doc.roots().to_vec())).unwrap();
         assert!(doc.used_assets().is_empty());
         assert!(doc.assets().contains(asset));
+    }
+
+    #[test]
+    fn book_keeps_its_page_and_turns_in_place() {
+        let mut doc = Document::new();
+        let pdf = doc.add_asset(b"fake pdf".to_vec());
+        let first = doc.add_asset(b"page 1".to_vec());
+        let mut data = rect(0.0, 0.0, 40.0, 30.0);
+        data.kind = ObjectKind::Image(Image {
+            book: Some(Book {
+                pdf,
+                page: 0,
+                pages: 3,
+            }),
+            ..Image::new(first)
+        });
+        let id = create(&mut doc, data.clone());
+        assert_eq!(doc.used_assets(), {
+            let mut ids = vec![pdf, first];
+            ids.sort();
+            ids
+        });
+        let second = doc.add_asset(b"page 2".to_vec());
+        let bounds = Rect::new(0.0, 0.0, 40.0, 50.0);
+        let turn = |page| Command::TurnPage {
+            id,
+            page,
+            asset: second,
+            bounds,
+        };
+        doc.apply(turn(1)).unwrap();
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        let stored = &loaded.get(id).unwrap().data;
+        let ObjectKind::Image(image) = stored.kind else {
+            panic!("not an image");
+        };
+        assert_eq!(image.asset, second);
+        assert_eq!(image.book.unwrap().page, 1);
+        assert_eq!(stored.bounds, bounds);
+        // Past the last page stays on the last one.
+        doc.apply(turn(10)).unwrap();
+        assert!(matches!(
+            doc.get(id).unwrap().data.kind,
+            ObjectKind::Image(Image {
+                book: Some(Book { page: 2, .. }),
+                ..
+            })
+        ));
+        doc.undo().unwrap();
+        doc.undo().unwrap();
+        assert_eq!(doc.get(id).unwrap().data, data);
+        // Only books turn pages.
+        let square = create(&mut doc, rect(0.0, 0.0, 1.0, 1.0));
+        assert!(
+            doc.apply(Command::TurnPage {
+                id: square,
+                page: 1,
+                asset: second,
+                bounds,
+            })
+            .is_err()
+        );
     }
 
     fn connector(start: End, end: End) -> ObjectData {

@@ -28,9 +28,9 @@ pub use kanban::{Card, Column, Kanban, KanbanPart};
 pub use layer::Layer;
 pub use mindmap::{MindMap, MindMapPart, Node};
 pub use object::{
-    Content, Doc, Embed, Filter, FrameData, Group, HAlign, Image, Ink, InkPoint, Link, Object,
-    ObjectData, ObjectId, ObjectKind, Rgba, Shape, Sticky, Style, StyleChange, Tag, Tags, Text,
-    TextBox, VAlign,
+    Book, Content, Doc, Embed, Filter, FrameData, Group, HAlign, Image, Ink, InkPoint, Link,
+    Object, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Sticky, Style, StyleChange, Tag, Tags,
+    Text, TextBox, VAlign,
 };
 pub use pb_geom::ShapeKind;
 pub use reaction::Reaction;

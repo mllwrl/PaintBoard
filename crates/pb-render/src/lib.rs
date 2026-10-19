@@ -11,8 +11,8 @@ pub use grid::{GridColors, GridStyle, draw_grid};
 pub use images::ImageCache;
 pub use objects::{TextRenderer, fitted_font_size, painted_bounds, text_align};
 pub use overlay::{
-    COMMENT_PIN_RADIUS, LINK_BADGE_RADIUS, Overlay, OverlayColors, TextEditOverlay,
-    comment_pin_center, link_badge_center,
+    COMMENT_PIN_RADIUS, LINK_BADGE_RADIUS, Overlay, OverlayColors, PAGE_TURN_RADIUS,
+    TextEditOverlay, comment_pin_center, link_badge_center, page_turn_center,
 };
 pub use vello;
 

@@ -216,6 +216,8 @@ pub enum Action {
     FollowLink,
     /// Fetches the selected web page card's page again to fill it in.
     FetchPreview,
+    /// Turns the selected book (a PDF shown a page at a time) to a page, from 0.
+    TurnPage(u32),
     /// Lays the selection out in a grid (`None`) or in clusters.
     Arrange(Option<pb_tools::ClusterBy>),
     /// Puts your reaction on the selected object, or takes it off.
@@ -510,6 +512,9 @@ pub struct SelectionInfo {
     pub my_reactions: Option<Vec<pb_core::Reaction>>,
     /// A single web page card is selected.
     pub is_embed: bool,
+    /// A single book (a PDF shown a page at a time) is selected: the page it shows (from
+    /// 0) and how many it has.
+    pub book: Option<(u32, u32)>,
     /// A single unlocked image is selected.
     pub can_crop: bool,
     pub several: bool,
@@ -1127,6 +1132,34 @@ fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: 
 }
 
 /// The toolbar of a read-only board: selecting and commenting.
+/// A book's page buttons: previous, the page number (typed or dragged to jump), next.
+fn book_controls(ui: &mut egui::Ui, page: u32, pages: u32, actions: &mut Vec<Action>) {
+    let previous = ui
+        .add_enabled(page > 0, Button::new("◀"))
+        .on_hover_text(tr("Previous page (PageUp)"));
+    if previous.clicked() {
+        actions.push(Action::TurnPage(page - 1));
+    }
+    let mut shown = page + 1;
+    let number = ui
+        .add(
+            egui::DragValue::new(&mut shown)
+                .range(1..=pages.max(1))
+                .speed(0.2),
+        )
+        .on_hover_text(tr("Page: type a number or drag"));
+    if number.changed() && shown != page + 1 {
+        actions.push(Action::TurnPage(shown.saturating_sub(1)));
+    }
+    ui.label(trf("of {}", &[&pages]));
+    let next = ui
+        .add_enabled(page + 1 < pages, Button::new("▶"))
+        .on_hover_text(tr("Next page (PageDown)"));
+    if next.clicked() {
+        actions.push(Action::TurnPage(page + 1));
+    }
+}
+
 fn read_only_toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
     let screen = ctx.content_rect();
     Area::new(Id::unique("tools"))
@@ -1771,6 +1804,11 @@ fn selection_toolbar(
                 // Too wide for the window: the buttons go on in more rows.
                 ui.set_max_width(ctx.content_rect().width() - 2.0 * MARGIN - 16.0);
                 ui.horizontal_wrapped(|ui| {
+                    // Pages turn on read-only boards and locked books too.
+                    if let Some((page, pages)) = selection.book {
+                        book_controls(ui, page, pages, actions);
+                        ui.separator();
+                    }
                     if selection.read_only {
                         if ui.button(tr("Copy")).on_hover_text(tr("Ctrl+C")).clicked() {
                             actions.push(Action::Copy);
@@ -3372,6 +3410,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+Shift+S", "Save as"),
             ("Ctrl+Shift+E", "Export a picture or PDF"),
             ("Ctrl+P", "Print (opens a PDF)"),
+            ("PageDown / PageUp", "Next / previous page of a selected PDF book"),
             ("Wheel, Shift+wheel", "Scroll up and down, sideways"),
             ("Space+drag, middle drag", "Pan"),
             ("Ctrl+wheel, Ctrl+= / -", "Zoom"),

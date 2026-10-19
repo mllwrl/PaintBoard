@@ -21,23 +21,50 @@ const MAX_SIDE: f32 = 4096.0;
 
 /// How many pages `bytes` has, or why it cannot be read.
 pub fn page_count(bytes: &[u8]) -> Result<usize, String> {
-    let pdf = Pdf::new(bytes.to_vec()).map_err(|e| format!("not a readable PDF ({e:?})"))?;
-    Ok(pdf.pages().len())
+    Ok(Reader::open(bytes)?.page_count())
 }
 
 /// Renders the first `max_pages` pages of the PDF in `bytes`, white behind them.
 pub fn render_pages(bytes: &[u8], max_pages: usize) -> Result<Vec<Page>, String> {
-    let pdf = Pdf::new(bytes.to_vec()).map_err(|e| format!("not a readable PDF ({e:?})"))?;
-    let cache = RenderCache::new();
-    let settings = InterpreterSettings::default();
-    let mut pages = Vec::new();
-    for page in pdf.pages().iter().take(max_pages) {
+    let reader = Reader::open(bytes)?;
+    let pages: Vec<Page> = (0..reader.page_count().min(max_pages))
+        .filter_map(|i| reader.render(i).ok())
+        .collect();
+    if pages.is_empty() {
+        return Err("the PDF has no pages to show".into());
+    }
+    Ok(pages)
+}
+
+/// An open PDF whose pages are rendered one at a time, as a book on the board turns them.
+pub struct Reader {
+    pdf: Pdf,
+}
+
+impl Reader {
+    /// Reads the PDF in `bytes`, or says why it cannot.
+    pub fn open(bytes: &[u8]) -> Result<Self, String> {
+        let pdf = Pdf::new(bytes.to_vec()).map_err(|e| format!("not a readable PDF ({e:?})"))?;
+        Ok(Self { pdf })
+    }
+
+    pub fn page_count(&self) -> usize {
+        self.pdf.pages().len()
+    }
+
+    /// Page `index` (from 0), white behind it.
+    pub fn render(&self, index: usize) -> Result<Page, String> {
+        let page = self
+            .pdf
+            .pages()
+            .get(index)
+            .ok_or_else(|| format!("the PDF has no page {}", index + 1))?;
         let (w, h) = page.render_dimensions();
         let scale = SCALE.min(MAX_SIDE / w.max(h).max(1.0));
         let pixmap = render(
             page,
-            &cache,
-            &settings,
+            &RenderCache::new(),
+            &InterpreterSettings::default(),
             &RenderSettings::default(),
             &PixmapSettings {
                 x_scale: scale,
@@ -47,15 +74,11 @@ pub fn render_pages(bytes: &[u8], max_pages: usize) -> Result<Vec<Page>, String>
         );
         let (width, height) = (u32::from(pixmap.width()), u32::from(pixmap.height()));
         if width == 0 || height == 0 {
-            continue;
+            return Err(format!("page {} is empty", index + 1));
         }
         let png = pixmap.into_png().map_err(|e| e.to_string())?;
-        pages.push(Page { png, width, height });
+        Ok(Page { png, width, height })
     }
-    if pages.is_empty() {
-        return Err("the PDF has no pages to show".into());
-    }
-    Ok(pages)
 }
 
 /// A page of a PDF being written: one JPEG picture covering it.
@@ -210,6 +233,28 @@ mod tests {
         let decoded = image_dims(&pages[0].png);
         assert_eq!(decoded, (200, 200));
         assert!(render_pages(b"not a pdf", 10).is_err());
+    }
+
+    #[test]
+    fn reader_renders_any_page() {
+        let pixels = crate::image::Pixels {
+            width: 2,
+            height: 2,
+            rgba: [0; 16].to_vec(),
+        };
+        let jpeg = crate::image::encode_jpeg(&pixels, 90).unwrap();
+        let page = |size| PicturePage {
+            jpeg: &jpeg,
+            pixels: (2, 2),
+            size,
+        };
+        let bytes = write_pictures(&[page((100.0, 50.0)), page((50.0, 100.0))]);
+        let reader = Reader::open(&bytes).unwrap();
+        assert_eq!(reader.page_count(), 2);
+        let second = reader.render(1).unwrap();
+        assert_eq!((second.width, second.height), (100, 200));
+        assert!(reader.render(2).is_err());
+        assert!(Reader::open(b"not a pdf").is_err());
     }
 
     fn image_dims(png: &[u8]) -> (u32, u32) {

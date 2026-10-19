@@ -24,6 +24,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
+use crate::books::{self, Books, Turn};
 use crate::editing::{self, KeyOutcome, NEW_TEXT_SIZE, TextEdit};
 use crate::export;
 use crate::i18n::{tr, trf};
@@ -69,6 +70,13 @@ pub enum UserEvent {
     /// A background save finished; the session takes the outcome in on the next tick.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Saved,
+    /// A book's page was rendered on a background thread.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    PageRendered {
+        pdf: pb_core::AssetId,
+        page: u32,
+        result: Result<pb_io::pdf::Page, String>,
+    },
 }
 
 /// What recognized handwriting is for.
@@ -126,6 +134,8 @@ pub struct App {
     touch: Option<u64>,
     text: TextRenderer,
     images: ImageCache,
+    /// Pages of books (PDFs shown a page at a time) rendered and on their way.
+    books: Books,
     /// Files dropped on the window since the last pass of the event loop; dropping several
     /// files sends one event each, and they are placed together.
     dropped: Vec<PathBuf>,
@@ -243,6 +253,7 @@ impl App {
             touch: None,
             text: TextRenderer::new(),
             images: ImageCache::default(),
+            books: Books::default(),
             dropped: Vec::new(),
             editing: None,
             cropping: None,
@@ -352,6 +363,11 @@ impl App {
         }
         let mut overlay = overlay(&self.document, &self.tools, &overrides, self.camera.zoom());
         overlay.link_badges = self.link_badges().into_iter().map(|(p, _)| p).collect();
+        overlay.page_turns = self
+            .page_turns()
+            .into_iter()
+            .map(|(edge, outward, ..)| (edge, outward))
+            .collect();
         overlay.comment_pins = self
             .comment_pins()
             .into_iter()
@@ -1045,6 +1061,13 @@ impl App {
                     Some(ObjectKind::Embed(_))
                 )
             ),
+            book: match ids {
+                [id] => books::book_of(&self.document, *id).map(|(book, _)| {
+                    let page = self.books.page(&self.document, *id).unwrap_or(book.page);
+                    (page, book.pages)
+                }),
+                _ => None,
+            },
             can_crop: matches!(ids, [id] if Crop::new(&self.document, *id).is_some()),
             several: ids.len() > 1,
             locked: selection.has_locked(&self.document),
@@ -1382,6 +1405,11 @@ impl App {
                     self.fetch_preview(*id, true);
                 }
             }
+            Action::TurnPage(page) => {
+                if let [id] = self.tools.selection().ids() {
+                    self.turn_page(*id, page);
+                }
+            }
             Action::ToggleTag(id) => self.toggle_tag(id),
             Action::NewTag(name) => self.new_tag(name),
             Action::RecolorTag(id) => {
@@ -1686,44 +1714,163 @@ impl App {
         }
     }
 
-    /// Adds the pages of the PDF file at `path` side by side as a group, as one undo step,
-    /// and selects it. Very long files are cut, with a note.
+    /// Adds the PDF file at `path` as a book: its first page, with buttons to turn the
+    /// pages in place. A single page becomes a plain picture.
     fn insert_pdf(&mut self, path: &std::path::Path, at: Option<Point>) -> Result<(), String> {
         let bytes = pb_platform::fs::read(path).map_err(|e| e.to_string())?;
-        let count = pb_io::pdf::page_count(&bytes)?;
-        let pages = pb_io::pdf::render_pages(&bytes, MAX_PDF_PAGES)?;
-        let pictures: Vec<Picture> = pages
-            .into_iter()
-            .map(|page| Picture {
-                bytes: page.png,
-                // Shown at the page's own size in points: rendered at twice that, so it
-                // stays sharp up close.
-                width: (page.width / 2).max(1),
-                height: (page.height / 2).max(1),
-            })
-            .collect();
-        let several = pictures.len() > 1;
-        self.document.begin_undo_group();
-        self.insert_pictures(pictures, at);
-        if several {
-            let ids = self.tools.selection().ids().to_vec();
-            self.apply(Command::Group(ids.clone()));
-            if let Some(&first) = ids.first() {
-                let group = self.document.top_level(first);
-                self.tools.select_only([group]);
-            }
+        let reader = pb_io::pdf::Reader::open(&bytes)?;
+        let pages = reader.page_count();
+        let first = reader.render(0)?;
+        let picture = Picture {
+            bytes: first.png,
+            // Shown at the page's own size in points: rendered at twice that, so it stays
+            // sharp up close.
+            width: (first.width / 2).max(1),
+            height: (first.height / 2).max(1),
+        };
+        if pages < 2 {
+            self.insert_pictures(vec![picture], at);
+            return Ok(());
         }
-        self.document.end_undo_group();
-        if count > MAX_PDF_PAGES {
-            dialog::show_error(
-                tr("Only the first pages were added"),
-                &trf(
-                    "{} has {} pages; the first {} are on the board.",
-                    &[&path.display(), &count, &MAX_PDF_PAGES],
-                ),
-            );
-        }
+        let pdf = self.document.add_asset(bytes);
+        self.insert_book(picture, pdf, pages, at);
         Ok(())
+    }
+
+    /// Places a book showing `first`, its first page, and selects it.
+    fn insert_book(
+        &mut self,
+        first: Picture,
+        pdf: pb_core::AssetId,
+        pages: usize,
+        at: Option<Point>,
+    ) {
+        self.finish_editing();
+        self.tools.set_active(ToolKind::Select);
+        let visible = self.camera.visible_world_rect(self.viewport());
+        let at = at.unwrap_or(visible.center());
+        let pixels_per_unit = self.camera.zoom() * self.scale();
+        let [bounds] =
+            pictures::place(&[(first.width, first.height)], at, pixels_per_unit, visible)[..]
+        else {
+            return;
+        };
+        let asset = self.document.add_asset(first.bytes);
+        let mut data = pictures::image_object(asset, bounds);
+        if let ObjectKind::Image(image) = &mut data.kind {
+            image.book = Some(pb_core::Book {
+                pdf,
+                page: 0,
+                pages: u32::try_from(pages).unwrap_or(u32::MAX),
+            });
+        }
+        self.apply(Command::Create(vec![data.into()]));
+        // The second page is likely next.
+        if let Ok(turn) = self.books.render(&self.document, pdf, 1) {
+            self.run_turn(turn);
+        }
+        self.request_redraw();
+    }
+
+    /// The selected book, if a single one is selected.
+    fn selected_book(&self) -> Option<ObjectId> {
+        match self.tools.selection().ids() {
+            [id] => books::book_of(&self.document, *id).map(|_| *id),
+            _ => None,
+        }
+    }
+
+    /// Turns the selected book `step` pages on (back if negative).
+    fn step_book(&mut self, step: i64) {
+        let Some(id) = self.selected_book() else {
+            return;
+        };
+        self.step_book_of(id, step);
+    }
+
+    fn step_book_of(&mut self, id: ObjectId, step: i64) {
+        let Some(page) = self.books.page(&self.document, id) else {
+            return;
+        };
+        let page = (i64::from(page) + step).clamp(0, i64::from(u32::MAX));
+        self.turn_page(id, page as u32);
+    }
+
+    /// Turns book `id` to `page` (from 0): right away if the page is rendered, else once
+    /// it is.
+    fn turn_page(&mut self, id: ObjectId, page: u32) {
+        match self.books.turn(&self.document, id, page) {
+            Ok(turn) => self.run_turn(turn),
+            Err(err) => dialog::show_error(tr("Could not turn the page"), &err),
+        }
+        self.request_redraw();
+    }
+
+    fn run_turn(&mut self, turn: Turn) {
+        match turn {
+            Turn::Ready(command) => self.apply_turn(command),
+            Turn::Render { reader, pdf, page } => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let proxy = self.proxy.clone();
+                    std::thread::spawn(move || {
+                        let result = reader.render(page as usize);
+                        let _ = proxy.send_event(UserEvent::PageRendered { pdf, page, result });
+                    });
+                }
+                // No threads in the browser: render now.
+                #[cfg(target_arch = "wasm32")]
+                self.finish_page(pdf, page, reader.render(page as usize));
+            }
+            Turn::Nothing => {}
+        }
+    }
+
+    /// Shows a turned page, lets go of the one before, and renders the next ahead of time.
+    fn apply_turn(&mut self, command: Command) {
+        let Command::TurnPage { id, .. } = command else {
+            return;
+        };
+        let old = match self.document.get(id).map(|o| &o.data.kind) {
+            Some(ObjectKind::Image(image)) => Some(image.asset),
+            _ => None,
+        };
+        self.apply(command);
+        let still_shown = |asset| {
+            self.document
+                .objects()
+                .iter()
+                .any(|o| matches!(&o.data.kind, ObjectKind::Image(image) if image.asset == asset))
+        };
+        if let Some(old) = old.filter(|&old| !still_shown(old)) {
+            self.images.forget(old);
+        }
+        // In the browser rendering ahead would only make this turn slower.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((book, _)) = books::book_of(&self.document, id)
+            && book.page + 1 < book.pages
+            && let Ok(turn) = self.books.render(&self.document, book.pdf, book.page + 1)
+        {
+            self.run_turn(turn);
+        }
+        self.request_redraw();
+    }
+
+    /// Takes in a rendered page and turns the books waiting for it.
+    fn finish_page(
+        &mut self,
+        pdf: pb_core::AssetId,
+        page: u32,
+        result: Result<pb_io::pdf::Page, String>,
+    ) {
+        match self.books.rendered(&mut self.document, pdf, page, result) {
+            Ok(commands) => {
+                for command in commands {
+                    self.apply_turn(command);
+                }
+            }
+            Err(err) => dialog::show_error(tr("Could not turn the page"), &err),
+        }
     }
 
     /// Adds pictures side by side as one undo step, and selects them.
@@ -3309,6 +3456,44 @@ impl App {
             .collect()
     }
 
+    /// Page turning buttons of books on screen: the middle of the page's side (world), the
+    /// way out of the page, the book and the step (-1 back, 1 on). No button past the ends.
+    fn page_turns(&self) -> Vec<(Point, Vec2, ObjectId, i64)> {
+        let visible = self.camera.visible_world_rect(self.viewport());
+        let mut turns = Vec::new();
+        for o in self.document.objects_in(visible) {
+            let Some((book, _)) = books::book_of(&self.document, o.id) else {
+                continue;
+            };
+            if !self.document.reachable(o.id) || self.document.is_hidden(o.id) {
+                continue;
+            }
+            let page = self.books.page(&self.document, o.id).unwrap_or(book.page);
+            let [tl, tr, br, bl] = o.data.frame().corners();
+            let (left, right) = (tl.midpoint(bl), tr.midpoint(br));
+            let out = (right - left).normalize();
+            if page > 0 {
+                turns.push((left, -out, o.id, -1));
+            }
+            if page + 1 < book.pages {
+                turns.push((right, out, o.id, 1));
+            }
+        }
+        turns
+    }
+
+    /// The page turning button at `screen` (logical pixels), if any: its book and step.
+    fn page_turn_at(&self, screen: Point) -> Option<(ObjectId, i64)> {
+        self.page_turns()
+            .into_iter()
+            .find_map(|(edge, outward, id, step)| {
+                let edge = self.camera.world_to_screen(edge);
+                let center = pb_render::page_turn_center(edge, outward, 1.0);
+                ((center - screen).hypot() <= pb_render::PAGE_TURN_RADIUS + 2.0)
+                    .then_some((id, step))
+            })
+    }
+
     /// The link whose badge is at `screen` (logical pixels), if any.
     fn link_at(&self, screen: Point) -> Option<Link> {
         self.link_badges().into_iter().find_map(|(corner, link)| {
@@ -3507,6 +3692,13 @@ impl App {
             && let Some(link) = self.link_at(screen)
         {
             self.follow(&link);
+            return true;
+        }
+        if self.editing.is_none()
+            && self.tools.active() == ToolKind::Select
+            && let Some((id, step)) = self.page_turn_at(screen)
+        {
+            self.step_book_of(id, step);
             return true;
         }
         if let Some(crop) = &mut self.cropping {
@@ -4042,6 +4234,7 @@ impl App {
         self.recording = None;
         self.playback = None;
         self.images.clear();
+        self.books.clear();
         self.tools.cancel();
         self.tools.clear_selection();
         self.tools.sync(&self.document);
@@ -4106,6 +4299,10 @@ impl App {
             KeyCode::KeyZ if ctrl && modifiers.shift_key() => self.redo(),
             KeyCode::KeyZ if ctrl => self.undo(),
             KeyCode::KeyY if ctrl => self.redo(),
+            KeyCode::PageDown | KeyCode::PageUp if !ctrl && self.selected_book().is_some() => {
+                let step = if code == KeyCode::PageDown { 1 } else { -1 };
+                self.step_book(step);
+            }
             KeyCode::KeyV if !ctrl => self.tools.set_active(ToolKind::Select),
             KeyCode::KeyR if !ctrl => self.tools.set_active(ToolKind::Shape(ShapeKind::Rectangle)),
             KeyCode::KeyO if !ctrl => self.tools.set_active(ToolKind::Shape(ShapeKind::Ellipse)),
@@ -4375,6 +4572,9 @@ impl ApplicationHandler<UserEvent> for App {
             } => self.finish_preview(id, &url, replace_title, result),
             // Waking up is all it takes: `about_to_wait` ticks the session.
             UserEvent::Saved => {}
+            UserEvent::PageRendered { pdf, page, result } => {
+                self.finish_page(pdf, page, result);
+            }
         }
     }
 
@@ -4833,10 +5033,7 @@ Write **Markdown** here: *italic*, `code`, [links](https://example.com).
 - and more
 ";
 
-/// PDF files put on the board get at most this many pages.
-const MAX_PDF_PAGES: usize = 30;
-
-/// Whether `path` is a PDF file, whose pages are added as pictures.
+/// Whether `path` is a PDF file, which is added as a book.
 fn is_pdf_file(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -4982,6 +5179,7 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
         },
         quick_dot_radius: pb_tools::quick::DOT_RADIUS,
         link_badges: Vec::new(),
+        page_turns: Vec::new(),
         comment_pins: Vec::new(),
         spotlight: None,
         laser: Vec::new(),

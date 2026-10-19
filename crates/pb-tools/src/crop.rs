@@ -211,7 +211,11 @@ mod tests {
     fn image(doc: &mut Document, bounds: Rect, rotation: f64, crop: Rect) -> ObjectId {
         let asset = doc.add_asset(b"img".to_vec());
         let data = ObjectData {
-            kind: ObjectKind::Image(Image { asset, crop }),
+            kind: ObjectKind::Image(Image {
+                asset,
+                crop,
+                book: None,
+            }),
             bounds,
             rotation,
             style: Style::default(),
