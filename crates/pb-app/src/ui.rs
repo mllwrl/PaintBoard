@@ -57,6 +57,8 @@ pub enum Action {
     OpenFile(std::path::PathBuf),
     /// Lets the browser download the board as a file (web only).
     DownloadBoard,
+    /// Deletes a board kept in the browser, after asking.
+    DeleteStored(std::path::PathBuf),
     Save,
     SaveAs,
     ZoomIn,
@@ -280,6 +282,8 @@ pub struct Model<'a> {
     pub web: bool,
     /// Boards kept in the browser (web only).
     pub stored_boards: Vec<std::path::PathBuf>,
+    /// The open board's file, if it has one.
+    pub open_board: Option<std::path::PathBuf>,
     /// The board's frames with their titles, back to front.
     pub frames: Vec<(ObjectId, String)>,
     pub tool: ToolKind,
@@ -1094,10 +1098,21 @@ fn stored_boards_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action
             let name = path
                 .file_stem()
                 .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-            if ui.button(name).clicked() {
-                actions.push(Action::OpenFile(path.clone()));
-                ui.close();
-            }
+            ui.horizontal(|ui| {
+                let open = model.open_board.as_deref() == Some(path.as_path());
+                if ui.add_enabled(!open, Button::new(&name)).clicked() {
+                    actions.push(Action::OpenFile(path.clone()));
+                    ui.close();
+                }
+                let delete = ui
+                    .add_enabled(!open, Button::new("✕").small())
+                    .on_hover_text(tr("Delete this board from the browser"))
+                    .on_disabled_hover_text(tr("It is open: open another board first"));
+                if delete.clicked() {
+                    actions.push(Action::DeleteStored(path.clone()));
+                    ui.close();
+                }
+            });
         }
     });
 }

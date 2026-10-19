@@ -197,6 +197,18 @@ const RU: &[(&str, &str)] = &[
         "Сохранить доску файлом .pboard на этот компьютер",
     ),
     ("Boards in this browser", "Доски в этом браузере"),
+    (
+        "Delete this board from the browser",
+        "Удалить эту доску из браузера",
+    ),
+    (
+        "It is open: open another board first",
+        "Она открыта: сначала откройте другую доску",
+    ),
+    (
+        "Delete the board \"{}\" from this browser?",
+        "Удалить доску «{}» из этого браузера?",
+    ),
     ("OK: save it.", "OK — сохранить."),
     (
         "Close the board without saving it?",

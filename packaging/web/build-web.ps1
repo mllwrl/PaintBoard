@@ -16,11 +16,23 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
     $out = Join-Path $root 'target\web'
     New-Item -ItemType Directory -Force -Path $out | Out-Null
-    wasm-bindgen --target web --no-typescript --out-dir $out --out-name paintboard `
-        'target\wasm32-unknown-unknown\release\paintboard.wasm'
+    # Function names only help reading stack traces; without them the file is ~10% smaller.
+    wasm-bindgen --target web --no-typescript --remove-name-section --remove-producers-section `
+        --out-dir $out --out-name paintboard 'target\wasm32-unknown-unknown\release\paintboard.wasm'
     if ($LASTEXITCODE -ne 0) { throw 'wasm-bindgen failed' }
     Copy-Item -Force 'packaging\web\index.html' $out
     Copy-Item -Force 'crates\pb-app\assets\icon.png' $out
+    # Compressed copies for servers that send them as they are (paintboard-server does):
+    # the .wasm shrinks to about a third.
+    foreach ($name in 'paintboard_bg.wasm', 'paintboard.js', 'index.html') {
+        $source = Join-Path $out $name
+        $bytes = [System.IO.File]::ReadAllBytes($source)
+        $target = [System.IO.File]::Create("$source.gz")
+        $gzip = New-Object System.IO.Compression.GZipStream($target, [System.IO.Compression.CompressionLevel]::Optimal)
+        $gzip.Write($bytes, 0, $bytes.Length)
+        $gzip.Dispose()
+        $target.Dispose()
+    }
     Get-ChildItem $out | Select-Object Name, Length
 }
 finally {

@@ -231,6 +231,7 @@ async fn links_open_the_web_version() {
     std::fs::create_dir_all(&web).unwrap();
     std::fs::write(web.join("index.html"), "the page").unwrap();
     std::fs::write(web.join("paintboard.js"), "the code").unwrap();
+    std::fs::write(web.join("paintboard.js.gz"), "squeezed").unwrap();
     let shared = Shared::with_web(Store::in_memory().unwrap(), None, Some(web.clone()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
@@ -240,6 +241,16 @@ async fn links_open_the_web_version() {
     assert_eq!(get_page(&addr, "/board/a1b2?key=c3").await.1, "the page");
     assert_eq!(get_page(&addr, "/board/paintboard.js").await.1, "the code");
     assert_eq!(get_page(&addr, "/paintboard.js").await.1, "the code");
+    // Browsers that take gzip get the compressed copy.
+    let mut stream = TcpStream::connect(&addr).await.unwrap();
+    let request = format!(
+        "GET /paintboard.js HTTP/1.1\r\nhost: {addr}\r\naccept-encoding: gzip, br\r\nconnection: close\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await.unwrap();
+    assert!(response.to_lowercase().contains("content-encoding: gzip"));
+    assert!(response.ends_with("squeezed"));
     assert!(get_page(&addr, "/missing.js").await.0.contains("404"));
     assert!(get_page(&addr, "/..%2Fsecret").await.0.contains("404"));
     assert!(get_page(&addr, "/health").await.1.contains("ok"));

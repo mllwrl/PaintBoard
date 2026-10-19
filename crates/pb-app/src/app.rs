@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pb_core::{
@@ -585,6 +585,7 @@ impl App {
             board: &board,
             web: cfg!(target_arch = "wasm32"),
             stored_boards: Session::stored_boards(),
+            open_board: self.session.path().map(Path::to_path_buf),
             frames,
             tool: self.tools.active(),
             last_shape: self.tools.last_shape(),
@@ -1207,6 +1208,20 @@ impl App {
             }
             Action::CopyText(text) => clipboard::set_text(&text),
             Action::OpenFile(path) => self.open_file(path),
+            Action::DeleteStored(path) => {
+                let name = path
+                    .file_stem()
+                    .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+                let question = trf("Delete the board \"{}\" from this browser?", &[&name]);
+                if self.session.path() != Some(path.as_path())
+                    && dialog::confirm(tr("Delete"), &question)
+                {
+                    if let Err(err) = pb_platform::fs::remove(&path) {
+                        dialog::show_error(tr("Delete"), &err.to_string());
+                    }
+                    crate::settings::save_shared_link(&path.to_string_lossy(), None);
+                }
+            }
             #[cfg(target_arch = "wasm32")]
             Action::DownloadBoard => self.session.download(&self.document),
             #[cfg(not(target_arch = "wasm32"))]

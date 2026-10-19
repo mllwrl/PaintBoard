@@ -220,25 +220,35 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/health", get(|| async { "ok" }))
         .route("/boards", post(create_board).options(allow_other_sites))
         .route("/ws", get(connect))
-        .route("/", get(|state| web_file(state, "index.html".to_owned())))
+        .route(
+            "/",
+            get(|state, headers| web_file(state, headers, "index.html".to_owned())),
+        )
         .route("/board/{name}", get(board_page))
-        .route("/{name}", get(|state, Path(name)| web_file(state, name)))
+        .route(
+            "/{name}",
+            get(|state, headers, Path(name)| web_file(state, headers, name)),
+        )
         .with_state(shared)
 }
 
 /// `/board/<id>` is the web version opening that board; its files (`/board/x.js`, as the
 /// page asks for them relative to itself) are the web version's.
-async fn board_page(state: State<Arc<Shared>>, Path(name): Path<String>) -> Response {
+async fn board_page(
+    state: State<Arc<Shared>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
     let file = if name.contains('.') {
         name
     } else {
         "index.html".to_owned()
     };
-    web_file(state, file).await
+    web_file(state, headers, file).await
 }
 
 /// A file of the web version, if the server serves it.
-async fn web_file(State(shared): State<Arc<Shared>>, name: String) -> Response {
+async fn web_file(State(shared): State<Arc<Shared>>, headers: HeaderMap, name: String) -> Response {
     let Some(dir) = &shared.web else {
         return (
             StatusCode::NOT_FOUND,
@@ -263,8 +273,22 @@ async fn web_file(State(shared): State<Arc<Shared>>, name: String) -> Response {
         Some("css") => "text/css",
         _ => "application/octet-stream",
     };
+    use axum::http::header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE, VARY};
+    // The build leaves compressed copies next to the files: about a third of the size.
+    let gzip = headers
+        .get(ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("gzip"));
+    if gzip && let Ok(bytes) = tokio::fs::read(dir.join(format!("{name}.gz"))).await {
+        let headers = [
+            (CONTENT_TYPE, kind),
+            (CONTENT_ENCODING, "gzip"),
+            (VARY, "accept-encoding"),
+        ];
+        return (headers, bytes).into_response();
+    }
     match tokio::fs::read(dir.join(&name)).await {
-        Ok(bytes) => ([(axum::http::header::CONTENT_TYPE, kind)], bytes).into_response(),
+        Ok(bytes) => ([(CONTENT_TYPE, kind)], bytes).into_response(),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
