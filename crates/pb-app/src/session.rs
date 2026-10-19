@@ -31,7 +31,7 @@ pub struct Session {
     saving: Option<Saving>,
     /// Wakes the app when a background save is done.
     waker: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
-    /// App data directory; `None` where there is none (the web, for now), which turns off
+    /// App data directory; `None` where there is none, which turns off
     /// keeping untitled boards.
     data_dir: Option<PathBuf>,
     autosave: Autosave,
@@ -87,7 +87,7 @@ impl Session {
             }
         }
         let doc = match session.data_file(RECOVERY_FILE) {
-            Some(recovery) if recovery.exists() => load(&recovery).unwrap_or_else(|err| {
+            Some(recovery) if fs::exists(&recovery) => load(&recovery).unwrap_or_else(|err| {
                 log::warn!("could not restore the untitled board: {err}");
                 Document::new()
             }),
@@ -167,7 +167,7 @@ impl Session {
             && let Some(recovery) = self.data_file(RECOVERY_FILE)
         {
             // The board lives in its own file now.
-            let _ = std::fs::remove_file(recovery);
+            let _ = fs::remove(&recovery);
         }
         self.switch_to(Some(path), doc);
         true
@@ -229,7 +229,7 @@ impl Session {
         if let Some(last) = self.data_file(LAST_BOARD_FILE) {
             let result = match &self.path {
                 Some(path) => fs::write_atomic(&last, path.to_string_lossy().as_bytes()),
-                None => match std::fs::remove_file(&last) {
+                None => match fs::remove(&last) {
                     Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
                     other => other,
                 },

@@ -39,3 +39,21 @@ features = [
 [target.'cfg(windows)'.dependencies]
 windows-collections = "0.3"
 windows-numerics = "0.3"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures.workspace = true
+# The origin private file system (OPFS), where the web version keeps its files.
+web-sys = { version = "0.3", features = [
+    "File",
+    "FileSystemDirectoryHandle",
+    "FileSystemFileHandle",
+    "FileSystemGetDirectoryOptions",
+    "FileSystemGetFileOptions",
+    "FileSystemHandle",
+    "FileSystemWritableFileStream",
+    "Navigator",
+    "StorageManager",
+    "Window",
+] }

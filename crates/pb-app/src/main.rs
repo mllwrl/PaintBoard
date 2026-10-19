@@ -37,9 +37,13 @@ fn main() {
 
     std::panic::set_hook(Box::new(console_error_panic_hook::hook));
     console_log::init_with_level(log::Level::Info).expect("failed to init logging");
-    let event_loop = EventLoop::<UserEvent>::with_user_event()
-        .build()
-        .expect("failed to create event loop");
-    let app = App::new(event_loop.create_proxy());
-    event_loop.spawn_app(app);
+    // The board and settings kept in the browser are read before the app opens them.
+    wasm_bindgen_futures::spawn_local(async {
+        pb_platform::fs::init().await;
+        let event_loop = EventLoop::<UserEvent>::with_user_event()
+            .build()
+            .expect("failed to create event loop");
+        let app = App::new(event_loop.create_proxy());
+        event_loop.spawn_app(app);
+    });
 }
