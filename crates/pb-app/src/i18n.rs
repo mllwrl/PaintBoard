@@ -131,6 +131,17 @@ const RU: &[(&str, &str)] = &[
     ("Open…", "Открыть…"),
     ("Download board", "Скачать доску"),
     ("Share", "Поделиться"),
+    ("Everyone follows your view", "Все следят за вашим видом"),
+    ("Following {}", "Вы следите за: {}"),
+    ("Stop following", "Перестать следить"),
+    ("Follow: see what they see", "Следить: видеть то же, что он"),
+    ("(presenting)", "(ведёт показ)"),
+    ("Stop leading", "Перестать вести"),
+    ("Bring everyone to me", "Собрать всех у себя"),
+    (
+        "Everyone on the board follows your view until they move",
+        "Все на доске следят за вашим видом, пока сами не сдвинутся",
+    ),
     ("Your name", "Ваше имя"),
     (
         "Shown to others next to your pointer, comments and votes",

@@ -6,7 +6,7 @@
 use pb_core::AssetId;
 
 /// Bumped when messages change incompatibly; the server refuses other versions.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 
 /// One copy of the board on the server, for as long as it is connected.
 pub type ClientId = u64;
@@ -64,6 +64,8 @@ pub struct Presence {
     pub selection: Vec<String>,
     /// What part of the board they look at: left, top, right, bottom (world units).
     pub view: Option<[f64; 4]>,
+    /// They asked everyone to follow their view (presenting).
+    pub leading: bool,
 }
 
 /// Why bytes are not a message.
@@ -154,6 +156,7 @@ impl Message {
                     }
                     None => w.u8(0),
                 }
+                w.u8(u8::from(p.leading));
             }
             Message::Left(client) => {
                 w.u8(tag::LEFT);
@@ -201,6 +204,7 @@ impl Message {
                     0 => None,
                     _ => Some([r.f64()?, r.f64()?, r.f64()?, r.f64()?]),
                 };
+                let leading = r.u8()? != 0;
                 Message::Presence(Presence {
                     client,
                     name,
@@ -208,6 +212,7 @@ impl Message {
                     cursor,
                     selection,
                     view,
+                    leading,
                 })
             }
             tag::LEFT => Message::Left(r.u64()?),
@@ -348,6 +353,7 @@ mod tests {
             cursor: Some((1.5, -2.0)),
             selection: vec!["1@2".into(), "3@4".into()],
             view: Some([0.0, 0.0, 800.0, 600.0]),
+            leading: true,
         }));
         round_trip(Message::Presence(Presence::default()));
         round_trip(Message::Left(42));

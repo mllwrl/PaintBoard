@@ -42,6 +42,11 @@ pub enum Action {
     Open,
     /// Opens or closes the sharing window.
     ToggleShare,
+    /// Follows (or stops following) someone's view on a shared board.
+    Follow(pb_sync::ClientId),
+    StopFollowing,
+    /// Asks everyone to follow this view, or stops asking.
+    ToggleLead,
     /// The name to go by on boards (pointers, comments, votes).
     SetName(String),
     /// Makes a shared board of this one on the server at this address.
@@ -319,6 +324,8 @@ pub struct Model<'a> {
     pub show_shortcuts: bool,
     /// The sharing window, when open.
     pub share_window: Option<ShareView>,
+    /// Following someone (or leading): what to say, the color, and whether leading.
+    pub follow_banner: Option<(String, u32, bool)>,
     /// The board is shared: how it is going, for the top bar.
     pub share_badge: Option<(String, bool)>,
     /// Other people's pointers (window position, logical pixels), names and colors.
@@ -868,6 +875,9 @@ impl Ui {
         let share_name = &mut self.share_name;
         let output = self.ctx.run_pass(input, |ctx| {
             others(ctx, model);
+            if let Some(banner) = &model.follow_banner {
+                follow_banner(ctx, banner, &mut actions);
+            }
             if let Some(timer) = &model.timer {
                 timer_pill(ctx, timer, &mut actions);
             }
@@ -1279,14 +1289,26 @@ pub struct ShareView {
 }
 
 pub struct SharedView {
+    /// Everyone is asked to follow this view.
+    pub leading: bool,
     pub status: String,
     pub online: bool,
     pub offline: bool,
     pub can_edit: bool,
     pub edit_link: Option<String>,
     pub view_link: Option<String>,
-    /// Names and colors of the others on the board.
-    pub people: Vec<(String, u32)>,
+    /// The others on the board.
+    pub people: Vec<PersonView>,
+}
+
+pub struct PersonView {
+    pub client: pb_sync::ClientId,
+    pub name: String,
+    pub color: u32,
+    /// This copy follows their view.
+    pub followed: bool,
+    /// They ask everyone to follow them.
+    pub leading: bool,
 }
 
 fn rgb(color: u32) -> Color32 {
@@ -1340,10 +1362,42 @@ fn share_window(
                 if !shared.people.is_empty() {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(tr("Here now:"));
-                        for (name, color) in &shared.people {
-                            ui.colored_label(rgb(*color), name);
+                        for person in &shared.people {
+                            let mut name = RichText::new(&person.name).color(rgb(person.color));
+                            if person.followed {
+                                name = name.underline();
+                            }
+                            let hint = if person.followed {
+                                tr("Stop following")
+                            } else {
+                                tr("Follow: see what they see")
+                            };
+                            if ui
+                                .add(Button::new(name).frame(false))
+                                .on_hover_text(hint)
+                                .clicked()
+                            {
+                                actions.push(Action::Follow(person.client));
+                            }
+                            if person.leading {
+                                ui.weak(tr("(presenting)"));
+                            }
                         }
                     });
+                }
+                if shared.online {
+                    let label = if shared.leading {
+                        tr("Stop leading")
+                    } else {
+                        tr("Bring everyone to me")
+                    };
+                    if ui
+                        .button(label)
+                        .on_hover_text(tr("Everyone on the board follows your view until they move"))
+                        .clicked()
+                    {
+                        actions.push(Action::ToggleLead);
+                    }
                 }
                 ui.add_space(6.0);
                 let link_row = |ui: &mut egui::Ui, label: &str, hint: &str, link: &str, actions: &mut Vec<Action>| {
@@ -1413,6 +1467,48 @@ fn share_window(
     if !open {
         actions.push(Action::ToggleShare);
     }
+}
+
+/// While following someone or leading: a colored edge around the window and a banner.
+fn follow_banner(ctx: &Context, banner: &(String, u32, bool), actions: &mut Vec<Action>) {
+    let (text, color, leading) = banner;
+    let color = rgb(*color);
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        Order::Foreground,
+        Id::unique("following edge"),
+    ));
+    painter.rect_stroke(
+        ctx.content_rect().shrink(2.0),
+        0.0,
+        egui::Stroke::new(4.0, color),
+        egui::StrokeKind::Inside,
+    );
+    Area::new(Id::unique("following"))
+        .anchor(Align2::CENTER_TOP, egui::vec2(0.0, 64.0))
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(color)
+                .corner_radius(8.0)
+                .inner_margin(egui::Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(text).color(Color32::WHITE).strong());
+                        let stop = if *leading {
+                            tr("Stop leading")
+                        } else {
+                            tr("Stop following")
+                        };
+                        if ui.button(stop).clicked() {
+                            actions.push(if *leading {
+                                Action::ToggleLead
+                            } else {
+                                Action::StopFollowing
+                            });
+                        }
+                    });
+                });
+        });
 }
 
 /// Other people's pointers with their names, and outlines of what they selected.

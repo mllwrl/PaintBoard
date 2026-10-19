@@ -247,6 +247,13 @@ pub struct App {
     recognition: Option<PendingRecognition>,
     /// The board shared through a server, while it is.
     sharing: Option<crate::sharing::Sharing>,
+    /// Whose view this copy follows on a shared board, the camera as following last set
+    /// it (moved since: the user took over) and when.
+    following: Option<pb_sync::ClientId>,
+    followed_camera: Option<(Point, f64)>,
+    followed_at: Option<Instant>,
+    /// The leader whose lead this copy stopped following (it is not taken up again).
+    declined_leader: Option<pb_sync::ClientId>,
     /// The sharing window is open; a board is being made on the server; what went wrong.
     share_window: bool,
     making_shared: bool,
@@ -334,6 +341,10 @@ impl App {
             recognition: None,
             making: None,
             sharing: None,
+            following: None,
+            followed_camera: None,
+            followed_at: None,
+            declined_leader: None,
             share_window: false,
             making_shared: false,
             share_error: None,
@@ -578,6 +589,7 @@ impl App {
         let (share_window, share_badge) = self.share_model();
         let (cursors, their_selections) = self.others_on_screen();
         let model = Model {
+            follow_banner: self.follow_banner(),
             share_window,
             share_badge,
             cursors,
@@ -1201,6 +1213,25 @@ impl App {
             }
             Action::JoinShared(link) => self.join_shared(&link),
             Action::StopSharing => self.stop_sharing(),
+            Action::Follow(client) => {
+                if self.following == Some(client) {
+                    self.stop_following();
+                } else {
+                    self.following = Some(client);
+                    self.followed_camera = None;
+                    self.followed_at = None;
+                }
+            }
+            Action::StopFollowing => self.stop_following(),
+            Action::ToggleLead => {
+                if let Some(sharing) = &mut self.sharing {
+                    let lead = !sharing.leading();
+                    sharing.set_leading(lead);
+                    if lead {
+                        self.stop_following();
+                    }
+                }
+            }
             Action::RetrySharing => {
                 if let Some(sharing) = &mut self.sharing {
                     sharing.retry();
@@ -4218,6 +4249,7 @@ impl App {
         };
         sharing.set_presence(cursor, &selection, [view.x0, view.y0, view.x1, view.y1]);
         let ticked = sharing.tick(&mut self.document, now);
+        self.follow_view(now);
         if let Some(error) = ticked.error {
             self.share_error = Some(error);
             self.request_redraw();
@@ -4234,6 +4266,90 @@ impl App {
             self.tools.sync(&self.document);
             self.request_redraw();
         }
+    }
+
+    /// Moves the camera toward the view of the person followed (or of a leader).
+    fn follow_view(&mut self, now: Instant) {
+        let Some(sharing) = &self.sharing else {
+            self.following = None;
+            return;
+        };
+        match sharing.leader() {
+            Some(leader) if self.following.is_none() && self.declined_leader != Some(leader) => {
+                self.following = Some(leader);
+                self.followed_camera = None;
+                self.followed_at = None;
+            }
+            Some(_) => {}
+            None => self.declined_leader = None,
+        }
+        let Some(who) = self.following else {
+            return;
+        };
+        let Some(person) = sharing.people.get(&who) else {
+            // They left.
+            self.stop_following();
+            return;
+        };
+        let Some([x0, y0, x1, y1]) = person.view else {
+            return;
+        };
+        // Moved by hand since: the user takes over.
+        if let Some((origin, zoom)) = self.followed_camera
+            && (self.camera.origin() != origin || self.camera.zoom() != zoom)
+        {
+            self.stop_following();
+            return;
+        }
+        let viewport = self.viewport();
+        let target = pb_geom::kurbo::Rect::new(x0, y0, x1, y1);
+        let target_zoom = (viewport.width / target.width().max(1.0))
+            .min(viewport.height / target.height().max(1.0))
+            .clamp(Camera::MIN_ZOOM, Camera::MAX_ZOOM);
+        let center = self.camera.visible_world_rect(viewport).center();
+        let zoom = self.camera.zoom();
+        // Eases toward their view, about 90% of the way in a quarter second.
+        let dt = self
+            .followed_at
+            .map_or(1.0 / 60.0, |at| now.duration_since(at).as_secs_f64())
+            .min(0.1);
+        let k = 1.0 - (-dt * 10.0).exp();
+        let new_zoom = (zoom.ln() + (target_zoom.ln() - zoom.ln()) * k).exp();
+        let new_center = center + (target.center() - center) * k;
+        let close = (new_center - target.center()).hypot() * new_zoom < 0.5
+            && (new_zoom.ln() - target_zoom.ln()).abs() < 1e-3;
+        if close {
+            self.camera.look_at(target.center(), target_zoom, viewport);
+        } else {
+            self.camera.look_at(new_center, new_zoom, viewport);
+            self.request_redraw();
+        }
+        self.followed_camera = Some((self.camera.origin(), self.camera.zoom()));
+        self.followed_at = Some(now);
+    }
+
+    fn stop_following(&mut self) {
+        if let Some(leader) = self.sharing.as_ref().and_then(|s| s.leader())
+            && self.following == Some(leader)
+        {
+            self.declined_leader = Some(leader);
+        }
+        self.following = None;
+        self.followed_camera = None;
+        self.followed_at = None;
+        self.request_redraw();
+    }
+
+    /// The banner while following someone or leading, and its color.
+    fn follow_banner(&self) -> Option<(String, u32, bool)> {
+        let sharing = self.sharing.as_ref()?;
+        if sharing.leading() {
+            return Some((tr("Everyone follows your view").to_owned(), 0x16A34A, true));
+        }
+        let who = self.following?;
+        let person = sharing.people.get(&who)?;
+        let text = trf("Following {}", &[&person.name]);
+        Some((text, crate::sharing::color_of(who), false))
     }
 
     /// The sharing window's contents (when open) and the top bar's badge (when shared).
@@ -4266,7 +4382,13 @@ impl App {
             let people = sharing
                 .people
                 .iter()
-                .map(|(client, p)| (p.name.clone(), crate::sharing::color_of(*client)))
+                .map(|(client, p)| crate::ui::PersonView {
+                    client: *client,
+                    name: p.name.clone(),
+                    color: crate::sharing::color_of(*client),
+                    followed: self.following == Some(*client),
+                    leading: p.leading,
+                })
                 .collect();
             let edit_link =
                 (sharing.view_link.is_some() || can_edit).then(|| sharing.link.to_string());
@@ -4276,6 +4398,7 @@ impl App {
                 .map(ToString::to_string)
                 .or_else(|| (!can_edit).then(|| sharing.link.to_string()));
             crate::ui::SharedView {
+                leading: sharing.leading(),
                 status,
                 online,
                 offline,
@@ -4745,6 +4868,11 @@ impl App {
         }
         if event.state != ElementState::Pressed {
             return false;
+        }
+        // Esc stops following someone first.
+        if code == KeyCode::Escape && self.following.is_some() {
+            self.stop_following();
+            return true;
         }
         let modifiers = self.navigation.modifiers();
         let ctrl = modifiers.control_key();

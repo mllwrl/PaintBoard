@@ -334,13 +334,44 @@ impl Sharing {
     pub fn set_presence(&mut self, cursor: Option<Point>, selection: &[ObjectId], view: [f64; 4]) {
         let cursor = cursor.map(|p| (p.x, p.y));
         let selection: Vec<String> = selection.iter().map(ToString::to_string).collect();
-        if self.mine.cursor != cursor || self.mine.selection != selection {
+        // Those following see the view move, so it is sent when it moves noticeably.
+        let moved = self.mine.view.is_none_or(|old| {
+            let size = (view[2] - view[0])
+                .abs()
+                .max((view[3] - view[1]).abs())
+                .max(1.0);
+            old.iter()
+                .zip(&view)
+                .any(|(a, b)| (a - b).abs() > size * 0.002)
+        });
+        if self.mine.cursor != cursor || self.mine.selection != selection || moved {
             self.mine.cursor = cursor;
             self.mine.selection = selection;
             self.mine.view = Some(view);
             self.mine_sent = false;
             (self.wake)();
         }
+    }
+
+    /// Whether this copy asks everyone to follow its view.
+    pub fn leading(&self) -> bool {
+        self.mine.leading
+    }
+
+    pub fn set_leading(&mut self, leading: bool) {
+        if self.mine.leading != leading {
+            self.mine.leading = leading;
+            self.mine_sent = false;
+            (self.wake)();
+        }
+    }
+
+    /// Someone else asking everyone to follow them, if anyone is.
+    pub fn leader(&self) -> Option<ClientId> {
+        self.people
+            .iter()
+            .find(|(_, p)| p.leading && p.view.is_some())
+            .map(|(client, _)| *client)
     }
 }
 
