@@ -22,7 +22,7 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, MouseButton, Touch, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
-use winit::window::{CursorIcon, Window, WindowId};
+use winit::window::{Cursor, CursorIcon, CustomCursor, Window, WindowId};
 
 use crate::books::{self, Books, Turn};
 use crate::editing::{self, KeyOutcome, NEW_TEXT_SIZE, TextEdit};
@@ -176,6 +176,8 @@ pub struct App {
     editing: Option<TextEdit>,
     /// The image being cropped, if any.
     cropping: Option<Crop>,
+    /// The pen's dot cursor, made for this ink color and diameter.
+    ink_cursor: Option<((Rgba, u32), CustomCursor)>,
     /// Color of new sticky notes.
     sticky_color: Rgba,
     /// Whether the minimap is shown.
@@ -306,6 +308,7 @@ impl App {
             dropped: Vec::new(),
             editing: None,
             cropping: None,
+            ink_cursor: None,
             sticky_color: STICKY_COLORS[0],
             show_minimap: true,
             filter: pb_core::Filter::default(),
@@ -4752,6 +4755,36 @@ impl App {
         }
     }
 
+    /// The pen's and marker's cursor: a dot of the ink's color and width on screen.
+    fn ink_cursor(&mut self, event_loop: &ActiveEventLoop) -> Option<Cursor> {
+        let marker = match self.tools.active() {
+            ToolKind::Pen => false,
+            ToolKind::Marker => true,
+            _ => return None,
+        };
+        let style = self.tools.ink_style(marker);
+        let diameter = (style.width * self.scale()).round().clamp(4.0, 48.0) as u32;
+        let key = (style.color, diameter);
+        if self.ink_cursor.as_ref().is_none_or(|(made, _)| *made != key) {
+            let (rgba, side) = dot_cursor(style.color, diameter);
+            let hot = (side / 2) as u16;
+            let source = CustomCursor::from_rgba(rgba, side as u16, side as u16, hot, hot).ok()?;
+            self.ink_cursor = Some((key, event_loop.create_custom_cursor(source)));
+        }
+        self.ink_cursor.as_ref().map(|(_, cursor)| cursor.clone().into())
+    }
+
+    fn cursor(&mut self, event_loop: &ActiveEventLoop) -> Cursor {
+        let icon = self.cursor_icon();
+        if icon == CursorIcon::Crosshair
+            && self.cropping.is_none()
+            && let Some(dot) = self.ink_cursor(event_loop)
+        {
+            return dot;
+        }
+        icon.into()
+    }
+
     fn cursor_icon(&mut self) -> CursorIcon {
         let over_text = match (&mut self.editing, self.navigation.cursor()) {
             (Some(edit), Some(cursor)) => {
@@ -5562,9 +5595,9 @@ impl App {
         // Over the UI, egui sets the cursor. Only input changes it: on the web, winit sends
         // some events (Resized) while it holds the canvas the cursor is set on.
         if pointer_or_keys && !over_ui {
-            let icon = self.cursor_icon();
+            let cursor = self.cursor(event_loop);
             if let Some(window) = &self.window {
-                window.set_cursor(icon);
+                window.set_cursor(cursor);
             }
         }
         if changed {
@@ -5723,6 +5756,39 @@ Write **Markdown** here: *italic*, `code`, [links](https://example.com).
 ";
 
 /// Whether `path` is a PDF file, which is added as a book.
+/// A round cursor picture of `diameter` pixels filled with `color`, ringed in white or dark
+/// gray (whichever stands out from the color) so it shows on any background; returns the
+/// pixels and the side of the square picture.
+fn dot_cursor(color: Rgba, diameter: u32) -> (Vec<u8>, u32) {
+    let side = diameter + 4;
+    let [r, g, b, a] = color.to_bytes();
+    let light = u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114 > 128_000;
+    let ring: [u8; 3] = if light { [0x40; 3] } else { [0xFF; 3] };
+    let center = f64::from(side) / 2.0;
+    let radius = f64::from(diameter) / 2.0;
+    let mut rgba = Vec::with_capacity((side * side * 4) as usize);
+    for y in 0..side {
+        for x in 0..side {
+            let d = (f64::from(x) + 0.5 - center).hypot(f64::from(y) + 0.5 - center);
+            // Smooth edges: coverage of the ring (1.5 px) and the fill inside it.
+            let outer = (radius + 1.5 - d).clamp(0.0, 1.0);
+            let inner = (radius - d).clamp(0.0, 1.0) * (f64::from(a.max(0x80)) / 255.0);
+            let mix = |c: u8, k: u8| (f64::from(c) * inner + f64::from(k) * (1.0 - inner)) as u8;
+            if outer <= 0.0 {
+                rgba.extend([0, 0, 0, 0]);
+            } else {
+                rgba.extend([
+                    mix(r, ring[0]),
+                    mix(g, ring[1]),
+                    mix(b, ring[2]),
+                    (outer * 255.0) as u8,
+                ]);
+            }
+        }
+    }
+    (rgba, side)
+}
+
 fn is_pdf_file(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -5887,6 +5953,18 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_pen_cursor_is_a_ringed_dot() {
+        let (rgba, side) = dot_cursor(Rgba::rgb(0x10, 0x20, 0x30), 10);
+        assert_eq!(side, 14);
+        let px = |x: u32, y: u32| &rgba[((y * side + x) * 4) as usize..][..4];
+        assert_eq!(px(7, 7), [0x10, 0x20, 0x30, 0xFF]);
+        assert_eq!(px(0, 0)[3], 0);
+        // A white ring around a dark dot.
+        assert_eq!(px(7, 1)[..3], [0xFF, 0xFF, 0xFF]);
+        assert!(px(7, 1)[3] > 0xF0);
+    }
 
     #[test]
     fn timers_count_down_pause_and_run_out() {
