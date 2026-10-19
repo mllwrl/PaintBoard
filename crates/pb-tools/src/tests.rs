@@ -1280,6 +1280,72 @@ fn table_cells_are_selected_and_lines_go_in_between() {
 }
 
 #[test]
+fn ctrl_picks_more_cells_and_marks_go_on_all_of_them() {
+    let mut doc = Document::new();
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Table);
+    let cmd = click(&mut tools, &doc, at(0.0, 0.0)).unwrap();
+    let id = doc.apply(cmd).unwrap().created[0];
+    let table = |doc: &Document| match &doc.get(id).unwrap().data.kind {
+        ObjectKind::Table(t) => t.clone(),
+        _ => panic!("not a table"),
+    };
+    let t = table(&doc);
+    for (r, c, text) in [(0, 0, "a"), (2, 2, "b"), (1, 1, "c")] {
+        doc.apply(Command::SetCell {
+            id,
+            row: t.rows[r].id.clone(),
+            col: t.cols[c].id.clone(),
+            cell: pb_core::Cell {
+                text: text.into(),
+                spans: Default::default(),
+            },
+        })
+        .unwrap();
+    }
+    let bounds = doc.get(id).unwrap().data.bounds;
+    let laid_out = table(&doc);
+    let center = |r: usize, c: usize| {
+        let rect = laid_out.cell_rect(bounds, r, c).unwrap();
+        at(rect.center().x, rect.center().y)
+    };
+    tools.select_only([id]);
+    click(&mut tools, &doc, center(0, 0));
+    click(&mut tools, &doc, ctrl(center(2, 2)));
+    click(&mut tools, &doc, ctrl(center(1, 1)));
+    let blocks = tools.table_cell_blocks(&doc).unwrap().1;
+    assert_eq!(
+        blocks,
+        [(0, 0), (2, 2), (1, 1)].map(CellRange::cell).to_vec()
+    );
+    assert_eq!(tools.cells_frames(&doc).len(), 3);
+    // Ctrl+click on a picked cell takes it back.
+    click(&mut tools, &doc, ctrl(center(1, 1)));
+    let blocks = tools.table_cell_blocks(&doc).unwrap().1;
+    assert_eq!(blocks, [(0, 0), (2, 2)].map(CellRange::cell).to_vec());
+    // Bold goes on the text of both picked cells, and off again.
+    let bold = |m: &pb_core::TextMarks| m.bold;
+    let set = |mut m: pb_core::TextMarks, on| {
+        m.bold = on;
+        m
+    };
+    let commands = tools.mark_cells(&doc, bold, set);
+    assert_eq!(commands.len(), 2);
+    for command in commands {
+        doc.apply(command).unwrap();
+    }
+    let t = table(&doc);
+    assert!(t.text(0, 0).1[0].marks.bold && t.text(2, 2).1[0].marks.bold);
+    assert!(t.text(1, 1).1.is_empty());
+    for command in tools.mark_cells(&doc, bold, set) {
+        doc.apply(command).unwrap();
+    }
+    assert!(table(&doc).text(0, 0).1.is_empty());
+    // Several blocks cannot be merged.
+    assert!(!tools.can_merge_cells(&doc, true));
+}
+
+#[test]
 fn deleting_with_cells_selected_empties_them() {
     let mut doc = Document::new();
     let mut tools = Tools::default();

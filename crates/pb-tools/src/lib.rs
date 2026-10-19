@@ -302,12 +302,14 @@ pub struct Tools {
     node: Option<(ObjectId, std::sync::Arc<str>)>,
 }
 
-/// A block of cells of table `id`, from the cell first picked to the one picked last.
-#[derive(Clone, Copy, Debug)]
+/// Cells of table `id`: the block from the cell first picked to the one picked last, and
+/// blocks picked before it with Ctrl held.
+#[derive(Clone, Debug)]
 struct CellSelection {
     id: ObjectId,
     anchor: (usize, usize),
     end: (usize, usize),
+    more: Vec<CellRange>,
 }
 
 impl Default for Tools {
@@ -538,27 +540,66 @@ impl Tools {
             id,
             anchor: cell,
             end: cell,
+            more: Vec::new(),
         });
     }
 
-    /// The selected cells, if a block of cells of the single selected table is selected.
+    /// The block of cells picked last, if cells of the single selected table are selected.
     pub fn table_cells(&self, doc: &Document) -> Option<(ObjectId, CellRange)> {
-        let sel = self.cells?;
+        let sel = self.cells.as_ref()?;
         let (id, _, table) = self.single_table(doc).filter(|(id, ..)| *id == sel.id)?;
         let range = CellRange::new(sel.anchor, sel.end);
         (range.row1 < table.rows.len() && range.col1 < table.cols.len())
             .then(|| (id, table.expand(range)))
     }
 
+    /// All selected blocks of cells (see [`Self::table_cells`]), those picked with Ctrl too.
+    pub fn table_cell_blocks(&self, doc: &Document) -> Option<(ObjectId, Vec<CellRange>)> {
+        let (id, last) = self.table_cells(doc)?;
+        let (_, _, table) = self.single_table(doc)?;
+        let fits = |r: &CellRange| r.row1 < table.rows.len() && r.col1 < table.cols.len();
+        let mut blocks: Vec<CellRange> = self
+            .cells
+            .as_ref()?
+            .more
+            .iter()
+            .copied()
+            .filter(fits)
+            .map(|r| table.expand(r))
+            .collect();
+        blocks.push(last);
+        Some((id, blocks))
+    }
+
+    /// Each selected cell once, by row and column.
+    fn selected_cells(&self, doc: &Document) -> Option<(ObjectId, Vec<(usize, usize)>)> {
+        let (id, blocks) = self.table_cell_blocks(doc)?;
+        let mut cells: Vec<_> = blocks
+            .iter()
+            .flat_map(|b| b.rows().flat_map(move |r| b.cols().map(move |c| (r, c))))
+            .collect();
+        cells.sort_unstable();
+        cells.dedup();
+        Some((id, cells))
+    }
+
     /// Where the selected cells or card are (world), following the object's rotation.
-    pub fn cells_frame(&self, doc: &Document) -> Option<Frame> {
+    pub fn cells_frames(&self, doc: &Document) -> Vec<Frame> {
         if let Some(frame) = self.card_frame(doc).or_else(|| self.node_frame(doc)) {
-            return Some(frame);
+            return vec![frame];
         }
-        let (_, range) = self.table_cells(doc)?;
-        let (_, data, table) = self.single_table(doc)?;
-        let rect = table.range_rect(data.bounds, range)?;
-        Some(Frame::axis_aligned(rect).rotated_about(data.bounds.center(), data.rotation))
+        let (Some((_, blocks)), Some((_, data, table))) =
+            (self.table_cell_blocks(doc), self.single_table(doc))
+        else {
+            return Vec::new();
+        };
+        blocks
+            .into_iter()
+            .filter_map(|range| table.range_rect(data.bounds, range))
+            .map(|rect| {
+                Frame::axis_aligned(rect).rotated_about(data.bounds.center(), data.rotation)
+            })
+            .collect()
     }
 
     /// Deselects the cells or card but keeps their table or board selected. Returns true if
@@ -870,17 +911,43 @@ impl Tools {
         self.card = None;
         let mut cell_on_click = None;
         if let Some((id, cell)) = cell {
-            let picking = self.cells.is_some_and(|c| c.id == id);
+            let picking = self.cells.as_ref().is_some_and(|c| c.id == id)
+                || (pointer.ctrl && self.selection.ids() == [id]);
             if picking || pointer.shift {
-                // With cells selected, a drag selects cells; Shift extends the block.
-                let anchor = match self.cells {
-                    Some(c) if c.id == id && pointer.shift => c.anchor,
-                    _ => cell,
+                // With cells selected, a drag selects cells; Shift extends the block, and
+                // Ctrl (like in Explorer) adds a cell or takes a picked one back.
+                let (anchor, more) = match self.cells.take() {
+                    Some(c) if c.id == id && pointer.shift => (c.anchor, c.more),
+                    Some(c) if c.id == id && pointer.ctrl => {
+                        let mut more = c.more;
+                        more.push(CellRange::new(c.anchor, c.end));
+                        let before = more.len();
+                        more.retain(|b| !b.contains(cell));
+                        if more.len() < before {
+                            // Took cells back: the last block left becomes the current one.
+                            match more.pop() {
+                                Some(last) => {
+                                    self.cells = Some(CellSelection {
+                                        id,
+                                        anchor: (last.row0, last.col0),
+                                        end: (last.row1, last.col1),
+                                        more,
+                                    });
+                                }
+                                None => self.cells = None,
+                            }
+                            self.hover = None;
+                            return true;
+                        }
+                        (cell, more)
+                    }
+                    _ => (cell, Vec::new()),
                 };
                 self.cells = Some(CellSelection {
                     id,
                     anchor,
                     end: cell,
+                    more,
                 });
                 self.gesture = Some(Gesture::SelectCells);
                 self.hover = None;
@@ -1481,6 +1548,21 @@ impl Tools {
                 *i += 1;
             }
         }
+        // So do blocks picked before, wherever they are.
+        if let Some(sel) = &mut self.cells {
+            for block in &mut sel.more {
+                let (a, b) = if rows {
+                    (&mut block.row0, &mut block.row1)
+                } else {
+                    (&mut block.col0, &mut block.col1)
+                };
+                for i in [a, b] {
+                    if *i >= at {
+                        *i += 1;
+                    }
+                }
+            }
+        }
         Some(command)
     }
 
@@ -1519,6 +1601,9 @@ impl Tools {
             return false;
         };
         let merged = table.merged();
+        if self.cells.as_ref().is_some_and(|c| !c.more.is_empty()) {
+            return false;
+        }
         if merge {
             !range.is_single() && !merged.contains(&range)
         } else {
@@ -1549,21 +1634,64 @@ impl Tools {
 
     /// Empties the selected cells, one command per cell with text.
     pub fn clear_cells_text(&self, doc: &Document) -> Vec<Command> {
-        let Some((id, range)) = self.table_cells(doc) else {
+        self.change_cells(doc, |text, _| {
+            (!text.is_empty()).then(pb_core::Cell::default)
+        })
+    }
+
+    /// Turns a mark on for all text of the selected cells, or off when all of it has it:
+    /// `has` reads the mark and `set` changes it. One command per changed cell.
+    pub fn mark_cells(
+        &self,
+        doc: &Document,
+        has: impl Fn(&pb_core::TextMarks) -> bool,
+        set: impl Fn(pb_core::TextMarks, bool) -> pb_core::TextMarks,
+    ) -> Vec<Command> {
+        let Some((_, cells)) = self.selected_cells(doc) else {
             return Vec::new();
         };
         let Some((_, _, table)) = self.single_table(doc) else {
             return Vec::new();
         };
-        range
-            .rows()
-            .flat_map(|r| range.cols().map(move |c| (r, c)))
-            .filter(|&(r, c)| !table.text(r, c).0.is_empty())
-            .map(|(r, c)| Command::SetCell {
-                id,
-                row: table.rows[r].id.clone(),
-                col: table.cols[c].id.clone(),
-                cell: pb_core::Cell::default(),
+        let on = !cells.iter().all(|&(r, c)| {
+            let (text, spans) = table.text(r, c);
+            pb_core::rich::all(spans, 0..text.len(), &has)
+        });
+        self.change_cells(doc, |text, spans| {
+            if text.is_empty() {
+                return None;
+            }
+            let marked = pb_core::rich::apply(spans, 0..text.len(), text.len(), |m| set(m, on));
+            (*marked != *spans).then(|| pb_core::Cell {
+                text: text.into(),
+                spans: marked.into(),
+            })
+        })
+    }
+
+    /// A command for each selected cell that `change` gives a new content, from its text
+    /// and spans.
+    fn change_cells(
+        &self,
+        doc: &Document,
+        change: impl Fn(&str, &[pb_core::Span]) -> Option<pb_core::Cell>,
+    ) -> Vec<Command> {
+        let (Some((id, cells)), Some((_, _, table))) =
+            (self.selected_cells(doc), self.single_table(doc))
+        else {
+            return Vec::new();
+        };
+        cells
+            .into_iter()
+            .filter_map(|(r, c)| {
+                let (text, spans) = table.text(r, c);
+                let cell = change(text, spans)?;
+                Some(Command::SetCell {
+                    id,
+                    row: table.rows[r].id.clone(),
+                    col: table.cols[c].id.clone(),
+                    cell,
+                })
             })
             .collect()
     }

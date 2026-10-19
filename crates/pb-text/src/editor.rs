@@ -66,7 +66,7 @@ pub enum Mark {
 }
 
 impl Mark {
-    fn get(self, m: &TextMarks) -> bool {
+    pub fn get(self, m: &TextMarks) -> bool {
         match self {
             Self::Bold => m.bold,
             Self::Italic => m.italic,
@@ -75,7 +75,7 @@ impl Mark {
         }
     }
 
-    fn set(self, mut m: TextMarks, on: bool) -> TextMarks {
+    pub fn set(self, mut m: TextMarks, on: bool) -> TextMarks {
         match self {
             Self::Bold => m.bold = on,
             Self::Italic => m.italic = on,

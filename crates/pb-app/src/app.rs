@@ -1758,6 +1758,8 @@ impl App {
             Action::ToggleMark(mark) => {
                 if let Some(edit) = &mut self.editing {
                     edit.toggle_mark(self.text.engine(), mark);
+                } else if self.tools.table_cells(&self.document).is_some() {
+                    self.mark_cells(mark);
                 }
             }
             Action::MarkColor(color) => {
@@ -3782,6 +3784,19 @@ impl App {
     /// Empties the selected table cells as one undo step.
     fn clear_cells(&mut self) {
         let commands = self.tools.clear_cells_text(&self.document);
+        self.apply_group(commands);
+    }
+
+    /// Turns `mark` on for all text of the selected cells, or off if all of it has it.
+    fn mark_cells(&mut self, mark: pb_text::Mark) {
+        let commands =
+            self.tools
+                .mark_cells(&self.document, |m| mark.get(m), |m, on| mark.set(m, on));
+        self.apply_group(commands);
+    }
+
+    /// Applies `commands` as one undo step.
+    fn apply_group(&mut self, commands: Vec<Command>) {
         if commands.is_empty() {
             return;
         }
@@ -5088,7 +5103,7 @@ impl App {
             KeyCode::KeyC if ctrl => {
                 self.copy_selection();
             }
-            KeyCode::KeyX if ctrl => {
+            KeyCode::KeyX if ctrl && !modifiers.shift_key() => {
                 if self.copy_selection()
                     && let Some(command) = self.tools.delete_selected(&self.document)
                 {
@@ -5148,6 +5163,19 @@ impl App {
                 if self.tools.table_cells(&self.document).is_some() =>
             {
                 self.clear_cells();
+            }
+            KeyCode::KeyB | KeyCode::KeyI | KeyCode::KeyU | KeyCode::KeyX
+                if ctrl && self.tools.table_cells(&self.document).is_some() =>
+            {
+                use pb_text::Mark;
+                let mark = match code {
+                    KeyCode::KeyB => Mark::Bold,
+                    KeyCode::KeyI => Mark::Italic,
+                    KeyCode::KeyU => Mark::Underline,
+                    _ if modifiers.shift_key() => Mark::Strike,
+                    _ => return false,
+                };
+                self.mark_cells(mark);
             }
             KeyCode::Delete | KeyCode::Backspace => self.delete_selected(),
             KeyCode::ArrowLeft => self.nudge(-1.0, 0.0),
@@ -6009,7 +6037,7 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
             .filter(|_| show_handles && tools.can_rotate(document))
             .map(|f| rotation_knob(f, zoom)),
         hover,
-        cells: tools.cells_frame(document),
+        cells: tools.cells_frames(document),
         marquee: tools.marquee(),
         guides: tools.guides(document),
         eraser: tools.eraser(),
