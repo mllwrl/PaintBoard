@@ -4049,8 +4049,14 @@ impl App {
         self.camera.look_at(Point::ZERO, 1.0, viewport);
     }
 
-    fn on_gpu_ready(&mut self, gpu: Gpu) {
+    fn on_gpu_ready(&mut self, mut gpu: Gpu) {
         log::info!("drawing with {}", gpu.describe());
+        // In the browser the GPU arrives later, after the canvas got its real size (it
+        // starts at 1×1): resizes before then had no surface to go to.
+        if let Some(window) = &self.window {
+            let size = window.inner_size();
+            gpu.resize(size.width, size.height);
+        }
         pb_io::svg::warm_up();
         if let Some(ui) = &mut self.ui {
             ui.attach_gpu(&gpu);
