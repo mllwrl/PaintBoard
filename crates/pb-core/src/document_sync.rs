@@ -190,4 +190,58 @@ mod tests {
         assert!(doc.undo().unwrap());
         assert_eq!(text_of(&doc, id), "old text");
     }
+
+    #[test]
+    fn edits_of_the_same_cell_at_once_both_stay() {
+        use crate::{Cell, ObjectKind, Table};
+
+        let mut a = Document::new();
+        a.set_peer(1).unwrap();
+        let mut n = 0;
+        let table = Table::new(2, 2, || {
+            n += 1;
+            format!("l{n}")
+        });
+        let (row, col) = (table.rows[0].id.clone(), table.cols[0].id.clone());
+        let data = ObjectData {
+            kind: ObjectKind::Table(table),
+            bounds: kurbo::Rect::new(0.0, 0.0, 200.0, 100.0),
+            rotation: 0.0,
+            style: Style::default(),
+            tags: Default::default(),
+            link: None,
+        };
+        a.apply(Command::Create(vec![data.into()])).unwrap();
+        let id = a.objects().last().unwrap().id;
+        let set = |doc: &mut Document, text: &str| {
+            doc.apply(Command::SetCell {
+                id,
+                row: row.clone(),
+                col: col.clone(),
+                cell: Cell {
+                    text: text.into(),
+                    spans: Default::default(),
+                },
+            })
+            .unwrap();
+        };
+        set(&mut a, "two words");
+        let mut b = Document::from_snapshot(&a.snapshot()).unwrap();
+        b.set_peer(2).unwrap();
+        set(&mut a, "two short words");
+        set(&mut b, "two words!");
+        let from_a = a.updates_since(&b.sync_version()).unwrap();
+        let from_b = b.updates_since(&a.sync_version()).unwrap();
+        a.import_updates(&from_b).unwrap();
+        b.import_updates(&from_a).unwrap();
+        let cell = |doc: &Document| match &doc.get(id).unwrap().data.kind {
+            ObjectKind::Table(t) => t.cell(0, 0).map(|c| c.text.to_string()),
+            _ => None,
+        };
+        assert_eq!(cell(&a).as_deref(), Some("two short words!"));
+        assert_eq!(cell(&b), cell(&a));
+        // Emptied, the cell is gone from the table, as before.
+        set(&mut a, "");
+        assert_eq!(cell(&a), None);
+    }
 }

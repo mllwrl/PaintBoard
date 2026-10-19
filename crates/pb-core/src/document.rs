@@ -2593,8 +2593,7 @@ fn write_card(meta: &LoroMap, card: &crate::Card, old: Option<&crate::Card>) -> 
         meta.insert(&k, format!("{};{}", card.column, card.order))?;
     }
     if old.is_none_or(|o| o.text != card.text) {
-        let k = format!("{}{id}", key::CARD);
-        meta.insert(&k, &*card.text)?;
+        write_text_at(meta, &format!("{}{id}", key::CARD), &card.text)?;
     }
     let spans = rich::fit_to(&card.spans, &card.text);
     if old.is_none_or(|o| *o.spans != *spans) {
@@ -2640,7 +2639,7 @@ fn write_node(meta: &LoroMap, node: &crate::Node, old: Option<&crate::Node>) -> 
         meta.insert(&format!("{}{id}", key::NODE_FLAGS), flags)?;
     }
     if old.is_none_or(|o| o.text != node.text) {
-        meta.insert(&format!("{}{id}", key::NODE), &*node.text)?;
+        write_text_at(meta, &format!("{}{id}", key::NODE), &node.text)?;
     }
     let spans = rich::fit_to(&node.spans, &node.text);
     if old.is_none_or(|o| *o.spans != *spans) {
@@ -2799,14 +2798,19 @@ fn write_cell(meta: &LoroMap, row: &str, col: &str, cell: &crate::Cell) -> Resul
     let text_key = format!("{}{row}:{col}", key::CELL);
     let marks_key = format!("{}{row}:{col}", key::CELL_MARKS);
     if cell.text.is_empty() {
-        for k in [&text_key, &marks_key] {
-            if meta.get(k).is_some() {
-                meta.delete(k)?;
-            }
+        if meta.get(&marks_key).is_some() {
+            meta.delete(&marks_key)?;
+        }
+        // A text container is emptied rather than removed: someone typing in the cell
+        // meanwhile keeps their text.
+        match meta.get(&text_key) {
+            Some(ValueOrContainer::Container(_)) => write_text_at(meta, &text_key, "")?,
+            Some(_) => meta.delete(&text_key)?,
+            None => {}
         }
         return Ok(());
     }
-    meta.insert(&text_key, &*cell.text)?;
+    write_text_at(meta, &text_key, &cell.text)?;
     let spans = rich::fit_to(&cell.spans, &cell.text);
     if spans.is_empty() {
         if meta.get(&marks_key).is_some() {
@@ -2826,11 +2830,16 @@ fn read_table(meta: &LoroMap) -> Option<crate::Table> {
     }
     let mut texts = Vec::new();
     meta.for_each(|k, v| {
-        if let (Some(ids), ValueOrContainer::Value(LoroValue::String(text))) =
-            (k.strip_prefix(key::CELL), v)
+        let text = match v {
+            ValueOrContainer::Value(LoroValue::String(text)) => text.to_string(),
+            ValueOrContainer::Container(loro::Container::Text(text)) => text.to_string(),
+            _ => return,
+        };
+        if let Some(ids) = k.strip_prefix(key::CELL)
             && let Some((row, col)) = ids.split_once(':')
+            && !text.is_empty()
         {
-            texts.push((row.to_owned(), col.to_owned(), text.to_string()));
+            texts.push((row.to_owned(), col.to_owned(), text));
         }
     });
     let cells = texts
@@ -2962,9 +2971,14 @@ fn get_str(meta: &LoroMap, k: &str) -> Option<String> {
 /// two people editing the same text at once both keep their edits, where replacing a
 /// string would keep only one. Boards from before keep plain strings until edited.
 fn write_text(meta: &LoroMap, text: &str) -> Result<()> {
-    let container = match meta.get(key::TEXT) {
+    write_text_at(meta, key::TEXT, text)
+}
+
+/// Like [`write_text`], for the text under `k` (a table cell, card or node).
+fn write_text_at(meta: &LoroMap, k: &str, text: &str) -> Result<()> {
+    let container = match meta.get(k) {
         Some(ValueOrContainer::Container(loro::Container::Text(t))) => t,
-        _ => meta.insert_container(key::TEXT, loro::LoroText::new())?,
+        _ => meta.insert_container(k, loro::LoroText::new())?,
     };
     if container.to_string() != text {
         container

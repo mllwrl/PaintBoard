@@ -1013,14 +1013,10 @@ impl TextEdit {
 
     /// Someone else changed the text being edited (shared boards): `theirs` is the text on
     /// the board now. Their change is merged into what is being typed, so ending the edit
-    /// keeps both. Text of tables, kanban cards, mind maps and labels is not merged.
+    /// keeps both. Connector labels and web page titles are not merged.
     pub fn take_in(&mut self, engine: &mut TextEngine, theirs: &str) {
-        let plain = self.connector.is_none()
-            && self.table.is_none()
-            && self.kanban.is_none()
-            && self.mindmap.is_none()
-            && self.embed.is_none();
-        if !plain || theirs == self.original {
+        let merged = self.connector.is_none() && self.embed.is_none() && !self.new_card;
+        if !merged || theirs == self.original {
             return;
         }
         self.editor.rebase(engine, &self.original, theirs);
