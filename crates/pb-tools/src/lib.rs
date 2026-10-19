@@ -2050,8 +2050,9 @@ impl Tools {
 
     /// Frame-local bounds the resize gesture in progress leads to, with snapping guides.
     ///
-    /// Only axis-aligned frames snap, and not while a corner keeps the aspect ratio: with
-    /// Shift held, or by default when images are selected (then Shift stretches them).
+    /// Only axis-aligned frames snap. A corner keeps the aspect ratio with Shift held, or
+    /// by default when images are selected (then Shift stretches them); then whichever of
+    /// its two edges is closer to lining up snaps, and the other follows.
     fn resize_target(&self, doc: &Document) -> Option<(Rect, Vec<Line>)> {
         let Some(Gesture::Resize {
             handle,
@@ -2070,7 +2071,7 @@ impl Tools {
                 .any(|o| matches!(o.data.kind, ObjectKind::Image(_)))
         });
         let keep_aspect = current.shift != has_image;
-        let snapper = (from.rotation == 0.0 && !(keep_aspect && handle.is_corner()))
+        let snapper = (from.rotation == 0.0)
             .then(|| self.snapper(doc, current, self.selection.ids()))
             .flatten();
         let Some(snapper) = snapper else {
@@ -2079,6 +2080,9 @@ impl Tools {
                 Vec::new(),
             ));
         };
+        if keep_aspect && handle.is_corner() {
+            return Some(snap_aspect_corner(&snapper, from.rect, *handle, delta));
+        }
         let (x, y) = handle.dragged_edges(handles::resize(from.rect, *handle, delta, keep_aspect));
         delta += snapper.offset(&Vec::from_iter(x), &Vec::from_iter(y));
         let to = handles::resize(from.rect, *handle, delta, keep_aspect);
@@ -2279,6 +2283,54 @@ fn shape_rect(anchor: Point, end: Point, square: bool) -> Rect {
         delta = Vec2::new(side.copysign(delta.x), side.copysign(delta.y));
     }
     Rect::from_points(anchor, anchor + delta)
+}
+
+/// A corner resize of `bounds` by `delta` that keeps the aspect ratio, with one of the
+/// dragged edges snapped (the one that lines up with less of a jump), and its guides.
+fn snap_aspect_corner(
+    snapper: &Snapper,
+    bounds: Rect,
+    handle: Handle,
+    delta: Vec2,
+) -> (Rect, Vec<Line>) {
+    let free = handles::resize(bounds, handle, delta, true);
+    let (Some(x), Some(y)) = handle.dragged_edges(free) else {
+        return (free, Vec::new());
+    };
+    let (w0, h0) = (bounds.width(), bounds.height());
+    if w0 <= 0.0 || h0 <= 0.0 {
+        return (free, Vec::new());
+    }
+    let (Some(bx), Some(by)) = handle.dragged_edges(bounds) else {
+        return (free, Vec::new());
+    };
+    let off = snapper.offset(&[x], &[y]);
+    // The corner opposite the handle stays; the dragged one goes where `scale` puts it.
+    let (fx, fy) = (free.x0 + free.x1 - x, free.y0 + free.y1 - y);
+    let at_scale = |scale: f64| {
+        let corner = Vec2::new(
+            fx + (w0 * scale).copysign(x - fx) - bx,
+            fy + (h0 * scale).copysign(y - fy) - by,
+        );
+        handles::resize(bounds, handle, corner, true)
+    };
+    let by_x = at_scale((x + off.x - fx).abs() / w0);
+    let by_y = at_scale((y + off.y - fy).abs() / h0);
+    let guides_of = |r: Rect| {
+        let (gx, gy) = handle.dragged_edges(r);
+        snapper.guides(r.abs(), &Vec::from_iter(gx), &Vec::from_iter(gy))
+    };
+    let mut candidates = [(off.x.abs(), by_x), (off.y.abs(), by_y)];
+    candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // Lining up with an object wins over the grid.
+    for (_, r) in candidates {
+        let guides = guides_of(r);
+        if !guides.is_empty() {
+            return (r, guides);
+        }
+    }
+    let r = if snapper.grid.is_some() { candidates[0].1 } else { free };
+    (r, guides_of(r))
 }
 
 #[cfg(test)]

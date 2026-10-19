@@ -669,6 +669,33 @@ fn resize_snaps_dragged_edge() {
 }
 
 #[test]
+fn corners_keeping_aspect_snap_too() {
+    let (doc, ids) = doc_with(&[
+        Rect::new(0.0, 0.0, 100.0, 100.0),
+        Rect::new(0.0, 200.0, 153.0, 300.0),
+    ]);
+    let mut tools = Tools::default();
+    tools.select_only([ids[0]]);
+    tools.pointer_down(&doc, shift(at(100.0, 100.0)));
+    tools.pointer_move(&doc, shift(at(149.0, 120.0)));
+    assert_eq!(
+        tools.guides(&doc),
+        [Line::new(Point::new(153.0, 0.0), Point::new(153.0, 300.0))]
+    );
+    let frames = frame_of_cmd(tools.pointer_up(&doc, shift(at(149.0, 120.0))));
+    assert_eq!(frames[0].rect, Rect::new(0.0, 0.0, 153.0, 153.0));
+    // Nothing in reach: no snapping, the aspect is kept.
+    tools.select_only([ids[0]]);
+    let frames = frame_of_cmd(drag(
+        &mut tools,
+        &doc,
+        shift(at(100.0, 100.0)),
+        shift(at(130.0, 110.0)),
+    ));
+    assert_eq!(frames[0].rect, Rect::new(0.0, 0.0, 130.0, 130.0));
+}
+
+#[test]
 fn image_corners_keep_aspect_unless_shift() {
     let mut doc = Document::new();
     let asset = doc.add_asset(b"img".to_vec());
