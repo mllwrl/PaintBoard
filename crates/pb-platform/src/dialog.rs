@@ -83,6 +83,13 @@ pub fn pick_files(
     }
 }
 
+/// Calls `dropped` with files dragged onto the page and where (in physical pixels from
+/// the window's top left). In the browser only: winit reports drops on the desktop.
+#[cfg(target_arch = "wasm32")]
+pub fn on_files_dropped(dropped: impl Fn(Vec<PathBuf>, (f64, f64)) + 'static) {
+    imp::on_files_dropped(Box::new(dropped));
+}
+
 pub fn show_error(title: &str, message: &str) {
     log::error!("{title}: {message}");
     imp::show_error(title, message);
@@ -187,7 +194,7 @@ mod imp {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
     use wasm_bindgen_futures::JsFuture;
-    use web_sys::HtmlInputElement;
+    use web_sys::{DragEvent, FileList, HtmlInputElement};
 
     use super::{Answer, FileType};
 
@@ -285,24 +292,7 @@ mod imp {
             };
             let files = picked.files();
             wasm_bindgen_futures::spawn_local(async move {
-                let mut paths = Vec::new();
-                let count = files.as_ref().map_or(0, |f| f.length());
-                for i in 0..count {
-                    let Some(file) = files.as_ref().and_then(|f| f.get(i)) else {
-                        continue;
-                    };
-                    match JsFuture::from(file.array_buffer()).await {
-                        Ok(buffer) => {
-                            let path = crate::fs::uploads_dir().join(file.name());
-                            let bytes = Uint8Array::new(&buffer).to_vec();
-                            match crate::fs::write_atomic(&path, &bytes) {
-                                Ok(()) => paths.push(path),
-                                Err(err) => log::error!("{}: {err}", file.name()),
-                            }
-                        }
-                        Err(err) => log::error!("{}: {err:?}", file.name()),
-                    }
-                }
+                let paths = read_files(files).await;
                 if !paths.is_empty() {
                     done(paths);
                 }
@@ -312,5 +302,61 @@ mod imp {
         // The input is never added to the page; the closure lives as long as the page.
         on_change.forget();
         input.click();
+    }
+
+    /// Reads `files` into memory (the uploads directory); returns where they went.
+    async fn read_files(files: Option<FileList>) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        let count = files.as_ref().map_or(0, FileList::length);
+        for i in 0..count {
+            let Some(file) = files.as_ref().and_then(|f| f.get(i)) else {
+                continue;
+            };
+            match JsFuture::from(file.array_buffer()).await {
+                Ok(buffer) => {
+                    let path = crate::fs::uploads_dir().join(file.name());
+                    let bytes = Uint8Array::new(&buffer).to_vec();
+                    match crate::fs::write_atomic(&path, &bytes) {
+                        Ok(()) => paths.push(path),
+                        Err(err) => log::error!("{}: {err}", file.name()),
+                    }
+                }
+                Err(err) => log::error!("{}: {err:?}", file.name()),
+            }
+        }
+        paths
+    }
+
+    pub fn on_files_dropped(dropped: Box<dyn Fn(Vec<PathBuf>, (f64, f64))>) {
+        let Some(window) = window() else {
+            return;
+        };
+        // Without this the browser opens a dragged file itself instead of dropping it.
+        let over = Closure::<dyn FnMut(DragEvent)>::new(|event: DragEvent| {
+            event.prevent_default();
+        });
+        let dropped = Rc::new(dropped);
+        let scale = window.device_pixel_ratio();
+        let on_drop = Closure::<dyn FnMut(DragEvent)>::new(move |event: DragEvent| {
+            event.prevent_default();
+            let at = (
+                f64::from(event.client_x()) * scale,
+                f64::from(event.client_y()) * scale,
+            );
+            let files = event.data_transfer().and_then(|d| d.files());
+            let dropped = dropped.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let paths = read_files(files).await;
+                if !paths.is_empty() {
+                    dropped(paths, at);
+                }
+            });
+        });
+        let target: &web_sys::EventTarget = window.as_ref();
+        let _ = target.add_event_listener_with_callback("dragover", over.as_ref().unchecked_ref());
+        let _ = target.add_event_listener_with_callback("drop", on_drop.as_ref().unchecked_ref());
+        // Listening as long as the page is open.
+        over.forget();
+        on_drop.forget();
     }
 }

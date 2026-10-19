@@ -70,10 +70,16 @@ pub enum UserEvent {
     /// A background save finished; the session takes the outcome in on the next tick.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Saved,
+    /// The clipboard can be read now (later than asked on the web): paste centered on
+    /// this point, or where the copy came from.
+    Paste(Option<Point>),
     /// A board file was picked to open (later than asked on the web).
     BoardPicked(PathBuf),
     /// Files were picked to add to the board.
     FilesPicked(Vec<PathBuf>),
+    /// Files were dropped on the page at this point (physical pixels; the web only).
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    FilesDropped(Vec<PathBuf>, Point),
     /// A book's page was rendered on a background thread.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     PageRendered {
@@ -1935,8 +1941,40 @@ impl App {
         self.paste_at(at);
     }
 
-    /// Pastes centered on `at` (world), or where the copy came from.
+    /// Pastes centered on `at` (world), or where the copy came from, once the clipboard
+    /// has been read.
     fn paste_at(&mut self, at: Option<Point>) {
+        self.read_clipboard(at);
+    }
+
+    /// Reads the clipboard, then pastes (see [`UserEvent::Paste`]).
+    fn read_clipboard(&mut self, at: Option<Point>) {
+        let proxy = self.proxy.clone();
+        clipboard::read_then(move || {
+            let _ = proxy.send_event(UserEvent::Paste(at));
+        });
+    }
+
+    /// Pastes what the clipboard holds: into the text being edited or a focused field,
+    /// or onto the board.
+    fn paste_now(&mut self, at: Option<Point>) {
+        self.request_redraw();
+        if let Some(edit) = &mut self.editing {
+            edit.paste(self.text.engine());
+            return;
+        }
+        if let Some(ui) = &mut self.ui
+            && ui.wants_keyboard()
+        {
+            if let Some(text) = clipboard::text() {
+                ui.paste(text);
+            }
+            return;
+        }
+        self.paste_onto_board(at);
+    }
+
+    fn paste_onto_board(&mut self, at: Option<Point>) {
         if let Some(image) = clipboard::image() {
             match Picture::from_clipboard(image) {
                 Ok(picture) => self.insert_pictures(vec![picture], at),
@@ -4550,6 +4588,10 @@ impl ApplicationHandler<UserEvent> for App {
         #[cfg(target_arch = "wasm32")]
         {
             let proxy = self.proxy.clone();
+            pb_platform::dialog::on_files_dropped(move |paths, (x, y)| {
+                let _ = proxy.send_event(UserEvent::FilesDropped(paths, Point::new(x, y)));
+            });
+            let proxy = self.proxy.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 match gpu.await {
                     Ok(gpu) => {
@@ -4642,7 +4684,16 @@ impl ApplicationHandler<UserEvent> for App {
             } => self.finish_preview(id, &url, replace_title, result),
             // Waking up is all it takes: `about_to_wait` ticks the session.
             UserEvent::Saved => {}
+            UserEvent::Paste(at) => self.paste_now(at),
             UserEvent::BoardPicked(path) => self.open_file(path),
+            UserEvent::FilesDropped(paths, at) => {
+                let at = self.camera.screen_to_world(at);
+                self.insert_files(&paths, Some(at));
+                for path in &paths {
+                    let _ = pb_platform::fs::remove(path);
+                }
+                self.request_redraw();
+            }
             UserEvent::FilesPicked(paths) => {
                 self.insert_files(&paths, None);
                 // Picked in the browser, they were kept in memory only to be read.
@@ -4782,6 +4833,14 @@ impl App {
             WindowEvent::KeyboardInput { event, .. } => {
                 let typing = self.ui.as_ref().is_some_and(Ui::wants_keyboard);
                 if typing {
+                    // The browser gives text fields no clipboard: read it for them.
+                    let paste = cfg!(target_arch = "wasm32")
+                        && event.state == ElementState::Pressed
+                        && self.navigation.modifiers().control_key()
+                        && event.physical_key == PhysicalKey::Code(KeyCode::KeyV);
+                    if paste {
+                        self.read_clipboard(None);
+                    }
                     false
                 } else if self.playback.is_some() {
                     self.playback_key(&event)
@@ -4826,6 +4885,7 @@ impl App {
                         KeyOutcome::NextSticky { below } => self.next_sticky(below),
                         KeyOutcome::NextCell { back } => self.next_cell(back),
                         KeyOutcome::NextCard => self.next_card(),
+                        KeyOutcome::Paste => self.read_clipboard(None),
                         KeyOutcome::NextNode { child } => self.next_node(child),
                     }
                     true

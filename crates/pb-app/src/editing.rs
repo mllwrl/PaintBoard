@@ -50,6 +50,9 @@ pub enum KeyOutcome {
     NextCell {
         back: bool,
     },
+    /// Ctrl+V where the clipboard is read later (the browser): read it, then
+    /// [`TextEdit::paste`].
+    Paste,
     /// Tab on a kanban card: stop editing and start a new card below it.
     NextCard,
     /// Tab (`child`) or Enter on a mind map node: stop editing and start a new child, or a
@@ -1012,6 +1015,15 @@ impl TextEdit {
         self.editor.select_all(engine);
     }
 
+    /// Types the clipboard's text in place of the selection.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn paste(&mut self, engine: &mut TextEngine) {
+        self.touch();
+        if let Some(text) = clipboard::text() {
+            self.editor.insert(engine, &text.replace("\r\n", "\n"));
+        }
+    }
+
     pub fn key(
         &mut self,
         engine: &mut TextEngine,
@@ -1054,6 +1066,8 @@ impl TextEdit {
                         ed.backspace(engine, false);
                     }
                 }
+                // The browser reads the clipboard later: the app pastes with `paste`.
+                KeyCode::KeyV if cfg!(target_arch = "wasm32") => return KeyOutcome::Paste,
                 KeyCode::KeyV => {
                     if let Some(text) = clipboard::text() {
                         ed.insert(engine, &text.replace("\r\n", "\n"));

@@ -796,6 +796,16 @@ impl Ui {
         self.ctx.is_pointer_over_egui() || self.ctx.egui_is_using_pointer()
     }
 
+    /// Pastes `text` into the focused text field (where egui cannot read the clipboard
+    /// itself: the browser).
+    pub fn paste(&mut self, text: String) {
+        self.state
+            .egui_input_mut()
+            .events
+            .push(egui::Event::Paste(text));
+        self.ctx.request_repaint();
+    }
+
     /// A text field has focus, so keys are not shortcuts.
     pub fn wants_keyboard(&self) -> bool {
         self.ctx.egui_wants_keyboard_input()
