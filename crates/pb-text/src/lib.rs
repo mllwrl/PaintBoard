@@ -7,6 +7,7 @@
 
 mod editor;
 pub mod markdown;
+pub mod merge;
 mod rich_editor;
 
 pub use editor::{Mark, Motion, TextEditor, TextRect};

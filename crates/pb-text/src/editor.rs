@@ -283,6 +283,31 @@ impl TextEditor {
         self.editor.set_insert_marks(None);
     }
 
+    /// Takes in a change someone else made to the text meanwhile: the text becomes `base`
+    /// (the text when editing started) with both their change (`theirs`) and the one being
+    /// typed here, the cursor and styles staying with the text around them. Undo within
+    /// the edit starts over, as its steps were of the text before.
+    pub fn rebase(&mut self, engine: &mut TextEngine, base: &str, theirs: &str) {
+        let now = self.snapshot();
+        let (text, map) = crate::merge::merge(base, &now.text, theirs);
+        let spans: Vec<Span> = now
+            .spans
+            .iter()
+            .map(|s| Span {
+                start: map(s.start),
+                end: map(s.end),
+                marks: s.marks,
+            })
+            .filter(|s| s.start < s.end)
+            .collect();
+        self.editor.set_text(&text, &spans);
+        self.driver(engine)
+            .select_byte_range(map(now.anchor), map(now.focus));
+        self.undo.clear();
+        self.redo.clear();
+        self.break_step();
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }

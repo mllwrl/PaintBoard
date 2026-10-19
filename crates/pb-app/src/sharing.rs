@@ -81,6 +81,7 @@ pub fn server_address(typed: &str) -> Option<String> {
 }
 
 /// `scheme://host[:port]` of a web address, if it is one (`http` or `https`).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub fn origin(address: &str) -> Option<String> {
     let (scheme, rest) = address.split_once("://")?;
     if scheme != "http" && scheme != "https" {

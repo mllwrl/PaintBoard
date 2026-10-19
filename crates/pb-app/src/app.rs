@@ -4208,6 +4208,14 @@ impl App {
             self.request_redraw();
         }
         if ticked.changed {
+            // Someone may have changed the text being edited here.
+            if let Some(edit) = &mut self.editing
+                && let crate::editing::Target::Existing(id) = edit.target
+                && let Some(theirs) = self.document.get(id).and_then(|o| o.data.kind.text())
+            {
+                let theirs = theirs.to_string();
+                edit.take_in(self.text.engine(), &theirs);
+            }
             self.tools.sync(&self.document);
             self.request_redraw();
         }
