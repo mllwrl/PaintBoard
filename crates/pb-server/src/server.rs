@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::State;
 use axum::extract::ws::{self, WebSocket, WebSocketUpgrade};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
@@ -32,6 +32,8 @@ pub struct Shared {
     next_client: AtomicU64,
     /// When set, making a board needs this in the `x-create-key` header.
     create_key: Option<String>,
+    /// The built web version to serve, so links open the board in a browser.
+    web: Option<std::path::PathBuf>,
 }
 
 /// A board in memory and the connections to it.
@@ -43,12 +45,22 @@ struct Live {
 }
 
 impl Shared {
+    #[cfg(test)]
     pub fn new(store: Store, create_key: Option<String>) -> Arc<Self> {
+        Self::with_web(store, create_key, None)
+    }
+
+    pub fn with_web(
+        store: Store,
+        create_key: Option<String>,
+        web: Option<std::path::PathBuf>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             store: Mutex::new(store),
             rooms: Mutex::new(HashMap::new()),
             next_client: AtomicU64::new(1),
             create_key,
+            web,
         })
     }
 
@@ -135,7 +147,53 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/health", get(|| async { "ok" }))
         .route("/boards", post(create_board).options(allow_other_sites))
         .route("/ws", get(connect))
+        .route("/", get(|state| web_file(state, "index.html".to_owned())))
+        .route("/board/{name}", get(board_page))
+        .route("/{name}", get(|state, Path(name)| web_file(state, name)))
         .with_state(shared)
+}
+
+/// `/board/<id>` is the web version opening that board; its files (`/board/x.js`, as the
+/// page asks for them relative to itself) are the web version's.
+async fn board_page(state: State<Arc<Shared>>, Path(name): Path<String>) -> Response {
+    let file = if name.contains('.') {
+        name
+    } else {
+        "index.html".to_owned()
+    };
+    web_file(state, file).await
+}
+
+/// A file of the web version, if the server serves it.
+async fn web_file(State(shared): State<Arc<Shared>>, name: String) -> Response {
+    let Some(dir) = &shared.web else {
+        return (
+            StatusCode::NOT_FOUND,
+            "this server does not serve the web version",
+        )
+            .into_response();
+    };
+    // Only plain names in the web version's folder.
+    let plain = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && !name.starts_with('.');
+    if !plain {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let kind = match name.rsplit('.').next() {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "text/javascript",
+        Some("wasm") => "application/wasm",
+        Some("png") => "image/png",
+        Some("css") => "text/css",
+        _ => "application/octet-stream",
+    };
+    match tokio::fs::read(dir.join(&name)).await {
+        Ok(bytes) => ([(axum::http::header::CONTENT_TYPE, kind)], bytes).into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 /// The web version may be served from another site than the server: let browsers ask.

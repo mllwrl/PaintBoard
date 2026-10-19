@@ -284,7 +284,7 @@ mod imp {
             let socket = match WebSocket::new(url) {
                 Ok(socket) => socket,
                 Err(err) => {
-                    shared.borrow_mut().state = Some(SocketState::Closed(format!("{err:?}")));
+                    shared.borrow_mut().state = Some(SocketState::Closed(message(&err)));
                     return Self {
                         socket: None,
                         shared,
@@ -374,6 +374,14 @@ mod imp {
         }
     }
 
+    /// What went wrong, in words: a JavaScript error's message, not its stack.
+    fn message(err: &wasm_bindgen::JsValue) -> String {
+        err.dyn_ref::<js_sys::Error>()
+            .map(|e| String::from(e.message()))
+            .or_else(|| err.as_string())
+            .unwrap_or_else(|| format!("{err:?}"))
+    }
+
     pub fn post(
         url: &str,
         header: Option<(&str, &str)>,
@@ -395,12 +403,12 @@ mod imp {
             let result = async {
                 let response: Response = JsFuture::from(request)
                     .await
-                    .map_err(|e| format!("{e:?}"))?
+                    .map_err(|e| message(&e))?
                     .unchecked_into();
-                let text = response.text().map_err(|e| format!("{e:?}"))?;
+                let text = response.text().map_err(|e| message(&e))?;
                 let body = JsFuture::from(text)
                     .await
-                    .map_err(|e| format!("{e:?}"))?
+                    .map_err(|e| message(&e))?
                     .as_string()
                     .unwrap_or_default();
                 if response.ok() {

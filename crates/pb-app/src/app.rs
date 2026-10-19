@@ -94,6 +94,16 @@ pub enum UserEvent {
     },
 }
 
+/// The server the web version was loaded from, which likely shares boards too.
+fn page_server() -> Option<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        pb_platform::browser::page_address().and_then(|a| crate::sharing::origin(&a))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    None
+}
+
 /// What to do with an exported file once it is made.
 enum Made {
     /// Open it as a PDF to print, named `name`.
@@ -330,8 +340,15 @@ impl App {
             next_request: 0,
             shown_title: String::new(),
         };
-        // The board was shared when last open: go on sharing it.
-        app.resume_sharing();
+        // The page is a shared board's link: that board. Else the board was shared when
+        // last open: go on sharing it.
+        #[cfg(target_arch = "wasm32")]
+        let opened = app.open_page_link();
+        #[cfg(not(target_arch = "wasm32"))]
+        let opened = false;
+        if !opened {
+            app.resume_sharing();
+        }
         app
     }
 
@@ -4256,7 +4273,10 @@ impl App {
         let window = self.share_window.then(|| crate::ui::ShareView {
             name: self.me.to_string(),
             shared,
-            server: crate::settings::server(),
+            server: Some(crate::settings::server())
+                .filter(|s| !s.is_empty())
+                .or_else(page_server)
+                .unwrap_or_default(),
             making: self.making_shared,
             error: self.share_error.clone(),
         });
@@ -4338,6 +4358,40 @@ impl App {
         if let Some((link, view)) = crate::settings::shared_link(before) {
             crate::settings::save_shared_link(before, None);
             crate::settings::save_shared_link(&after, Some((&link, view.as_deref())));
+        }
+    }
+
+    /// Opens the shared board the page's address is a link to, kept in the browser under
+    /// its id. Returns whether the page is such a link.
+    #[cfg(target_arch = "wasm32")]
+    fn open_page_link(&mut self) -> bool {
+        let Some(link) = pb_platform::browser::page_address()
+            .as_deref()
+            .and_then(crate::sharing::Link::parse)
+        else {
+            return false;
+        };
+        let Ok(dir) = pb_platform::fs::boards_dir() else {
+            return false;
+        };
+        let path = dir.join(format!("{}.{}", link.board, pb_storage::EXTENSION));
+        let document = self.session.open_or_new(path, &self.document);
+        self.replace_document(document);
+        // This copy may know the link to look too, from when it made the board.
+        match crate::settings::shared_link(&self.board_key()) {
+            Some((known, view)) if known == link.to_string() => {
+                self.resume_sharing_with(known, view)
+            }
+            _ => self.start_sharing(link, None),
+        }
+        true
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn resume_sharing_with(&mut self, link: String, view: Option<String>) {
+        if let Some(link) = crate::sharing::Link::parse(&link) {
+            let view = view.as_deref().and_then(crate::sharing::Link::parse);
+            self.start_sharing(link, view);
         }
     }
 

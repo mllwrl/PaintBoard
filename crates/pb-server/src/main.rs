@@ -3,7 +3,9 @@
 //! Settings come from the environment:
 //! - `PB_ADDR`: where to listen, `0.0.0.0:8080` by default;
 //! - `PB_DB`: the database file, `paintboard.db` by default;
-//! - `PB_CREATE_KEY`: if set, making a board needs this key (else anyone can).
+//! - `PB_CREATE_KEY`: if set, making a board needs this key (else anyone can);
+//! - `PB_WEB`: the built web version (`target/web`) to serve, so a board's link opens it
+//!   in a browser.
 //!
 //! Put it behind a proxy with TLS (e.g. Caddy) so links work over `wss://`.
 
@@ -25,6 +27,7 @@ async fn main() {
     let create_key = std::env::var("PB_CREATE_KEY")
         .ok()
         .filter(|k| !k.is_empty());
+    let web = std::env::var_os("PB_WEB").map(PathBuf::from);
 
     let store = match store::Store::open(&db) {
         Ok(store) => store,
@@ -33,7 +36,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let shared = server::Shared::new(store, create_key);
+    let shared = server::Shared::with_web(store, create_key, web);
     let saver = shared.clone();
     tokio::spawn(async move {
         let mut every = tokio::time::interval(server::SAVE_EVERY);

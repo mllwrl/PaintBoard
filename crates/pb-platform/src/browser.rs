@@ -14,6 +14,12 @@ pub fn open_url(url: &str) -> bool {
     imp::open_url(url)
 }
 
+/// The page's own address, in the browser.
+#[cfg(target_arch = "wasm32")]
+pub fn page_address() -> Option<String> {
+    web_sys::window()?.location().href().ok()
+}
+
 /// Opens the file at `path` in the app the system uses for its kind; returns whether it
 /// was.
 /// In the browser, the file (kept in memory) opens in a new tab: a PDF in its viewer,

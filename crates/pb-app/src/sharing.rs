@@ -80,6 +80,19 @@ pub fn server_address(typed: &str) -> Option<String> {
     }
 }
 
+/// `scheme://host[:port]` of a web address, if it is one (`http` or `https`).
+pub fn origin(address: &str) -> Option<String> {
+    let (scheme, rest) = address.split_once("://")?;
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .filter(|h| !h.is_empty())?;
+    Some(format!("{scheme}://{host}"))
+}
+
 /// The links of a board just made on `server`, from the server's answer
 /// (`{"board":…,"edit":…,"view":…}`): to edit, and to look only.
 pub fn made_links(server: &str, answer: &str) -> Option<(Link, Link)> {
@@ -364,6 +377,16 @@ mod tests {
             Some("http://localhost:8080")
         );
         assert_eq!(server_address("  "), None);
+    }
+
+    #[test]
+    fn origins_of_addresses() {
+        assert_eq!(
+            origin("http://127.0.0.1:8080/board/x?key=y").as_deref(),
+            Some("http://127.0.0.1:8080")
+        );
+        assert_eq!(origin("https://h").as_deref(), Some("https://h"));
+        assert_eq!(origin("file:///c/x.html"), None);
     }
 
     #[test]

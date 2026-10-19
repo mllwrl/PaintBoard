@@ -213,3 +213,35 @@ async fn the_apps_socket_and_requests_work() {
     assert!(joined);
     assert_eq!(socket.state(), SocketState::Open);
 }
+
+/// `GET path`: the status line and body.
+async fn get_page(addr: &str, path: &str) -> (String, String) {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let request = format!("GET {path} HTTP/1.1\r\nhost: {addr}\r\nconnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await.unwrap();
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    (head.lines().next().unwrap().to_owned(), body.to_owned())
+}
+
+#[tokio::test]
+async fn links_open_the_web_version() {
+    let web = std::env::temp_dir().join(format!("pb-web-{}", std::process::id()));
+    std::fs::create_dir_all(&web).unwrap();
+    std::fs::write(web.join("index.html"), "the page").unwrap();
+    std::fs::write(web.join("paintboard.js"), "the code").unwrap();
+    let shared = Shared::with_web(Store::in_memory().unwrap(), None, Some(web.clone()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move { axum::serve(listener, router(shared)).await.unwrap() });
+
+    assert_eq!(get_page(&addr, "/").await.1, "the page");
+    assert_eq!(get_page(&addr, "/board/a1b2?key=c3").await.1, "the page");
+    assert_eq!(get_page(&addr, "/board/paintboard.js").await.1, "the code");
+    assert_eq!(get_page(&addr, "/paintboard.js").await.1, "the code");
+    assert!(get_page(&addr, "/missing.js").await.0.contains("404"));
+    assert!(get_page(&addr, "/..%2Fsecret").await.0.contains("404"));
+    assert!(get_page(&addr, "/health").await.1.contains("ok"));
+    std::fs::remove_dir_all(&web).unwrap();
+}

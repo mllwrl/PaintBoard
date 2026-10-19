@@ -217,6 +217,23 @@ impl Session {
         Some(opened)
     }
 
+    /// Opens the board at `path`, or starts it empty there if there is none yet (a shared
+    /// board opened from its link in the browser). The current board is kept as it is.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn open_or_new(&mut self, path: PathBuf, doc: &Document) -> Document {
+        self.flush(doc);
+        let opened = if fs::exists(&path) {
+            load(&path).unwrap_or_else(|err| {
+                log::warn!("could not open {}: {err}", path.display());
+                Document::new()
+            })
+        } else {
+            Document::new()
+        };
+        self.switch_to(Some(path), &opened);
+        opened
+    }
+
     /// The boards saved in the browser (none on the desktop).
     pub fn stored_boards() -> Vec<PathBuf> {
         #[cfg(target_arch = "wasm32")]
