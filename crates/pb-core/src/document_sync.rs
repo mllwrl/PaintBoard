@@ -244,4 +244,98 @@ mod tests {
         set(&mut a, "");
         assert_eq!(cell(&a), None);
     }
+
+    /// Two copies of `doc`, as if opened by two people.
+    fn two(doc: &Document) -> (Document, Document) {
+        let mut a = Document::from_snapshot(&doc.snapshot()).unwrap();
+        let mut b = Document::from_snapshot(&doc.snapshot()).unwrap();
+        a.set_peer(11).unwrap();
+        b.set_peer(12).unwrap();
+        (a, b)
+    }
+
+    /// Each copy takes in the other's changes.
+    fn exchange(a: &mut Document, b: &mut Document) {
+        let from_a = a.updates_since(&b.sync_version()).unwrap();
+        let from_b = b.updates_since(&a.sync_version()).unwrap();
+        a.import_updates(&from_b).unwrap();
+        b.import_updates(&from_a).unwrap();
+        let ids = |d: &Document| d.objects().iter().map(|o| o.id).collect::<Vec<_>>();
+        assert_eq!(ids(a), ids(b));
+    }
+
+    #[test]
+    fn a_moved_object_someone_deleted_stays_deleted() {
+        let mut doc = Document::new();
+        let id = rect(&mut doc);
+        let (mut a, mut b) = two(&doc);
+        a.apply(Command::Delete(vec![id])).unwrap();
+        b.apply(Command::Move {
+            ids: vec![id],
+            delta: kurbo::Vec2::new(10.0, 0.0),
+        })
+        .unwrap();
+        set_text(&mut b, id, "edited meanwhile");
+        exchange(&mut a, &mut b);
+        assert!(a.get(id).is_none() && b.get(id).is_none());
+    }
+
+    #[test]
+    fn a_connector_to_a_deleted_object_is_harmless() {
+        use crate::{Anchor, Cap, Connector, End, Label, Route};
+
+        let mut doc = Document::new();
+        let first = rect(&mut doc);
+        let second = rect(&mut doc);
+        let (mut a, mut b) = two(&doc);
+        a.apply(Command::Delete(vec![second])).unwrap();
+        let end = |object| End::Attached {
+            object,
+            anchor: Anchor::Auto,
+            at: kurbo::Point::ZERO,
+        };
+        let data = ObjectData {
+            kind: crate::ObjectKind::Connector(Connector {
+                bends: Default::default(),
+                start: end(first),
+                end: end(second),
+                route: Route::Straight,
+                start_cap: Cap::None,
+                end_cap: Cap::Arrow,
+                label: Label::default(),
+            }),
+            bounds: kurbo::Rect::ZERO,
+            rotation: 0.0,
+            style: Style::default(),
+            tags: Default::default(),
+            link: None,
+        };
+        b.apply(Command::Create(vec![data.into()])).unwrap();
+        exchange(&mut a, &mut b);
+        // Both copies agree on what is left and can still draw and save it.
+        for doc in [&a, &b] {
+            for object in doc.objects() {
+                let _ = doc.connector_path(object.id);
+            }
+            Document::from_snapshot(&doc.snapshot()).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_deleted_group_takes_what_someone_moved_in_it() {
+        let mut doc = Document::new();
+        let first = rect(&mut doc);
+        let second = rect(&mut doc);
+        doc.apply(Command::Group(vec![first, second])).unwrap();
+        let group = doc.parent(first).unwrap();
+        let (mut a, mut b) = two(&doc);
+        a.apply(Command::Delete(vec![group])).unwrap();
+        b.apply(Command::Move {
+            ids: vec![first],
+            delta: kurbo::Vec2::new(5.0, 5.0),
+        })
+        .unwrap();
+        exchange(&mut a, &mut b);
+        assert!(a.get(first).is_none() && a.get(second).is_none());
+    }
 }
