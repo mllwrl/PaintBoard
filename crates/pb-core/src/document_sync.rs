@@ -140,4 +140,54 @@ mod tests {
         assert!(a.get(first).is_none());
         assert!(a.get(second).is_some());
     }
+
+    fn set_text(doc: &mut Document, id: ObjectId, text: &str) {
+        let bounds = doc.get(id).unwrap().data.bounds;
+        doc.apply(Command::SetText {
+            id,
+            text: text.into(),
+            spans: Default::default(),
+            bounds,
+        })
+        .unwrap();
+    }
+
+    fn text_of(doc: &Document, id: ObjectId) -> String {
+        doc.get(id).unwrap().data.kind.text().unwrap().to_string()
+    }
+
+    #[test]
+    fn edits_of_the_same_text_at_once_both_stay() {
+        let mut a = Document::new();
+        a.set_peer(1).unwrap();
+        let id = rect(&mut a);
+        set_text(&mut a, id, "Hello world");
+        let mut b = Document::from_snapshot(&a.snapshot()).unwrap();
+        b.set_peer(2).unwrap();
+
+        set_text(&mut a, id, "Hello big world");
+        set_text(&mut b, id, "Hello world!");
+        let from_a = a.updates_since(&b.sync_version()).unwrap();
+        let from_b = b.updates_since(&a.sync_version()).unwrap();
+        a.import_updates(&from_b).unwrap();
+        b.import_updates(&from_a).unwrap();
+        assert_eq!(text_of(&a, id), "Hello big world!");
+        assert_eq!(text_of(&b, id), "Hello big world!");
+    }
+
+    #[test]
+    fn text_from_older_boards_reads_and_edits() {
+        let mut doc = Document::new();
+        let id = rect(&mut doc);
+        // Boards before text containers kept a plain string.
+        let meta = doc.tree.get_meta(doc.nodes[&id]).unwrap();
+        meta.insert(super::super::key::TEXT, "old text").unwrap();
+        doc.doc.commit();
+        let mut doc = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(text_of(&doc, id), "old text");
+        set_text(&mut doc, id, "new text");
+        assert_eq!(text_of(&doc, id), "new text");
+        assert!(doc.undo().unwrap());
+        assert_eq!(text_of(&doc, id), "old text");
+    }
 }

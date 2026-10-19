@@ -1026,7 +1026,7 @@ impl Document {
                     return Err(Error::UnknownObject(id));
                 }
                 let meta = self.tree.get_meta(self.nodes[&id])?;
-                meta.insert(key::TEXT, &*text)?;
+                write_text(&meta, &text)?;
                 write_spans(&meta, &rich::fit_to(&spans, &text))?;
                 write_bounds(&meta, bounds.abs())?;
             }
@@ -2096,12 +2096,12 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
     match &data.kind {
         ObjectKind::Ink(ink) => meta.insert(key::POINTS, ink.to_bytes())?,
         ObjectKind::Text(text) => {
-            meta.insert(key::TEXT, &*text.text)?;
+            write_text(meta, &text.text)?;
             meta.insert(key::FONT_SIZE, text.size)?;
         }
-        ObjectKind::Sticky(sticky) => meta.insert(key::TEXT, &*sticky.text)?,
+        ObjectKind::Sticky(sticky) => write_text(meta, &sticky.text)?,
         ObjectKind::Doc(doc) => {
-            meta.insert(key::TEXT, &*doc.text)?;
+            write_text(meta, &doc.text)?;
             meta.insert(key::FONT_SIZE, doc.size)?;
         }
         ObjectKind::Embed(embed) => write_embed(meta, embed)?,
@@ -2148,7 +2148,7 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
         }
         ObjectKind::Shape(shape) => {
             if !shape.text.is_empty() {
-                meta.insert(key::TEXT, &*shape.text)?;
+                write_text(meta, &shape.text)?;
             }
         }
     }
@@ -2935,11 +2935,29 @@ fn get_num(meta: &LoroMap, k: &str) -> Option<f64> {
     }
 }
 
+/// Text stored under `k`: a plain string, or a text container ([`write_text`]).
 fn get_str(meta: &LoroMap, k: &str) -> Option<String> {
     match meta.get(k) {
         Some(ValueOrContainer::Value(LoroValue::String(s))) => Some(s.to_string()),
+        Some(ValueOrContainer::Container(loro::Container::Text(t))) => Some(t.to_string()),
         _ => None,
     }
+}
+
+/// Stores an object's text as a text container, changed by the difference to what it was:
+/// two people editing the same text at once both keep their edits, where replacing a
+/// string would keep only one. Boards from before keep plain strings until edited.
+fn write_text(meta: &LoroMap, text: &str) -> Result<()> {
+    let container = match meta.get(key::TEXT) {
+        Some(ValueOrContainer::Container(loro::Container::Text(t))) => t,
+        _ => meta.insert_container(key::TEXT, loro::LoroText::new())?,
+    };
+    if container.to_string() != text {
+        container
+            .update(text, loro::UpdateOptions::default())
+            .map_err(|_| Error::Crdt(LoroError::Unknown("text update timed out".into())))?;
+    }
+    Ok(())
 }
 
 fn read_end(meta: &LoroMap, prefix: &str) -> Option<End> {
@@ -3015,10 +3033,7 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
             }
         }
         ValueOrContainer::Value(LoroValue::String(s)) if &**s == "text" => {
-            let text = match meta.get(key::TEXT)? {
-                ValueOrContainer::Value(LoroValue::String(t)) => Arc::from(&**t),
-                _ => return None,
-            };
+            let text: Arc<str> = get_str(meta, key::TEXT)?.into();
             let size = match meta.get(key::FONT_SIZE) {
                 Some(ValueOrContainer::Value(LoroValue::Double(v))) => v,
                 _ => DEFAULT_FONT_SIZE,
@@ -3027,10 +3042,7 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
             ObjectKind::Text(Text { text, spans, size })
         }
         ValueOrContainer::Value(LoroValue::String(s)) if &**s == "sticky" => {
-            let text = match meta.get(key::TEXT) {
-                Some(ValueOrContainer::Value(LoroValue::String(t))) => Arc::from(&**t),
-                _ => Arc::from(""),
-            };
+            let text: Arc<str> = get_str(meta, key::TEXT).unwrap_or_default().into();
             let spans = read_spans(meta, &text);
             ObjectKind::Sticky(Sticky { text, spans })
         }
@@ -3109,10 +3121,7 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
             ObjectKind::Image(Image { asset, crop, book })
         }
         ValueOrContainer::Value(LoroValue::String(s)) => {
-            let text = match meta.get(key::TEXT) {
-                Some(ValueOrContainer::Value(LoroValue::String(t))) => Arc::from(&**t),
-                _ => Arc::from(""),
-            };
+            let text: Arc<str> = get_str(meta, key::TEXT).unwrap_or_default().into();
             let spans = read_spans(meta, &text);
             ObjectKind::Shape(Shape {
                 kind: ObjectKind::parse_shape(&s)?,
