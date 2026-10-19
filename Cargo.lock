@@ -3591,6 +3591,7 @@ dependencies = [
  "kurbo",
  "log",
  "pb-core",
+ "pb-platform",
  "pb-sync",
  "rusqlite",
  "tokio",

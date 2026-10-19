@@ -142,7 +142,10 @@ pub fn router(shared: Arc<Shared>) -> Router {
 fn cors(mut response: Response) -> Response {
     let headers = response.headers_mut();
     headers.insert("access-control-allow-origin", "*".parse().expect("valid"));
-    headers.insert("access-control-allow-methods", "POST".parse().expect("valid"));
+    headers.insert(
+        "access-control-allow-methods",
+        "POST".parse().expect("valid"),
+    );
     headers.insert(
         "access-control-allow-headers",
         "x-create-key".parse().expect("valid"),

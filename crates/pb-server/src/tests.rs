@@ -175,3 +175,41 @@ async fn wrong_links_and_keys_are_refused() {
     );
     assert_eq!(intruder.client.joined(), None);
 }
+
+/// The desktop app's network code (threads, tungstenite) against the real server.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_apps_socket_and_requests_work() {
+    use pb_platform::net::{Socket, SocketState, post};
+
+    let (addr, _) = start(None).await;
+    let (made, answer) = std::sync::mpsc::channel();
+    post(&format!("http://{addr}/boards"), None, move |result| {
+        let _ = made.send(result);
+    });
+    let body = tokio::task::spawn_blocking(move || answer.recv().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let (board, edit) = (field(&body, "board"), field(&body, "edit"));
+
+    let socket = Socket::connect(&format!("ws://{addr}/ws"), || {});
+    let mut doc = doc(1);
+    let mut client = Client::new(board, edit, "app");
+    socket.send(client.hello(&mut doc).encode());
+    let mut joined = false;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        while let Some(bytes) = socket.try_recv() {
+            let events =
+                client.receive(Message::decode(&bytes).unwrap(), &mut doc, &mut Vec::new());
+            joined |= events
+                .iter()
+                .any(|e| matches!(e, Event::Joined { can_edit: true, .. }));
+        }
+        if joined {
+            break;
+        }
+    }
+    assert!(joined);
+    assert_eq!(socket.state(), SocketState::Open);
+}
