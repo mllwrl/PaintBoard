@@ -149,6 +149,17 @@ fn click_selects_and_empty_click_clears() {
 }
 
 #[test]
+fn picking_the_pen_drops_the_selection() {
+    let (doc, ids) = doc_with(&[Rect::new(0.0, 0.0, 100.0, 100.0)]);
+    let mut tools = Tools::default();
+    click(&mut tools, &doc, at(50.0, 50.0));
+    tools.set_active(ToolKind::Shape(ShapeKind::Rectangle));
+    assert_eq!(tools.selection().ids(), [ids[0]]);
+    tools.set_active(ToolKind::Pen);
+    assert!(tools.selection().is_empty());
+}
+
+#[test]
 fn shift_click_toggles() {
     let (doc, ids) = doc_with(&[
         Rect::new(0.0, 0.0, 100.0, 100.0),

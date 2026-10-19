@@ -340,6 +340,10 @@ impl Tools {
             self.last_shape = shape;
         }
         self.active = tool;
+        // Pen, marker and eraser cannot touch the selection, so it would only glow there.
+        if tool.draws_ink() || tool == ToolKind::Eraser {
+            self.clear_selection();
+        }
         self.gesture = None;
         self.hover = None;
         self.hover_grip = None;
