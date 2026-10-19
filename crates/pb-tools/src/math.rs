@@ -2,9 +2,13 @@
 //! Notes.
 //!
 //! Input comes from handwriting recognition, so the usual handwritten forms are accepted:
-//! `×`, `x` and `·` multiply, `÷` and `:` divide, `,` is a decimal comma, and letters that
-//! look like digits (`O`, `l`, `I`, `|`) count as `0` and `1`. Whatever follows `=` is
-//! ignored, so an already answered line can be recalculated.
+//! `×`, `x` and `·` multiply, `÷` and `:` divide, `,` is a decimal comma, `√` takes a
+//! square root, `²` and `³` raise to a power and `π` is pi. Letters that recognizers
+//! (Latin or Cyrillic) give for digits count as those digits: `O` and `О` as `0`, `l` and
+//! `I` as `1`, `З` as `3`, `б` as `6` and so on; Cyrillic `х` multiplies like `x`. Spaces
+//! inside a number are ignored (`1 000`). Whatever follows `=` is ignored, so an already
+//! answered line can be recalculated, and so is a trailing operator, which is often a
+//! misread `=`.
 //!
 //! TODO: an automatic mode that solves a line as soon as `=` is written; variables
 //! (`a = 5`), functions and units.
@@ -36,10 +40,18 @@ impl fmt::Display for MathError {
 
 impl std::error::Error for MathError {}
 
-/// The value of an arithmetic expression: `+ - * / ^`, parentheses, unary minus, `%` and
-/// implicit multiplication (`2(3+4)`).
+/// The value of an arithmetic expression: `+ - * / ^`, parentheses, unary minus, `%`,
+/// `√` and implicit multiplication (`2(3+4)`).
 pub fn evaluate(input: &str) -> Result<f64, MathError> {
-    let tokens = tokenize(input)?;
+    let mut tokens = tokenize(input)?;
+    // "12 + 7 -": the "-" is most likely an "=" read wrong.
+    while matches!(
+        tokens.last(),
+        Some(Token::Plus | Token::Minus | Token::Times | Token::Divide | Token::Power)
+    ) && tokens.len() > 1
+    {
+        tokens.pop();
+    }
     if tokens.is_empty() {
         return Err(MathError::Empty);
     }
@@ -57,9 +69,72 @@ pub fn evaluate(input: &str) -> Result<f64, MathError> {
     }
 }
 
-/// Whether the written line already ends with `=`, so the answer goes right after it.
+/// Whether the written line already ends with `=` (or what is likely one read wrong), so
+/// the answer goes right after it.
 pub fn ends_with_equals(input: &str) -> bool {
-    input.trim_end().ends_with('=')
+    let line = input.trim_end();
+    line.ends_with('=') || line.ends_with(['-', '−', '–', '—', '_'])
+}
+
+/// The reading of handwriting to calculate. Recognizers give each written word with
+/// alternatives, best first, and the best one is not always the arithmetic one: for
+/// `1+1=` Windows' first guess is `/+1=`, its second `1+1=`. So the readings are tried
+/// from the best guess on, by how far down the lists they go in all, and the first that
+/// can be calculated wins; if none can, the best guess.
+pub fn best_reading(words: &[Vec<String>]) -> String {
+    /// Readings tried at most.
+    const TRIES: usize = 2000;
+    let words: Vec<&Vec<String>> = words.iter().filter(|w| !w.is_empty()).collect();
+    let read = |ranks: &[usize]| -> String {
+        words
+            .iter()
+            .zip(ranks)
+            .map(|(w, &r)| w[r].as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let deepest: usize = words.iter().map(|w| w.len() - 1).sum();
+    let mut tries = 0;
+    for depth in 0..=deepest {
+        let mut found = None;
+        for_ranks(&words, depth, &mut Vec::new(), &mut |ranks| {
+            tries += 1;
+            let reading = read(ranks);
+            if evaluate(&reading).is_ok() {
+                found = Some(reading);
+            }
+            found.is_none() && tries < TRIES
+        });
+        if let Some(reading) = found {
+            return reading;
+        }
+        if tries >= TRIES {
+            break;
+        }
+    }
+    read(&vec![0; words.len()])
+}
+
+/// Calls `visit` with each way to pick an alternative of each word whose ranks add up to
+/// `depth`, while it returns true.
+fn for_ranks(
+    words: &[&Vec<String>],
+    depth: usize,
+    ranks: &mut Vec<usize>,
+    visit: &mut impl FnMut(&[usize]) -> bool,
+) -> bool {
+    let Some((word, rest)) = words.split_first() else {
+        return depth > 0 || visit(ranks);
+    };
+    for rank in 0..word.len().min(depth + 1) {
+        ranks.push(rank);
+        let go_on = for_ranks(rest, depth - rank, ranks, visit);
+        ranks.pop();
+        if !go_on {
+            return false;
+        }
+    }
+    true
 }
 
 /// A result for display: up to 10 significant digits, without trailing zeros, so that
@@ -91,6 +166,7 @@ enum Token {
     Percent,
     Open,
     Close,
+    Root,
 }
 
 impl Token {
@@ -105,6 +181,7 @@ impl Token {
             Self::Percent => '%',
             Self::Open => '(',
             Self::Close => ')',
+            Self::Root => '√',
         }
     }
 }
@@ -124,8 +201,17 @@ fn tokenize(input: &str) -> Result<Vec<Token>, MathError> {
     for c in line.chars() {
         let digit = match c {
             '0'..='9' => Some(c),
-            'O' | 'o' => Some('0'),
-            'l' | 'I' | '|' => Some('1'),
+            // Latin and Cyrillic letters recognizers give for digits.
+            'O' | 'o' | 'О' | 'о' | 'D' => Some('0'),
+            'l' | 'I' | '|' | 'i' | '!' => Some('1'),
+            'Z' | 'z' => Some('2'),
+            'З' | 'з' | 'Э' => Some('3'),
+            'Ч' | 'ч' => Some('4'),
+            'S' | 's' => Some('5'),
+            'б' | 'b' | 'G' => Some('6'),
+            'T' | 'Т' => Some('7'),
+            'B' | 'В' => Some('8'),
+            'g' | 'q' | 'Я' => Some('9'),
             '.' | ',' => Some('.'),
             _ => None,
         };
@@ -133,16 +219,26 @@ fn tokenize(input: &str) -> Result<Vec<Token>, MathError> {
             number.push(d);
             continue;
         }
+        // A space inside a number ("1 000") is skipped.
+        if c.is_whitespace() && !number.is_empty() {
+            continue;
+        }
         flush(&mut number, &mut tokens)?;
         let token = match c {
             '+' => Token::Plus,
-            '-' | '−' | '–' => Token::Minus,
-            '*' | '×' | 'x' | 'X' | '·' => Token::Times,
+            '-' | '−' | '–' | '—' | '_' => Token::Minus,
+            '*' | '×' | 'x' | 'X' | '·' | '∙' | '•' | '⋅' | 'х' | 'Х' => Token::Times,
             '/' | '÷' | ':' => Token::Divide,
             '^' => Token::Power,
             '%' => Token::Percent,
-            '(' | '[' => Token::Open,
-            ')' | ']' => Token::Close,
+            '(' | '[' | '{' => Token::Open,
+            ')' | ']' | '}' => Token::Close,
+            '√' | 'V' | 'v' => Token::Root,
+            'π' | 'п' | 'П' => Token::Number(std::f64::consts::PI),
+            '²' | '³' => {
+                tokens.push(Token::Power);
+                Token::Number(if c == '²' { 2.0 } else { 3.0 })
+            }
             c if c.is_whitespace() => continue,
             c => return Err(MathError::Unexpected(c)),
         };
@@ -160,6 +256,11 @@ struct Parser {
 impl Parser {
     fn peek(&self) -> Option<Token> {
         self.tokens.get(self.pos).copied()
+    }
+
+    /// The next token is pi, written right after something (2π).
+    fn after_constant(&self) -> bool {
+        matches!(self.peek(), Some(Token::Number(v)) if v == std::f64::consts::PI)
     }
 
     fn next(&mut self) -> Option<Token> {
@@ -200,8 +301,9 @@ impl Parser {
                     }
                     value /= rhs;
                 }
-                // 2(3 + 4) and (1 + 2)(3 + 4).
-                Some(Token::Open) => value *= self.power()?,
+                // 2(3 + 4), (1 + 2)(3 + 4), 2√9 and 2π.
+                Some(Token::Open | Token::Root) => value *= self.power()?,
+                Some(Token::Number(_)) if self.after_constant() => value *= self.power()?,
                 _ => return Ok(value),
             }
         }
@@ -217,12 +319,16 @@ impl Parser {
         Ok(base)
     }
 
-    /// unary = ("-" | "+") unary | atom "%"*
+    /// unary = ("-" | "+" | "√") unary | atom "%"*
     fn unary(&mut self) -> Result<f64, MathError> {
         match self.peek() {
             Some(Token::Minus) => {
                 self.pos += 1;
                 Ok(-self.unary()?)
+            }
+            Some(Token::Root) => {
+                self.pos += 1;
+                Ok(self.unary()?.sqrt())
             }
             Some(Token::Plus) => {
                 self.pos += 1;
@@ -289,6 +395,41 @@ mod tests {
     }
 
     #[test]
+    fn what_recognizers_give_for_digits_and_signs() {
+        // Cyrillic look-alikes from a Russian recognizer.
+        assert_eq!(eval("З х 4"), 12.0);
+        assert_eq!(eval("1О + б"), 16.0);
+        assert_eq!(eval("2 • 3"), 6.0);
+        assert_eq!(eval("1 000 + 1"), 1001.0);
+        // "=" read as a minus or underscore.
+        assert_eq!(eval("12 + 7 -"), 19.0);
+        assert!(ends_with_equals("12 + 7 -"));
+        assert!(ends_with_equals("12 + 7 _"));
+        assert_eq!(eval("√9 + 3²"), 12.0);
+        assert_eq!(eval("2√16"), 8.0);
+        assert!((eval("2π") - std::f64::consts::TAU).abs() < 1e-12);
+        assert_eq!(eval("{2+3}*2"), 10.0);
+    }
+
+    #[test]
+    fn the_arithmetic_reading_is_picked() {
+        let words = |w: &[&[&str]]| -> Vec<Vec<String>> {
+            w.iter()
+                .map(|a| a.iter().map(|s| s.to_string()).collect())
+                .collect()
+        };
+        // The best guess for the second word is a word; an alternative is "+".
+        let reading = best_reading(&words(&[&["12"], &["Плюс", "+", "t"], &["7="]]));
+        assert_eq!(reading, "12 + 7=");
+        assert_eq!(eval(&reading), 19.0);
+        // What Windows gave for a handwritten 1+1=.
+        let reading = best_reading(&words(&[&["/+1=", "1+1=", "/+/=", "1+/=", "1+1-"]]));
+        assert_eq!(reading, "1+1=");
+        assert_eq!(best_reading(&words(&[&["hello", "world"]])), "hello");
+        assert_eq!(best_reading(&[]), "");
+    }
+
+    #[test]
     fn errors() {
         assert_eq!(evaluate(""), Err(MathError::Empty));
         assert_eq!(evaluate("="), Err(MathError::Empty));
@@ -296,7 +437,7 @@ mod tests {
         assert_eq!(evaluate("(1 + 2"), Err(MathError::UnbalancedParentheses));
         assert_eq!(evaluate("1 + 2)"), Err(MathError::UnbalancedParentheses));
         assert_eq!(evaluate("hello"), Err(MathError::Unexpected('h')));
-        assert_eq!(evaluate("1 +"), Err(MathError::Empty));
+        assert_eq!(evaluate("+"), Err(MathError::Empty));
         assert_eq!(evaluate("(-1)^0.5"), Err(MathError::NotANumber));
     }
 

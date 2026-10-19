@@ -56,7 +56,7 @@ pub enum UserEvent {
     /// Handwriting recognition finished on its background thread.
     Recognized {
         request: u64,
-        result: Result<String, String>,
+        result: Result<handwriting::Reading, String>,
     },
     /// A web page card's page was fetched and read on a background thread.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -4086,10 +4086,14 @@ impl App {
         });
     }
 
-    fn finish_recognition(&mut self, request: u64, result: Result<String, String>) {
+    fn finish_recognition(&mut self, request: u64, result: Result<handwriting::Reading, String>) {
         let Some(pending) = self.recognition.take_if(|p| p.request == request) else {
             return;
         };
+        let result = result.map(|reading| match pending.purpose {
+            Recognition::ToText => handwriting::best_guess(&reading),
+            Recognition::Calculate => math::best_reading(&reading),
+        });
         let text = match result {
             Ok(text) if !text.trim().is_empty() => text.trim().to_owned(),
             Ok(_) => {
