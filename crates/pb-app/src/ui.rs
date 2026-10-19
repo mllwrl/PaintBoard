@@ -127,6 +127,12 @@ pub enum Action {
     MarkColor(Option<Rgba>),
     /// Shows or hides the minimap.
     ToggleMinimap,
+    /// Hides or shows one of the panels around the board.
+    TogglePanel(Panel),
+    /// Hides all panels but a button to bring them back, or shows them again (Ctrl+\).
+    ToggleClean,
+    /// The window takes the whole screen or goes back (F11).
+    ToggleFullscreen,
     /// Puts the selected connector back on its automatic path.
     ResetBends,
     /// Adds a row (`rows`) or column to the selected table: after the selected cells
@@ -281,7 +287,96 @@ pub enum Action {
 }
 
 /// What the UI shows.
+/// The panels around the board that can be put away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Panel {
+    /// The board menu at the top.
+    Menu,
+    /// The tools on the left.
+    Tools,
+    /// The view controls (and the minimap) at the bottom.
+    View,
+}
+
+/// Which panels show. Clean, the board shows alone with one button to bring them back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Panels {
+    pub menu: bool,
+    pub tools: bool,
+    pub view: bool,
+    pub clean: bool,
+}
+
+impl Default for Panels {
+    fn default() -> Self {
+        Self {
+            menu: true,
+            tools: true,
+            view: true,
+            clean: false,
+        }
+    }
+}
+
+impl Panels {
+    pub fn shows(&self, panel: Panel) -> bool {
+        !self.clean
+            && match panel {
+                Panel::Menu => self.menu,
+                Panel::Tools => self.tools,
+                Panel::View => self.view,
+            }
+    }
+
+    /// Hides or shows `panel`; out of clean mode, that panel alone comes back.
+    pub fn toggle(&mut self, panel: Panel) {
+        if self.clean {
+            *self = Self {
+                menu: false,
+                tools: false,
+                view: false,
+                clean: false,
+            };
+        }
+        let shown = match panel {
+            Panel::Menu => &mut self.menu,
+            Panel::Tools => &mut self.tools,
+            Panel::View => &mut self.view,
+        };
+        *shown = !*shown;
+    }
+
+    /// As words for the settings file: the hidden panels and `clean`.
+    pub fn to_words(self) -> String {
+        [
+            (!self.menu, "no-menu"),
+            (!self.tools, "no-tools"),
+            (!self.view, "no-view"),
+            (self.clean, "clean"),
+        ]
+        .iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, word)| *word)
+        .collect::<Vec<_>>()
+        .join(" ")
+    }
+
+    pub fn from_words(text: &str) -> Self {
+        let has = |word| text.split_whitespace().any(|w| w == word);
+        Self {
+            menu: !has("no-menu"),
+            tools: !has("no-tools"),
+            view: !has("no-view"),
+            clean: has("clean"),
+        }
+    }
+}
+
 pub struct Model<'a> {
+    /// Which panels show.
+    pub panels: Panels,
+    /// The window fills the screen.
+    pub fullscreen: bool,
     pub board: &'a str,
     /// Running in the browser.
     pub web: bool,
@@ -908,21 +1003,27 @@ impl Ui {
                 version_bar(ctx, version, model.read_only, &mut actions);
                 return;
             }
+            let panels = model.panels;
             if model.focus {
                 focus_bar(ctx, &mut actions);
-            } else {
+            } else if panels.shows(Panel::Menu) {
                 board_menu(ctx, model, version_name, &mut actions);
             }
-            if model.read_only {
-                read_only_toolbar(ctx, model, &mut actions);
-            } else {
-                toolbar(ctx, model, &mut actions);
+            if panels.shows(Panel::Tools) {
+                if model.read_only {
+                    read_only_toolbar(ctx, model, &mut actions);
+                } else {
+                    toolbar(ctx, model, &mut actions);
+                }
             }
-            let view = view_controls(ctx, model, &mut actions);
-            if let Some(map) = model.minimap.as_ref().filter(|_| !model.focus) {
-                minimap(ctx, map, view, &mut actions);
+            if panels.shows(Panel::View) {
+                let view = view_controls(ctx, model, &mut actions);
+                if let Some(map) = model.minimap.as_ref().filter(|_| !model.focus) {
+                    minimap(ctx, map, view, &mut actions);
+                }
             }
-            match &model.layers {
+            panel_handles(ctx, panels, model.focus, &mut actions);
+            match model.layers.as_ref().filter(|_| !panels.clean) {
                 Some(layers) => layers_panel(ctx, layers, layer_name, &mut actions),
                 None => *layer_name = None,
             }
@@ -1269,6 +1370,7 @@ fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: 
                     {
                         actions.push(Action::ToggleShare);
                     }
+                    hide_button(ui, "«", "Hide the menu", Panel::Menu, actions);
                 });
             });
         });
@@ -1710,6 +1812,10 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                             if redo.inner.clicked() {
                                 actions.push(Action::Redo);
                             }
+                            ui.separator();
+                            ui.vertical_centered(|ui| {
+                                hide_button(ui, "«", "Hide the tools", Panel::Tools, actions);
+                            });
                             (shapes.rect, ink_button, structures.rect)
                         })
                         .inner
@@ -2048,6 +2154,37 @@ fn view_controls(ctx: &Context, model: &Model, actions: &mut Vec<Action>) -> Rec
                         {
                             actions.push(Action::ToggleHighContrast);
                         }
+                        ui.separator();
+                        let fullscreen = Button::selectable(model.fullscreen, tr("Full screen"))
+                            .shortcut_text("F11");
+                        if ui.add(fullscreen).clicked() {
+                            actions.push(Action::ToggleFullscreen);
+                            ui.close();
+                        }
+                        let clean = Button::new(tr("Clean board")).shortcut_text("Ctrl+\\");
+                        if ui
+                            .add(clean)
+                            .on_hover_text(tr(
+                                "Hide all panels; a button in the corner brings them back",
+                            ))
+                            .clicked()
+                        {
+                            actions.push(Action::ToggleClean);
+                            ui.close();
+                        }
+                        ui.separator();
+                        ui.label(tr("Panels"));
+                        let panels = [
+                            (Panel::Menu, "Menu", model.panels.menu),
+                            (Panel::Tools, "Tools", model.panels.tools),
+                            (Panel::View, "These controls", model.panels.view),
+                        ];
+                        for (panel, label, shown) in panels {
+                            if ui.add(Button::selectable(shown, tr(label))).clicked() {
+                                actions.push(Action::TogglePanel(panel));
+                                ui.close();
+                            }
+                        }
                     });
                     let lang = crate::i18n::lang().code().to_uppercase();
                     if ui
@@ -2110,11 +2247,86 @@ fn view_controls(ctx: &Context, model: &Model, actions: &mut Vec<Action>) -> Rec
                     {
                         actions.push(Action::ZoomIn);
                     }
+                    hide_button(ui, "»", "Hide these controls", Panel::View, actions);
                 });
             });
         })
         .response
         .rect
+}
+
+/// A small button that puts a panel away.
+fn hide_button(
+    ui: &mut egui::Ui,
+    arrow: &str,
+    tooltip: &'static str,
+    panel: Panel,
+    actions: &mut Vec<Action>,
+) {
+    let button = Button::new(RichText::new(arrow).weak()).frame(false);
+    if ui.add(button).on_hover_text(tr(tooltip)).clicked() {
+        actions.push(Action::TogglePanel(panel));
+    }
+}
+
+/// Where panels are put away, small buttons that bring them back; in clean mode, one
+/// button in the corner brings all of them.
+fn panel_handles(ctx: &Context, panels: Panels, focus: bool, actions: &mut Vec<Action>) {
+    let screen = ctx.content_rect();
+    let corner = screen.max - Vec2::splat(MARGIN);
+    let left = Pos2::new(MARGIN, screen.center().y);
+    let top = Pos2::new(MARGIN, MARGIN);
+    let shows_menu = panels.menu || focus;
+    let handles = [
+        (
+            panels.clean,
+            corner,
+            Align2::RIGHT_BOTTOM,
+            "«",
+            format!("{} (Ctrl+\\)", tr("Show the panels")),
+            Action::ToggleClean,
+        ),
+        (
+            !panels.clean && !shows_menu,
+            top,
+            Align2::LEFT_TOP,
+            "»",
+            tr("Show the menu").to_owned(),
+            Action::TogglePanel(Panel::Menu),
+        ),
+        (
+            !panels.clean && !panels.tools,
+            left,
+            Align2::LEFT_CENTER,
+            "»",
+            tr("Show the tools").to_owned(),
+            Action::TogglePanel(Panel::Tools),
+        ),
+        (
+            !panels.clean && !panels.view,
+            corner,
+            Align2::RIGHT_BOTTOM,
+            "«",
+            tr("Show the view controls").to_owned(),
+            Action::TogglePanel(Panel::View),
+        ),
+    ];
+    for (i, (shown, pos, pivot, arrow, tooltip, action)) in handles.into_iter().enumerate() {
+        if !shown {
+            continue;
+        }
+        Area::new(Id::unique(("panel handle", i)))
+            .fixed_pos(pos)
+            .pivot(pivot)
+            .order(Order::Foreground)
+            .show(ctx, |ui| {
+                panel().show(ui, |ui| {
+                    if ui.button(arrow).on_hover_text(tooltip).clicked() {
+                        actions.push(action);
+                    }
+                });
+            });
+    }
 }
 
 /// The board in small above the view controls (at `below`); a press or drag on it moves
@@ -3854,6 +4066,8 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("F1, ?", "This list"),
             ("Shift+F", "Focus on the selection or the view"),
             ("F5", "Present the frames"),
+            ("F11", "Full screen"),
+            ("Ctrl+\\", "Clean board: hide the panels"),
             ("L (presenting)", "Laser pointer"),
         ],
     ),
@@ -4588,6 +4802,22 @@ fn to_color32(color: Rgba) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panels_come_back_one_by_one_or_all_at_once() {
+        let mut panels = Panels::default();
+        panels.toggle(Panel::Tools);
+        assert!(!panels.shows(Panel::Tools) && panels.shows(Panel::Menu));
+        assert_eq!(Panels::from_words(&panels.to_words()), panels);
+        // Clean, nothing shows; one panel brought back comes alone.
+        panels.clean = true;
+        assert!(!panels.shows(Panel::Menu));
+        assert_eq!(Panels::from_words(&panels.to_words()), panels);
+        panels.toggle(Panel::View);
+        assert!(!panels.clean);
+        assert!(panels.shows(Panel::View) && !panels.shows(Panel::Menu));
+        assert_eq!(Panels::from_words(""), Panels::default());
+    }
 
     /// Texts kept in tables are translated where they are shown; all have a translation.
     #[test]

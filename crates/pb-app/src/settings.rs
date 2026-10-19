@@ -1,6 +1,7 @@
 //! The app's own preferences, kept in its data folder between runs.
 
 use crate::i18n::Lang;
+use crate::ui::Panels;
 
 /// File with the chosen theme: `dark` or `light`.
 const THEME_FILE: &str = "theme.txt";
@@ -49,6 +50,27 @@ pub fn save_view(scale: f32, high_contrast: bool) {
         .and_then(|dir| pb_platform::fs::write_atomic(&dir.join(VIEW_FILE), text.as_bytes()));
     if let Err(err) = saved {
         log::warn!("view settings not saved: {err}");
+    }
+}
+
+/// File with the panels put away (see [`Panels::to_words`]).
+const PANELS_FILE: &str = "panels.txt";
+
+/// The panels as left last time; all shown if never changed.
+pub fn panels() -> Panels {
+    pb_platform::fs::app_data_dir()
+        .and_then(|dir| pb_platform::fs::read(&dir.join(PANELS_FILE)))
+        .map(|bytes| Panels::from_words(&String::from_utf8_lossy(&bytes)))
+        .unwrap_or_default()
+}
+
+/// Remembers which panels are put away.
+pub fn save_panels(panels: Panels) {
+    let saved = pb_platform::fs::app_data_dir().and_then(|dir| {
+        pb_platform::fs::write_atomic(&dir.join(PANELS_FILE), panels.to_words().as_bytes())
+    });
+    if let Err(err) = saved {
+        log::warn!("panels not saved: {err}");
     }
 }
 

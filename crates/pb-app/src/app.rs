@@ -33,7 +33,7 @@ use crate::pictures::{self, Picture};
 use crate::session::Session;
 use crate::talktrack::{Playback, Recording};
 use crate::ui::{
-    Action, CommentView, ContextMenuInfo, ExportInfo, LayersView, LinkInfo, Minimap, Model,
+    Action, CommentView, ContextMenuInfo, ExportInfo, LayersView, LinkInfo, Minimap, Model, Panels,
     PlaybackView, STICKY_COLORS, SearchInfo, SelectionInfo, ShapeText, TableInfo, TextFormat,
     ThreadView, Ui, VersionBanner, VersionItem, VotingView,
 };
@@ -182,6 +182,8 @@ pub struct App {
     sticky_color: Rgba,
     /// Whether the minimap is shown.
     show_minimap: bool,
+    /// Which panels around the board show.
+    panels: Panels,
     /// Objects it does not let through are faded. Not saved with the board.
     filter: pb_core::Filter,
     /// Who reactions and comments are by.
@@ -311,6 +313,7 @@ impl App {
             ink_cursor: None,
             sticky_color: STICKY_COLORS[0],
             show_minimap: true,
+            panels: crate::settings::panels(),
             filter: pb_core::Filter::default(),
             me: crate::settings::name()
                 .unwrap_or_else(pb_platform::user_name)
@@ -592,6 +595,11 @@ impl App {
         let (share_window, share_badge) = self.share_model();
         let (cursors, their_selections) = self.others_on_screen();
         let model = Model {
+            panels: self.panels,
+            fullscreen: self
+                .window
+                .as_ref()
+                .is_some_and(|w| w.fullscreen().is_some()),
             follow_banner: self.follow_banner(),
             share_window,
             share_badge,
@@ -1286,6 +1294,15 @@ impl App {
             Action::NextGrid => self.grid = self.grid.next(),
             Action::ToggleSnap => self.tools.set_snap_to_grid(!self.tools.snap_to_grid()),
             Action::ToggleMinimap => self.show_minimap = !self.show_minimap,
+            Action::TogglePanel(panel) => {
+                self.panels.toggle(panel);
+                crate::settings::save_panels(self.panels);
+            }
+            Action::ToggleClean => {
+                self.panels.clean = !self.panels.clean;
+                crate::settings::save_panels(self.panels);
+            }
+            Action::ToggleFullscreen => self.toggle_fullscreen(),
             Action::AddTableLine { rows, after } => {
                 if let Some(command) = self.tools.add_table_line(&self.document, rows, after) {
                     self.apply(command);
@@ -4940,6 +4957,14 @@ impl App {
         self.request_redraw();
     }
 
+    /// The window fills the screen, or goes back to how it was.
+    fn toggle_fullscreen(&mut self) {
+        if let Some(window) = &self.window {
+            let full = window.fullscreen().is_some();
+            window.set_fullscreen((!full).then_some(winit::window::Fullscreen::Borderless(None)));
+        }
+    }
+
     fn handle_key(&mut self, event: &KeyEvent) -> bool {
         let PhysicalKey::Code(code) = event.physical_key else {
             return false;
@@ -5000,6 +5025,7 @@ impl App {
             KeyCode::KeyF if ctrl => self.open_search(),
             KeyCode::F1 => self.show_shortcuts = !self.show_shortcuts,
             KeyCode::F5 => self.start_presentation(),
+            KeyCode::Backslash if ctrl => self.perform(Action::ToggleClean),
             KeyCode::Slash if modifiers.shift_key() && !ctrl => {
                 self.show_shortcuts = !self.show_shortcuts;
             }
@@ -5420,7 +5446,14 @@ impl App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let typing = self.ui.as_ref().is_some_and(Ui::wants_keyboard);
-                if typing {
+                if event.state == ElementState::Pressed
+                    && event.physical_key == PhysicalKey::Code(KeyCode::F11)
+                {
+                    if !event.repeat {
+                        self.toggle_fullscreen();
+                    }
+                    true
+                } else if typing {
                     // The browser gives text fields no clipboard: read it for them.
                     let paste = cfg!(target_arch = "wasm32")
                         && event.state == ElementState::Pressed
