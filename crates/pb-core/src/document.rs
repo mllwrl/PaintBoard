@@ -17,6 +17,9 @@ use loro::{
 use pb_geom::ShapeKind;
 use pb_geom::normalize_angle;
 
+#[path = "document_sync.rs"]
+mod sync;
+
 use crate::connector::{self, Anchor, Cap, ConnectorPath, EndPoint, Label, Route};
 use crate::rich::{self, Span, Spans};
 
@@ -256,6 +259,8 @@ pub struct Document {
     talktracks: Vec<crate::Talktrack>,
     /// Saved versions, oldest first; rebuilt with `objects`.
     versions: Vec<crate::Version>,
+    /// Local changes waiting to be sent while the board is shared.
+    outbox: Option<sync::Outbox>,
 }
 
 /// An object in the spatial index: its world bounds (outline included) and its place in
@@ -443,6 +448,7 @@ impl Document {
             active_layer: Layer::BASE.into(),
             talktracks: Vec::new(),
             versions: Vec::new(),
+            outbox: None,
         };
         document.refresh();
         document

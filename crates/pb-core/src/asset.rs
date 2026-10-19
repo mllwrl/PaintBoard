@@ -73,6 +73,10 @@ impl Assets {
         self.map.contains_key(&id)
     }
 
+    pub fn ids(&self) -> impl Iterator<Item = AssetId> + '_ {
+        self.map.keys().copied()
+    }
+
     pub fn len(&self) -> usize {
         self.map.len()
     }
