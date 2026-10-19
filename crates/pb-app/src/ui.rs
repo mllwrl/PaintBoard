@@ -40,6 +40,10 @@ pub enum Action {
     Redo,
     NewBoard,
     Open,
+    /// Opens this board (one kept in the browser).
+    OpenFile(std::path::PathBuf),
+    /// Lets the browser download the board as a file (web only).
+    DownloadBoard,
     Save,
     SaveAs,
     ZoomIn,
@@ -259,6 +263,10 @@ pub enum Action {
 /// What the UI shows.
 pub struct Model<'a> {
     pub board: &'a str,
+    /// Running in the browser.
+    pub web: bool,
+    /// Boards kept in the browser (web only).
+    pub stored_boards: Vec<std::path::PathBuf>,
     /// The board's frames with their titles, back to front.
     pub frames: Vec<(ObjectId, String)>,
     pub tool: ToolKind,
@@ -1006,6 +1014,34 @@ fn panel() -> Frame {
         })
 }
 
+/// The browser keeps boards inside itself: they are opened from this list, and
+/// downloaded to have them as files.
+fn stored_boards_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
+    ui.separator();
+    if ui
+        .button(tr("Download board"))
+        .on_hover_text(tr("Save the board as a .pboard file on this computer"))
+        .clicked()
+    {
+        actions.push(Action::DownloadBoard);
+        ui.close();
+    }
+    if model.stored_boards.is_empty() {
+        return;
+    }
+    ui.menu_button(tr("Boards in this browser"), |ui| {
+        for path in &model.stored_boards {
+            let name = path
+                .file_stem()
+                .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+            if ui.button(name).clicked() {
+                actions.push(Action::OpenFile(path.clone()));
+                ui.close();
+            }
+        }
+    });
+}
+
 fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: &mut Vec<Action>) {
     Area::new(Id::unique("board"))
         .fixed_pos(Pos2::new(MARGIN, MARGIN))
@@ -1041,6 +1077,9 @@ fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: 
                                 actions.push(action);
                                 ui.close();
                             }
+                        }
+                        if model.web {
+                            stored_boards_menu(ui, model, actions);
                         }
                         ui.separator();
                         if ui
@@ -3410,7 +3449,10 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+Shift+S", "Save as"),
             ("Ctrl+Shift+E", "Export a picture or PDF"),
             ("Ctrl+P", "Print (opens a PDF)"),
-            ("PageDown / PageUp", "Next / previous page of a selected PDF book"),
+            (
+                "PageDown / PageUp",
+                "Next / previous page of a selected PDF book",
+            ),
             ("Wheel, Shift+wheel", "Scroll up and down, sideways"),
             ("Space+drag, middle drag", "Pan"),
             ("Ctrl+wheel, Ctrl+= / -", "Zoom"),

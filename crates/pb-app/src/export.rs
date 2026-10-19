@@ -210,65 +210,191 @@ fn objects<'a>(doc: &'a Document, target: &Target) -> Vec<&'a pb_core::Object> {
 }
 
 /// The file `settings` ask for, of `targets` (one picture, or a PDF page each); `title`
-/// heads a Markdown outline.
+/// heads a Markdown outline. Waits for the GPU, so not for the web: see [`Job`].
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub fn file(
     doc: &Document,
-    targets: &[Target],
+    targets: Vec<Target>,
     settings: &Settings,
     title: &str,
     mut painters: Painters<'_>,
 ) -> Result<Vec<u8>, String> {
-    if settings.format.is_text() {
-        let target = targets.first().ok_or("there is nothing to export")?;
-        let objects = objects(doc, target);
-        if settings.format == Format::Markdown {
-            return Ok(pb_io::outline::markdown(title, &objects).into_bytes());
+    let mut job = Job::start(doc, targets, settings, title, &mut painters);
+    loop {
+        if let Some(done) = job.step(doc, &mut painters, true) {
+            return done;
         }
-        let mut tables: Vec<_> = objects
-            .iter()
-            .filter_map(|o| match &o.data.kind {
-                ObjectKind::Table(table) => Some((o.data.frame().aabb(), table)),
-                _ => None,
-            })
-            .collect();
-        tables.sort_by(|(a, _), (b, _)| a.y0.total_cmp(&b.y0).then(a.x0.total_cmp(&b.x0)));
-        let (_, table) = tables.first().ok_or("there is no table to export")?;
-        return Ok(pb_io::outline::table_csv(table).into_bytes());
     }
-    if settings.format != Format::Pdf {
-        let target = targets.first().ok_or("there is nothing to export")?;
-        let (pixels, _) = render(doc, target, settings, &mut painters)?;
-        return encode(&pixels, settings.format);
-    }
-    let mut pictures = Vec::new();
-    for target in targets {
-        let (pixels, scale) = render(doc, target, settings, &mut painters)?;
-        let jpeg = encode(&pixels, Format::Jpeg)?;
-        pictures.push((jpeg, pixels.width, pixels.height, scale));
-    }
-    let pages: Vec<_> = pictures
-        .iter()
-        .map(|(jpeg, w, h, scale)| {
-            // 96 board units at 100% to the inch, 72 points.
-            let points = |px: u32| f64::from(px) / scale * 0.75;
-            pb_io::pdf::PicturePage {
-                jpeg,
-                pixels: (*w, *h),
-                size: (points(*w), points(*h)),
-            }
-        })
-        .collect();
-    Ok(pb_io::pdf::write_pictures(&pages))
 }
 
-/// Draws `target` as `settings` ask, tile by tile; also returns the pixels per world unit
-/// it was drawn at.
-fn render(
+/// A file being made. Pictures are drawn on the GPU a target at a time and read back
+/// when it has drawn them, which in the browser is only on a later frame: call
+/// [`Job::step`] until it is done. Text formats are done right away.
+pub struct Job {
+    targets: Vec<Target>,
+    settings: Settings,
+    /// The next target to draw.
+    next: usize,
+    drawing: Option<Drawing>,
+    /// PDF pages so far: JPEG bytes, size in pixels and pixels per world unit.
+    pages: Vec<(Vec<u8>, u32, u32, f64)>,
+    done: Option<Result<Vec<u8>, String>>,
+}
+
+/// A target being drawn: its size and tiles on their way back from the GPU.
+struct Drawing {
+    width: u32,
+    height: u32,
+    scale: f64,
+    /// Each tile's left and top edges and width, in pixels.
+    tiles: Vec<(u32, u32, u32, pb_render::PendingImage)>,
+}
+
+impl Job {
+    pub fn start(
+        doc: &Document,
+        targets: Vec<Target>,
+        settings: &Settings,
+        title: &str,
+        painters: &mut Painters<'_>,
+    ) -> Self {
+        let mut job = Self {
+            targets,
+            settings: *settings,
+            next: 0,
+            drawing: None,
+            pages: Vec::new(),
+            done: None,
+        };
+        if settings.format.is_text() {
+            job.done = Some(text_file(doc, &job.targets, settings.format, title));
+        } else if job.targets.is_empty() {
+            job.done = Some(Err("there is nothing to export".into()));
+        } else {
+            job.draw_next(doc, painters);
+        }
+        job
+    }
+
+    /// Takes in what the GPU has drawn and draws the next target; the file once it is
+    /// all done. `wait` waits for the GPU (not on the web).
+    pub fn step(
+        &mut self,
+        doc: &Document,
+        painters: &mut Painters<'_>,
+        wait: bool,
+    ) -> Option<Result<Vec<u8>, String>> {
+        if self.done.is_none() {
+            painters.gpu.poll(wait);
+            let drawn = self
+                .drawing
+                .as_ref()
+                .is_some_and(|d| d.tiles.iter().all(|(.., tile)| tile.is_ready()));
+            if drawn {
+                let drawing = self.drawing.take().expect("checked above");
+                if let Err(err) = self.finish_drawing(drawing) {
+                    self.done = Some(Err(err));
+                } else if self.done.is_none() {
+                    if self.next < self.targets.len() {
+                        self.draw_next(doc, painters);
+                    } else {
+                        self.done = Some(Ok(self.pdf()));
+                    }
+                }
+            }
+        }
+        self.done.take()
+    }
+
+    fn draw_next(&mut self, doc: &Document, painters: &mut Painters<'_>) {
+        let target = &self.targets[self.next];
+        self.next += 1;
+        match draw(doc, target, &self.settings, painters) {
+            Ok(drawing) => self.drawing = Some(drawing),
+            Err(err) => self.done = Some(Err(err)),
+        }
+    }
+
+    /// Puts the tiles together into the picture: the file, or the next PDF page.
+    fn finish_drawing(&mut self, drawing: Drawing) -> Result<(), String> {
+        let Drawing {
+            width,
+            height,
+            scale,
+            tiles,
+        } = drawing;
+        let mut rgba = vec![0u8; width as usize * height as usize * 4];
+        for (left, top, w, tile) in tiles {
+            let pixels = tile.take()?;
+            let row = w as usize * 4;
+            for (y, line) in pixels.chunks_exact(row).enumerate() {
+                let start = ((top as usize + y) * width as usize + left as usize) * 4;
+                rgba[start..start + row].copy_from_slice(line);
+            }
+        }
+        let pixels = Pixels {
+            width,
+            height,
+            rgba,
+        };
+        if self.settings.format == Format::Pdf {
+            let jpeg = encode(&pixels, Format::Jpeg)?;
+            self.pages.push((jpeg, width, height, scale));
+        } else {
+            self.done = Some(encode(&pixels, self.settings.format));
+        }
+        Ok(())
+    }
+
+    fn pdf(&self) -> Vec<u8> {
+        let pages: Vec<_> = self
+            .pages
+            .iter()
+            .map(|(jpeg, w, h, scale)| {
+                // 96 board units at 100% to the inch, 72 points.
+                let points = |px: u32| f64::from(px) / scale * 0.75;
+                pb_io::pdf::PicturePage {
+                    jpeg,
+                    pixels: (*w, *h),
+                    size: (points(*w), points(*h)),
+                }
+            })
+            .collect();
+        pb_io::pdf::write_pictures(&pages)
+    }
+}
+
+/// The Markdown outline or CSV table of the first target.
+fn text_file(
+    doc: &Document,
+    targets: &[Target],
+    format: Format,
+    title: &str,
+) -> Result<Vec<u8>, String> {
+    let target = targets.first().ok_or("there is nothing to export")?;
+    let objects = objects(doc, target);
+    if format == Format::Markdown {
+        return Ok(pb_io::outline::markdown(title, &objects).into_bytes());
+    }
+    let mut tables: Vec<_> = objects
+        .iter()
+        .filter_map(|o| match &o.data.kind {
+            ObjectKind::Table(table) => Some((o.data.frame().aabb(), table)),
+            _ => None,
+        })
+        .collect();
+    tables.sort_by(|(a, _), (b, _)| a.y0.total_cmp(&b.y0).then(a.x0.total_cmp(&b.x0)));
+    let (_, table) = tables.first().ok_or("there is no table to export")?;
+    Ok(pb_io::outline::table_csv(table).into_bytes())
+}
+
+/// Starts drawing `target` as `settings` ask, tile by tile.
+fn draw(
     doc: &Document,
     target: &Target,
     settings: &Settings,
     painters: &mut Painters<'_>,
-) -> Result<(Pixels, f64), String> {
+) -> Result<Drawing, String> {
     let margin = target.margin;
     let (scale, width, height) = fit(target.area, settings.scale, margin);
     let pad = if margin { MARGIN / scale } else { 0.0 };
@@ -283,7 +409,7 @@ fn render(
     let votes = HashMap::new();
     let overlay = Overlay::default();
     let mut scene = Scene::new();
-    let mut rgba = vec![0u8; width as usize * height as usize * 4];
+    let mut tiles = Vec::new();
     for top in (0..height).step_by(tile as usize) {
         for left in (0..width).step_by(tile as usize) {
             let (w, h) = (tile.min(width - left), tile.min(height - top));
@@ -314,20 +440,16 @@ fn render(
                 &mut *painters.text,
                 &mut *painters.images,
             );
-            let pixels = painters.gpu.render_image(&scene, w, h, background)?;
-            let row = w as usize * 4;
-            for (y, line) in pixels.chunks_exact(row).enumerate() {
-                let start = ((top as usize + y) * width as usize + left as usize) * 4;
-                rgba[start..start + row].copy_from_slice(line);
-            }
+            let pending = painters.gpu.start_image(&scene, w, h, background)?;
+            tiles.push((left, top, w, pending));
         }
     }
-    let pixels = Pixels {
+    Ok(Drawing {
         width,
         height,
-        rgba,
-    };
-    Ok((pixels, scale))
+        scale,
+        tiles,
+    })
 }
 
 /// A picture file's bytes in `format` (PNG or JPEG).

@@ -48,6 +48,7 @@ wasm-bindgen-futures.workspace = true
 # browser's file picker, downloads and dialogs.
 web-sys = { version = "0.3", features = [
     "Blob",
+    "BlobPropertyBag",
     "Document",
     "File",
     "FileSystemDirectoryHandle",

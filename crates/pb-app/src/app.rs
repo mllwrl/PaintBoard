@@ -70,6 +70,10 @@ pub enum UserEvent {
     /// A background save finished; the session takes the outcome in on the next tick.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Saved,
+    /// A board file was picked to open (later than asked on the web).
+    BoardPicked(PathBuf),
+    /// Files were picked to add to the board.
+    FilesPicked(Vec<PathBuf>),
     /// A book's page was rendered on a background thread.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     PageRendered {
@@ -77,6 +81,14 @@ pub enum UserEvent {
         page: u32,
         result: Result<pb_io::pdf::Page, String>,
     },
+}
+
+/// What to do with an exported file once it is made.
+enum Made {
+    /// Open it as a PDF to print, named `name`.
+    Print { name: String },
+    /// Write it here.
+    Save(PathBuf),
 }
 
 /// What recognized handwriting is for.
@@ -212,6 +224,9 @@ pub struct App {
     /// Time and screen position of the last left press, to detect double clicks.
     last_press: Option<(Instant, Point)>,
     recognition: Option<PendingRecognition>,
+    /// A file being exported in the browser, and what to do with it once made.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    making: Option<(export::Job, Made)>,
     next_request: u64,
     shown_title: String,
 }
@@ -288,6 +303,7 @@ impl App {
             high_contrast: false,
             last_press: None,
             recognition: None,
+            making: None,
             next_request: 0,
             shown_title: String::new(),
         }
@@ -518,6 +534,8 @@ impl App {
         }
         let model = Model {
             board: &board,
+            web: cfg!(target_arch = "wasm32"),
+            stored_boards: Session::stored_boards(),
             frames,
             tool: self.tools.active(),
             last_shape: self.tools.last_shape(),
@@ -1116,6 +1134,11 @@ impl App {
             Action::Redo => self.redo(),
             Action::NewBoard => self.new_board(),
             Action::Open => self.open_board(),
+            Action::OpenFile(path) => self.open_file(path),
+            #[cfg(target_arch = "wasm32")]
+            Action::DownloadBoard => self.session.download(&self.document),
+            #[cfg(not(target_arch = "wasm32"))]
+            Action::DownloadBoard => {}
             Action::Save => self.session.save(&self.document),
             Action::SaveAs => {
                 self.session.save_as(&self.document);
@@ -1652,8 +1675,11 @@ impl App {
     fn insert_image_files(&mut self) {
         let mut extensions = pb_io::image::EXTENSIONS.to_vec();
         extensions.extend(["svg", "svgz", "pdf", "csv", "tsv", "md", "markdown", "txt"]);
-        let paths = dialog::pick_open_many(tr("Images, PDF, tables, documents"), &extensions);
-        self.insert_files(&paths, None);
+        let proxy = self.proxy.clone();
+        let name = tr("Images, PDF, tables, documents");
+        dialog::pick_files(name, &extensions, true, move |paths| {
+            let _ = proxy.send_event(UserEvent::FilesPicked(paths));
+        });
     }
 
     /// Places image files at `at` (world), or in the middle of the view. Other files are
@@ -2388,12 +2414,20 @@ impl App {
             dialog::show_error(tr("Print"), tr("There is nothing to print."));
             return;
         }
+        let name = file_name(&self.session.name());
+        self.make_file(targets, &settings, Made::Print { name });
+    }
+
+    /// Makes the file `settings` ask for, then does `then` with it: right away on the
+    /// desktop; in the browser, which cannot wait for the GPU, over the next frames.
+    fn make_file(&mut self, targets: Vec<export::Target>, settings: &export::Settings, then: Made) {
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
         // Pictures are always light, like paper.
         let light = Theme::light();
-        let painters = export::Painters {
+        #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))]
+        let mut painters = export::Painters {
             gpu,
             text: &mut self.text,
             images: &mut self.images,
@@ -2401,29 +2435,75 @@ impl App {
             me: &self.me,
         };
         let title = self.session.name();
-        let name = file_name(&title);
-        let written =
-            export::file(&self.document, &targets, &settings, &title, painters).and_then(|bytes| {
-                let path = pb_platform::fs::temp_dir()
-                    .map_err(|err| err.to_string())?
-                    .join(format!("{name}.pdf"));
-                pb_platform::fs::write_atomic(&path, &bytes).map_err(|err| err.to_string())?;
-                Ok(path)
-            });
-        match written {
-            Ok(path) => {
-                if !pb_platform::browser::open_file(&path) {
-                    dialog::show_error(
-                        "Print",
-                        &trf(
-                            "No app opens PDF files. The file is at {}",
-                            &[&path.display()],
-                        ),
-                    );
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let made = export::file(&self.document, targets, settings, &title, painters);
+            self.file_made(made, then);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let job = export::Job::start(&self.document, targets, settings, &title, &mut painters);
+            self.making = Some((job, then));
+            self.request_redraw();
+        }
+    }
+
+    /// Takes the file being made further; true while it is not done.
+    fn step_making(&mut self) -> bool {
+        let (Some((job, _)), Some(gpu)) = (self.making.as_mut(), self.gpu.as_mut()) else {
+            return false;
+        };
+        let light = Theme::light();
+        let mut painters = export::Painters {
+            gpu,
+            text: &mut self.text,
+            images: &mut self.images,
+            theme: &light,
+            me: &self.me,
+        };
+        let Some(made) = job.step(&self.document, &mut painters, false) else {
+            return true;
+        };
+        if let Some((_, then)) = self.making.take() {
+            self.file_made(made, then);
+        }
+        false
+    }
+
+    fn file_made(&mut self, made: Result<Vec<u8>, String>, then: Made) {
+        match then {
+            Made::Print { name } => {
+                let written = made.and_then(|bytes| {
+                    let path = pb_platform::fs::temp_dir()
+                        .map_err(|err| err.to_string())?
+                        .join(format!("{name}.pdf"));
+                    pb_platform::fs::write_atomic(&path, &bytes).map_err(|err| err.to_string())?;
+                    Ok(path)
+                });
+                match written {
+                    Ok(path) => {
+                        if !pb_platform::browser::open_file(&path) {
+                            dialog::show_error(
+                                "Print",
+                                &trf(
+                                    "No app opens PDF files. The file is at {}",
+                                    &[&path.display()],
+                                ),
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        dialog::show_error(tr("Print"), &trf("Could not make the PDF: {}", &[&err]))
+                    }
                 }
             }
-            Err(err) => {
-                dialog::show_error(tr("Print"), &trf("Could not make the PDF: {}", &[&err]))
+            Made::Save(path) => {
+                let saved = made.and_then(|bytes| {
+                    pb_platform::fs::write_atomic(&path, &bytes).map_err(|err| err.to_string())
+                });
+                if let Err(err) = saved {
+                    dialog::show_error(tr("Export"), &trf("Could not save the file: {}", &[&err]));
+                }
             }
         }
     }
@@ -2501,30 +2581,8 @@ impl App {
         let Some(path) = dialog::pick_save(&file_type, &suggested) else {
             return false;
         };
-        let Some(gpu) = self.gpu.as_mut() else {
-            return false;
-        };
-        // Pictures are always light, like paper.
-        let light = Theme::light();
-        let painters = export::Painters {
-            gpu,
-            text: &mut self.text,
-            images: &mut self.images,
-            theme: &light,
-            me: &self.me,
-        };
-        let title = self.session.name();
-        let saved =
-            export::file(&self.document, &targets, settings, &title, painters).and_then(|bytes| {
-                pb_platform::fs::write_atomic(&path, &bytes).map_err(|err| err.to_string())
-            });
-        match saved {
-            Ok(()) => true,
-            Err(err) => {
-                dialog::show_error(tr("Export"), &trf("Could not save the file: {}", &[&err]));
-                false
-            }
-        }
+        self.make_file(targets, settings, Made::Save(path));
+        true
     }
 
     fn insert_diagram(&mut self, source: &str) -> Result<(), pb_io::mermaid::ParseError> {
@@ -3940,10 +3998,18 @@ impl App {
         }
     }
 
+    /// Asks for a board to open; [`App::open_file`] opens it once picked.
     fn open_board(&mut self) {
+        let proxy = self.proxy.clone();
+        Session::pick(move |path| {
+            let _ = proxy.send_event(UserEvent::BoardPicked(path));
+        });
+    }
+
+    fn open_file(&mut self, path: PathBuf) {
         self.finish_editing();
         self.end_style_drag();
-        if let Some(document) = self.session.open(&self.document) {
+        if let Some(document) = self.session.open(path, &self.document) {
             self.replace_document(document);
         }
     }
@@ -4508,6 +4574,10 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let now = Instant::now();
         self.session.tick(&self.document, now);
+        // The GPU reports back between frames: keep them coming until the file is made.
+        if self.step_making() {
+            self.request_redraw();
+        }
         let ui_repaint = self.ui.as_ref().and_then(Ui::repaint_at);
         if ui_repaint.is_some_and(|at| at <= now) {
             self.request_redraw();
@@ -4572,6 +4642,16 @@ impl ApplicationHandler<UserEvent> for App {
             } => self.finish_preview(id, &url, replace_title, result),
             // Waking up is all it takes: `about_to_wait` ticks the session.
             UserEvent::Saved => {}
+            UserEvent::BoardPicked(path) => self.open_file(path),
+            UserEvent::FilesPicked(paths) => {
+                self.insert_files(&paths, None);
+                // Picked in the browser, they were kept in memory only to be read.
+                #[cfg(target_arch = "wasm32")]
+                for path in &paths {
+                    let _ = pb_platform::fs::remove(path);
+                }
+                self.request_redraw();
+            }
             UserEvent::PageRendered { pdf, page, result } => {
                 self.finish_page(pdf, page, result);
             }

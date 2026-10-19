@@ -42,6 +42,11 @@ pub fn lang() -> Lang {
 
 pub fn set_lang(lang: Lang) {
     LANG.store(lang as u8, Ordering::Relaxed);
+    pb_platform::dialog::set_web_texts(pb_platform::dialog::WebTexts {
+        ok_saves: tr("OK: save it.").into(),
+        discard: tr("Close the board without saving it?").into(),
+        board_name: tr("Board name").into(),
+    });
 }
 
 /// `en` in the current language; itself when there is no translation.
@@ -124,6 +129,18 @@ const RU: &[(&str, &str)] = &[
     ("Keyboard shortcuts (F1)", "Горячие клавиши (F1)"),
     ("New board", "Новая доска"),
     ("Open…", "Открыть…"),
+    ("Download board", "Скачать доску"),
+    (
+        "Save the board as a .pboard file on this computer",
+        "Сохранить доску файлом .pboard на этот компьютер",
+    ),
+    ("Boards in this browser", "Доски в этом браузере"),
+    ("OK: save it.", "OK — сохранить."),
+    (
+        "Close the board without saving it?",
+        "Закрыть доску без сохранения?",
+    ),
+    ("Board name", "Название доски"),
     ("Save", "Сохранить"),
     ("Save as…", "Сохранить как…"),
     ("Insert file…", "Вставить файл…"),

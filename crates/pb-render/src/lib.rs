@@ -6,7 +6,7 @@ mod images;
 mod objects;
 mod overlay;
 
-pub use gpu::{FrameTarget, Gpu, Offscreen};
+pub use gpu::{FrameTarget, Gpu, Offscreen, PendingImage};
 pub use grid::{GridColors, GridStyle, draw_grid};
 pub use images::ImageCache;
 pub use objects::{TextRenderer, fitted_font_size, painted_bounds, text_align};

@@ -45,10 +45,6 @@ pub struct FileType<'a> {
     pub extension: &'a str,
 }
 
-pub fn pick_open(file_type: &FileType) -> Option<PathBuf> {
-    imp::pick_open(file_type)
-}
-
 /// Asks for any number of files with one of `extensions` (without dots), offered under
 /// `name`. Empty if cancelled.
 pub fn pick_open_many(name: &str, extensions: &[&str]) -> Vec<PathBuf> {
@@ -116,12 +112,6 @@ mod imp {
     use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 
     use super::{Answer, FileType};
-
-    pub fn pick_open(file_type: &FileType) -> Option<PathBuf> {
-        FileDialog::new()
-            .add_filter(file_type.name, &[file_type.extension])
-            .pick_file()
-    }
 
     pub fn pick_one(name: &str, extensions: &[&str]) -> Option<PathBuf> {
         FileDialog::new().add_filter(name, extensions).pick_file()
@@ -203,10 +193,6 @@ mod imp {
 
     fn window() -> Option<web_sys::Window> {
         web_sys::window()
-    }
-
-    pub fn pick_open(_file_type: &FileType) -> Option<PathBuf> {
-        None
     }
 
     pub fn pick_open_many(_name: &str, _extensions: &[&str]) -> Vec<PathBuf> {

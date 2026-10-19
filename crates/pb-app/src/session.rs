@@ -173,9 +173,17 @@ impl Session {
         true
     }
 
-    /// Ctrl+O. Returns the opened board, or `None` if nothing was opened.
-    pub fn open(&mut self, doc: &Document) -> Option<Document> {
-        let path = dialog::pick_open(&FILE_TYPE)?;
+    /// Ctrl+O: asks for a board file and hands it to `picked` (later, on the web).
+    pub fn pick(picked: impl FnOnce(PathBuf) + 'static) {
+        dialog::pick_files(FILE_TYPE.name, &[EXTENSION], false, move |paths| {
+            if let Some(path) = paths.into_iter().next() {
+                picked(path);
+            }
+        });
+    }
+
+    /// Opens the board at `path`. Returns it, or `None` if nothing was opened.
+    pub fn open(&mut self, path: PathBuf, doc: &Document) -> Option<Document> {
         if Some(&path) == self.path.as_ref() {
             return None;
         }
@@ -190,8 +198,39 @@ impl Session {
         if !self.release(doc) {
             return None;
         }
+        // A file picked in the browser is only in memory: the board is kept in the
+        // browser from now on.
+        #[cfg(target_arch = "wasm32")]
+        let path = match keep_in_browser(&path) {
+            Ok(kept) => kept,
+            Err(err) => {
+                dialog::show_error(tr("Could not save the board"), &err.to_string());
+                return None;
+            }
+        };
         self.switch_to(Some(path), &opened);
         Some(opened)
+    }
+
+    /// The boards saved in the browser (none on the desktop).
+    pub fn stored_boards() -> Vec<PathBuf> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            fs::boards_dir().map_or_else(|_| Vec::new(), |dir| fs::list(&dir))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        Vec::new()
+    }
+
+    /// Lets the browser download the board as a file (the web keeps boards inside the
+    /// browser otherwise).
+    #[cfg(target_arch = "wasm32")]
+    pub fn download(&self, doc: &Document) {
+        let name = format!("{}.{EXTENSION}", self.name());
+        let path = fs::downloads_dir().join(name);
+        if let Err(err) = fs::write_atomic(&path, &encode(doc)) {
+            dialog::show_error(tr("Could not save the board"), &err.to_string());
+        }
     }
 
     /// Ctrl+N. Returns the new board, or `None` if the user cancelled.
@@ -352,6 +391,29 @@ struct Saving {
     /// The board's revision when it started: what is saved once it is done.
     revision: u64,
     result: std::sync::mpsc::Receiver<io::Result<()>>,
+}
+
+/// Moves a board picked in the browser from the uploads to the boards kept in the browser,
+/// under a name no other board there has. Returns where it went.
+#[cfg(target_arch = "wasm32")]
+fn keep_in_browser(path: &Path) -> io::Result<PathBuf> {
+    let dir = fs::boards_dir()?;
+    if path.parent() == Some(dir.as_path()) {
+        return Ok(path.to_owned());
+    }
+    let stem = path
+        .file_stem()
+        .map_or_else(|| UNTITLED.into(), |s| s.to_string_lossy());
+    let kept = (1..)
+        .map(|n| match n {
+            1 => dir.join(format!("{stem}.{EXTENSION}")),
+            n => dir.join(format!("{stem} ({n}).{EXTENSION}")),
+        })
+        .find(|p| !fs::exists(p))
+        .expect("some name is free");
+    fs::write_atomic(&kept, &fs::read(path)?)?;
+    let _ = fs::remove(path);
+    Ok(kept)
 }
 
 fn load(path: &Path) -> Result<Document, Box<dyn std::error::Error>> {

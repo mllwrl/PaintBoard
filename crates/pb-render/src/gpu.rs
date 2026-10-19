@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use vello::peniko::Color;
 use vello::util::{RenderContext, RenderSurface};
 use vello::wgpu::{self, CurrentSurfaceTexture, SurfaceTarget};
@@ -74,9 +76,41 @@ impl Gpu {
         self.device().limits().max_texture_dimension_2d
     }
 
+    /// Like [`Gpu::render_image`], without waiting: the pixels come back later (the only
+    /// way on the web). Call [`Gpu::poll`] until [`PendingImage::is_ready`].
+    pub fn start_image(
+        &mut self,
+        scene: &Scene,
+        width: u32,
+        height: u32,
+        background: Color,
+    ) -> Result<PendingImage, String> {
+        let handle = &self.context.devices[self.surface.dev_id];
+        start_pixels(
+            handle,
+            &mut self.renderer,
+            scene,
+            (width, height),
+            background,
+        )
+    }
+
+    /// Lets finished GPU work report back; `wait` blocks until all of it is done (not on
+    /// the web, where the browser reports on its own).
+    pub fn poll(&self, wait: bool) {
+        let poll = if wait && !cfg!(target_arch = "wasm32") {
+            wgpu::PollType::wait_indefinitely()
+        } else {
+            wgpu::PollType::Poll
+        };
+        if let Err(err) = self.device().poll(poll) {
+            log::warn!("GPU poll failed: {err}");
+        }
+    }
+
     /// Draws `scene` off screen into a `width`×`height` image and reads it back as rows of
     /// straight (not premultiplied) RGBA8 pixels. Blocks until the GPU is done; on the web,
-    /// where it cannot wait, it fails.
+    /// where it cannot wait, it fails: use [`Gpu::start_image`] there.
     pub fn render_image(
         &mut self,
         scene: &Scene,
@@ -141,14 +175,68 @@ impl Offscreen {
     }
 }
 
-/// Draws `scene` into a new texture of `size` and reads it back as straight RGBA8 rows.
+/// Draws `scene` into a new texture of `size` and reads it back as straight RGBA8 rows,
+/// waiting for the GPU (not possible on the web).
 fn render_pixels(
+    handle: &vello::util::DeviceHandle,
+    renderer: &mut Renderer,
+    scene: &Scene,
+    size: (u32, u32),
+    background: Color,
+) -> Result<Vec<u8>, String> {
+    let pending = start_pixels(handle, renderer, scene, size, background)?;
+    handle
+        .device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|err| err.to_string())?;
+    pending.take()
+}
+
+/// Pixels on their way back from the GPU; see [`Gpu::start_image`].
+pub struct PendingImage {
+    buffer: wgpu::Buffer,
+    /// Bytes in a row of the image, and in a row of the buffer (aligned for the copy).
+    row: u32,
+    padded: u32,
+    /// Set by the GPU once the buffer can be read.
+    mapped: Arc<Mutex<Option<Result<(), wgpu::BufferAsyncError>>>>,
+}
+
+impl PendingImage {
+    /// The pixels can be taken.
+    pub fn is_ready(&self) -> bool {
+        self.mapped.lock().is_ok_and(|m| m.is_some())
+    }
+
+    /// The pixels, as rows of straight RGBA8; fails if not ready yet.
+    pub fn take(self) -> Result<Vec<u8>, String> {
+        let outcome = self.mapped.lock().map_err(|e| e.to_string())?.take();
+        match outcome {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(err.to_string()),
+            None => return Err("the GPU did not finish drawing".to_owned()),
+        }
+        let slice = self.buffer.slice(..);
+        let mapped = slice.get_mapped_range().map_err(|err| err.to_string())?;
+        let mut pixels =
+            Vec::with_capacity(mapped.len() / self.padded as usize * self.row as usize);
+        for line in mapped.chunks(self.padded as usize) {
+            pixels.extend_from_slice(&line[..self.row as usize]);
+        }
+        drop(mapped);
+        self.buffer.unmap();
+        Ok(pixels)
+    }
+}
+
+/// Draws `scene` into a new texture of `size` and starts reading it back.
+fn start_pixels(
     handle: &vello::util::DeviceHandle,
     renderer: &mut Renderer,
     scene: &Scene,
     (width, height): (u32, u32),
     background: Color,
-) -> Result<Vec<u8>, String> {
+) -> Result<PendingImage, String> {
     let (device, queue) = (&handle.device, &handle.queue);
     let size = wgpu::Extent3d {
         width,
@@ -206,27 +294,21 @@ fn render_pixels(
         size,
     );
     queue.submit([encoder.finish()]);
-    let slice = buffer.slice(..);
-    let (sender, receiver) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = sender.send(result);
-    });
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|err| err.to_string())?;
-    match receiver.try_recv() {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => return Err(err.to_string()),
-        Err(_) => return Err("the GPU did not finish drawing".to_owned()),
-    }
-    let mapped = slice.get_mapped_range().map_err(|err| err.to_string())?;
-    let mut pixels = Vec::with_capacity(row as usize * height as usize);
-    for line in mapped.chunks(padded as usize) {
-        pixels.extend_from_slice(&line[..row as usize]);
-    }
-    drop(mapped);
-    buffer.unmap();
-    Ok(pixels)
+    let mapped = Arc::new(Mutex::new(None));
+    let sink = mapped.clone();
+    buffer
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, move |result| {
+            if let Ok(mut slot) = sink.lock() {
+                *slot = Some(result);
+            }
+        });
+    Ok(PendingImage {
+        buffer,
+        row,
+        padded,
+        mapped,
+    })
 }
 
 impl Gpu {
