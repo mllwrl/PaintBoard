@@ -437,7 +437,12 @@ pub(crate) fn draw_object(
                 scene.pop_layer();
             }
         }
-        ObjectKind::Image(image) => match images.get(assets, image.asset) {
+        ObjectKind::Image(image) => match images.get(assets, image.asset, {
+            // The whole picture's longer side on screen, in physical pixels.
+            let scale = transform.determinant().abs().sqrt();
+            let (crop, b) = (image.crop, data.bounds);
+            (b.width() / crop.width()).max(b.height() / crop.height()) * scale
+        }) {
             Some(brush) => draw_image(scene, transform, data.bounds, image, brush),
             None => draw_placeholder(scene, transform, data.bounds),
         },
