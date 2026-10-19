@@ -443,7 +443,14 @@ pub(crate) fn draw_object(
             let (crop, b) = (image.crop, data.bounds);
             (b.width() / crop.width()).max(b.height() / crop.height()) * scale
         }) {
-            Some(brush) => draw_image(scene, transform, data.bounds, image, brush),
+            Some(brush) => {
+                draw_image(scene, transform, data.bounds, image, brush);
+                // A PDF page is often white to its edges: a thin line shows where it ends.
+                if image.book.is_some() {
+                    let edge = Stroke::new(1.0 / zoom);
+                    scene.stroke(&edge, transform, frame_edge, None, &data.bounds);
+                }
+            }
             None => draw_placeholder(scene, transform, data.bounds),
         },
         ObjectKind::Ink(ink) => {

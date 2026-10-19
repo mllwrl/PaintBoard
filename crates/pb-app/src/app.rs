@@ -1153,10 +1153,12 @@ impl App {
                 )
             ),
             book: match ids {
-                [id] => books::book_of(&self.document, *id).map(|(book, _)| {
-                    let page = self.books.page(&self.document, *id).unwrap_or(book.page);
-                    (page, book.pages)
-                }),
+                [id] => books::book_of(&self.document, *id)
+                    .filter(|(book, _)| book.pages > 1)
+                    .map(|(book, _)| {
+                        let page = self.books.page(&self.document, *id).unwrap_or(book.page);
+                        (page, book.pages)
+                    }),
                 _ => None,
             },
             can_crop: matches!(ids, [id] if Crop::new(&self.document, *id).is_some()),
@@ -1885,7 +1887,7 @@ impl App {
     }
 
     /// Adds the PDF file at `path` as a book: its first page, with buttons to turn the
-    /// pages in place. A single page becomes a plain picture.
+    /// pages in place (none for a single page).
     fn insert_pdf(&mut self, path: &std::path::Path, at: Option<Point>) -> Result<(), String> {
         let bytes = pb_platform::fs::read(path).map_err(|e| e.to_string())?;
         let reader = pb_io::pdf::Reader::open(&bytes)?;
@@ -1898,10 +1900,6 @@ impl App {
             width: (first.width / 2).max(1),
             height: (first.height / 2).max(1),
         };
-        if pages < 2 {
-            self.insert_pictures(vec![picture], at);
-            return Ok(());
-        }
         let pdf = self.document.add_asset(bytes);
         self.insert_book(picture, pdf, pages, at);
         Ok(())
@@ -1936,7 +1934,9 @@ impl App {
         }
         self.apply(Command::Create(vec![data.into()]));
         // The second page is likely next.
-        if let Ok(turn) = self.books.render(&self.document, pdf, 1) {
+        if pages > 1
+            && let Ok(turn) = self.books.render(&self.document, pdf, 1)
+        {
             self.run_turn(turn);
         }
         self.request_redraw();
