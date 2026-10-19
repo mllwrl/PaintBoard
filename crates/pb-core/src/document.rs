@@ -45,6 +45,7 @@ mod key {
     pub const SCHEMA: &str = "schema";
     /// In `META`: the board is protected from changes.
     pub const READ_ONLY: &str = "readOnly";
+    pub const TITLE: &str = "title";
     pub const OBJECTS: &str = "objects";
     /// Root map of the board's tags: `RRGGBBAA;name` (hex color) by tag id.
     pub const TAGS: &str = "tags";
@@ -1211,6 +1212,10 @@ impl Document {
                 self.doc.get_map(key::META).insert(key::READ_ONLY, on)?;
                 self.doc.set_next_commit_origin(NOT_UNDONE);
             }
+            Command::SetTitle(title) => {
+                self.doc.get_map(key::META).insert(key::TITLE, &*title)?;
+                self.doc.set_next_commit_origin(NOT_UNDONE);
+            }
             Command::SaveVersion {
                 id,
                 name,
@@ -1335,6 +1340,11 @@ impl Document {
     /// Whether the board is protected from changes (see [`Command::allowed_read_only`]).
     pub fn read_only(&self) -> bool {
         self.read_only || self.view_only
+    }
+
+    /// The board's name, if it was given one (see [`Command::SetTitle`]).
+    pub fn title(&self) -> Option<String> {
+        get_str(&self.doc.get_map(key::META), key::TITLE).filter(|t| !t.trim().is_empty())
     }
 
     /// Whether this copy may only look, changing nothing (see [`Document::set_view_only`]).

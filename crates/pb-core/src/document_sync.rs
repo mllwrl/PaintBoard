@@ -338,4 +338,16 @@ mod tests {
         exchange(&mut a, &mut b);
         assert!(a.get(first).is_none() && a.get(second).is_none());
     }
+
+    #[test]
+    fn the_board_name_reaches_the_others() {
+        let mut doc = Document::new();
+        assert_eq!(doc.title(), None);
+        let (mut a, mut b) = two(&doc);
+        a.apply(Command::SetTitle("Roadmap".into())).unwrap();
+        exchange(&mut a, &mut b);
+        assert_eq!(b.title().as_deref(), Some("Roadmap"));
+        doc.apply(Command::SetTitle("  ".into())).unwrap();
+        assert_eq!(doc.title(), None);
+    }
 }

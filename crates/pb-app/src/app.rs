@@ -561,7 +561,7 @@ impl App {
             &mut self.images,
         );
 
-        let board = self.session.name();
+        let board = self.board_name();
         let frames = self
             .document
             .objects()
@@ -4178,7 +4178,14 @@ impl App {
                 .ok_or_else(|| tr("The server's answer is not understood.").to_owned())
         });
         match links {
-            Ok((edit, view)) => self.start_sharing(edit, Some(view)),
+            Ok((edit, view)) => {
+                // The others see the board under the name of its file here.
+                if self.document.title().is_none() && self.session.path().is_some() {
+                    let name = self.session.name();
+                    self.apply(Command::SetTitle(name.into()));
+                }
+                self.start_sharing(edit, Some(view));
+            }
             Err(err) => {
                 self.share_error = Some(trf("Could not share the board: {}", &[&err]));
             }
@@ -4295,6 +4302,14 @@ impl App {
             return None;
         };
         kind(id)?.text().map(str::to_owned)
+    }
+
+    /// The board's name to show: a shared board's own name, else its file's.
+    fn board_name(&self) -> String {
+        self.sharing
+            .as_ref()
+            .and(self.document.title())
+            .unwrap_or_else(|| self.session.name())
     }
 
     /// Moves the camera toward the view of the person followed (or of a leader).

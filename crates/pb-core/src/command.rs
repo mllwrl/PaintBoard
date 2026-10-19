@@ -204,6 +204,9 @@ pub enum Command {
     },
     /// Protects the board from changes, or lifts that. Not undoable.
     SetReadOnly(bool),
+    /// Names the board: shown for a shared board, whose file each person names as they
+    /// like. Not undoable.
+    SetTitle(Arc<str>),
     /// Saves the board as it is now as a version. Not undoable.
     SaveVersion {
         id: Arc<str>,
