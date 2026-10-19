@@ -1774,6 +1774,26 @@ impl Tools {
         }
     }
 
+    /// The gesture in progress drags something along (objects, a corner, a marquee, a
+    /// line's end): the view should follow when the pointer nears the window's edge.
+    pub fn autopans(&self) -> bool {
+        matches!(
+            self.gesture,
+            Some(
+                Gesture::Move { dragging: true, .. }
+                    | Gesture::MoveCard { dragging: true, .. }
+                    | Gesture::Resize { .. }
+                    | Gesture::Marquee { .. }
+                    | Gesture::Shape { .. }
+                    | Gesture::Connect { .. }
+                    | Gesture::MoveEnd { .. }
+                    | Gesture::SelectCells
+                    | Gesture::MoveBend { .. }
+                    | Gesture::MoveLabel { .. }
+            )
+        )
+    }
+
     /// Smart guides of the gesture in progress, in world space.
     pub fn guides(&self, doc: &Document) -> Vec<Line> {
         match &self.gesture {
@@ -2329,7 +2349,11 @@ fn snap_aspect_corner(
             return (r, guides);
         }
     }
-    let r = if snapper.grid.is_some() { candidates[0].1 } else { free };
+    let r = if snapper.grid.is_some() {
+        candidates[0].1
+    } else {
+        free
+    };
     (r, guides_of(r))
 }
 

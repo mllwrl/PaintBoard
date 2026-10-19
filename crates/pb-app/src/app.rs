@@ -184,6 +184,8 @@ pub struct App {
     show_minimap: bool,
     /// Which panels around the board show.
     panels: Panels,
+    /// When the view last moved because a drag neared the window's edge.
+    autopan: Option<Instant>,
     /// Objects it does not let through are faded. Not saved with the board.
     filter: pb_core::Filter,
     /// Who reactions and comments are by.
@@ -314,6 +316,7 @@ impl App {
             sticky_color: STICKY_COLORS[0],
             show_minimap: true,
             panels: crate::settings::panels(),
+            autopan: None,
             filter: pb_core::Filter::default(),
             me: crate::settings::name()
                 .unwrap_or_else(pb_platform::user_name)
@@ -4957,6 +4960,49 @@ impl App {
         self.request_redraw();
     }
 
+    /// Like Miro, dragging something near the window's edge (or past it) moves the view
+    /// that way, faster the closer it gets, and what is dragged comes along. Returns when
+    /// to move it next.
+    fn autopan(&mut self, now: Instant) -> Option<Instant> {
+        /// How close to the edge it starts, in logical pixels.
+        const EDGE: f64 = 36.0;
+        /// Logical pixels per second at the edge; up to twice that beyond it.
+        const SPEED: f64 = 900.0;
+        let cursor = self.navigation.cursor().filter(|_| self.tools.autopans());
+        let size = self.viewport();
+        let push = |at: f64, length: f64| {
+            if at < EDGE {
+                ((EDGE - at) / EDGE).min(2.0)
+            } else if at > length - EDGE {
+                -((at - (length - EDGE)) / EDGE).min(2.0)
+            } else {
+                0.0
+            }
+        };
+        let speed = cursor.map_or(Vec2::ZERO, |c| {
+            Vec2::new(push(c.x, size.width), push(c.y, size.height))
+        });
+        if speed == Vec2::ZERO || size.width < 4.0 * EDGE || size.height < 4.0 * EDGE {
+            self.autopan = None;
+            return None;
+        }
+        let step = pb_platform::Duration::from_millis(16);
+        let dt = self
+            .autopan
+            .map_or(step, |last| now.saturating_duration_since(last))
+            .min(pb_platform::Duration::from_millis(50));
+        if self.autopan.is_some_and(|last| now < last + step) {
+            return self.autopan.map(|last| last + step);
+        }
+        self.autopan = Some(now);
+        self.camera.pan(speed * SPEED * dt.as_secs_f64());
+        if let Some(pointer) = self.pointer() {
+            self.tools.pointer_move(&self.document, pointer);
+        }
+        self.request_redraw();
+        Some(now + step)
+    }
+
     /// The window fills the screen, or goes back to how it was.
     fn toggle_fullscreen(&mut self) {
         if let Some(window) = &self.window {
@@ -5230,6 +5276,7 @@ impl ApplicationHandler<UserEvent> for App {
         if self.step_making() {
             self.request_redraw();
         }
+        let autopan = self.autopan(now);
         let ui_repaint = self.ui.as_ref().and_then(Ui::repaint_at);
         if ui_repaint.is_some_and(|at| at <= now) {
             self.request_redraw();
@@ -5263,6 +5310,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.request_redraw();
         }
         let wake = [
+            autopan,
             self.session.deadline(),
             ui_repaint.filter(|&at| at > now),
             blink,
