@@ -189,6 +189,10 @@ const LOD_BOX: f64 = 6.0;
 /// tags and badges, which could not be read anyway.
 const LOD_TEXT: f64 = 24.0;
 
+/// Text objects whose letters are smaller than this on screen (logical pixels) are drawn
+/// without them.
+const LOD_LETTERS: f64 = 4.0;
+
 /// Opacity of objects a filter hides, relative to their own.
 const FILTERED_OPACITY: f64 = 0.15;
 
@@ -340,7 +344,12 @@ pub fn build_scene(
             objects::draw_box(scene, transform, data);
             continue;
         }
-        text.skip = on_screen < LOD_TEXT;
+        // A text object is all text: a short word stays readable while small, as long as
+        // its letters are.
+        text.skip = match &data.kind {
+            ObjectKind::Text(t) => t.size * zoom < LOD_LETTERS,
+            _ => on_screen < LOD_TEXT,
+        };
         let resources = objects::Resources {
             text: &mut *text,
             images: &mut *images,

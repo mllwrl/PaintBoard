@@ -226,6 +226,8 @@ pub struct App {
     /// The window for making a diagram from text is open, with what was wrong with the
     /// last try.
     diagram: Option<Option<String>>,
+    /// The graph window, when open, with the last error.
+    graph: Option<Option<String>>,
     /// The export window is open.
     show_export: bool,
     /// A saved version being looked at instead of the board.
@@ -339,6 +341,7 @@ impl App {
             timer: None,
             show_results: false,
             diagram: None,
+            graph: None,
             show_export: false,
             version_view: None,
             ink_panel: true,
@@ -659,6 +662,7 @@ impl App {
                 .map(|t| (t.id.clone(), t.title.to_string(), t.duration))
                 .collect(),
             diagram: self.diagram.clone(),
+            graph: self.graph.clone(),
             versions: {
                 let now = pb_platform::now_ms();
                 self.document
@@ -1404,6 +1408,17 @@ impl App {
                 self.diagram = Some(None);
             }
             Action::CloseDiagram => self.diagram = None,
+            Action::OpenGraph => {
+                self.finish_editing();
+                self.graph = Some(None);
+            }
+            Action::CloseGraph => self.graph = None,
+            Action::InsertGraph { formulas, from, to } => {
+                self.graph = match self.insert_graph(&formulas, &from, &to) {
+                    Ok(()) => None,
+                    Err(err) => Some(Some(err)),
+                };
+            }
             Action::SaveVersion(name) => {
                 let name = name.trim();
                 let name = if name.is_empty() {
@@ -4163,6 +4178,158 @@ impl App {
             },
         }
         self.request_redraw();
+    }
+
+    /// Draws graphs of `formulas` (separated by `;`) for x from `from` to `to` in the
+    /// middle of the view, as one group: a white box, grid lines with labels, axes,
+    /// curves and the formulas above.
+    fn insert_graph(&mut self, formulas: &str, from: &str, to: &str) -> Result<(), String> {
+        use pb_core::{Content, Ink, Shape, ShapeKind};
+        use pb_tools::plot;
+        let number = |s: &str| s.trim().replace(',', ".").replace('−', "-").parse::<f64>();
+        let (Ok(x0), Ok(x1)) = (number(from), number(to)) else {
+            return Err(tr("The range of x is not a pair of numbers.").to_owned());
+        };
+        let sources: Vec<&str> = formulas
+            .split(';')
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+            .collect();
+        let functions = sources
+            .iter()
+            .map(|f| plot::parse(f).map_err(|e| format!("{f}: {e}")))
+            .collect::<Result<Vec<_>, _>>()?;
+        if functions.is_empty() {
+            return Err(plot::PlotError::Empty.to_string());
+        }
+        let graph = plot::graph(&functions, x0, x1).map_err(|e| e.to_string())?;
+        let zoom = self.camera.zoom();
+        let center = self.camera.visible_world_rect(self.viewport()).center();
+        let (w, h) = (480.0 / zoom, 300.0 / zoom);
+        let area = pb_geom::kurbo::Rect::new(
+            center.x - w / 2.0,
+            center.y - h / 2.0,
+            center.x + w / 2.0,
+            center.y + h / 2.0,
+        );
+        let ((gx0, gx1), (gy0, gy1)) = (graph.x, graph.y);
+        let to_world = |x: f64, y: f64| {
+            Point::new(
+                area.x0 + (x - gx0) / (gx1 - gx0) * w,
+                area.y1 - (y - gy0) / (gy1 - gy0) * h,
+            )
+        };
+        let line = |points: &[Point], color: Rgba, width: f64| -> Option<ObjectData> {
+            let points: Vec<_> = points.iter().map(|&p| (p, 1.0)).collect();
+            let (ink, bounds) = Ink::from_world(&points)?;
+            Some(ObjectData {
+                kind: ObjectKind::Ink(ink),
+                bounds,
+                rotation: 0.0,
+                style: Style {
+                    fill: Rgba(0),
+                    stroke: color,
+                    stroke_width: width / zoom,
+                    opacity: 1.0,
+                    ..Style::default()
+                },
+                tags: Default::default(),
+                link: None,
+            })
+        };
+        let gray = Rgba::rgb(0x6B, 0x72, 0x80);
+        let mut items = vec![ObjectData {
+            kind: ObjectKind::Shape(Shape {
+                kind: ShapeKind::Rectangle,
+                text: "".into(),
+                spans: Default::default(),
+            }),
+            bounds: area,
+            rotation: 0.0,
+            style: Style {
+                fill: Rgba::rgb(0xFF, 0xFF, 0xFF),
+                stroke: Rgba::rgb(0xC8, 0xCB, 0xD0),
+                stroke_width: 1.0 / zoom,
+                opacity: 1.0,
+                ..Style::default()
+            },
+            tags: Default::default(),
+            link: None,
+        }];
+        // Grid lines with their values, then the axes where 0 is (else along the edges).
+        let label_size = 11.0 / zoom;
+        let x_axis = if gy0 <= 0.0 && 0.0 <= gy1 { 0.0 } else { gy0 };
+        let y_axis = if gx0 <= 0.0 && 0.0 <= gx1 { 0.0 } else { gx0 };
+        for x in plot::ticks(gx0, gx1, 8) {
+            let (top, bottom) = (to_world(x, gy1), to_world(x, gy0));
+            items.extend(line(&[top, bottom], Rgba::rgb(0xEC, 0xED, 0xF0), 1.0));
+            let at = to_world(x, x_axis);
+            let label = self.text_object(&plot::tick_label(x), label_size, gray, |tw, th| {
+                Point::new(
+                    at.x - tw / 2.0,
+                    (at.y + 3.0 / zoom + th / 2.0).min(area.y1 - th / 2.0),
+                )
+            });
+            items.push(label);
+        }
+        for y in plot::ticks(gy0, gy1, 6) {
+            let (left, right) = (to_world(gx0, y), to_world(gx1, y));
+            items.extend(line(&[left, right], Rgba::rgb(0xEC, 0xED, 0xF0), 1.0));
+            if y == 0.0 && y_axis == 0.0 && x_axis == 0.0 {
+                continue;
+            }
+            let at = to_world(y_axis, y);
+            let label = self.text_object(&plot::tick_label(y), label_size, gray, |tw, _| {
+                Point::new((at.x - 4.0 / zoom - tw).max(area.x0), at.y)
+            });
+            items.push(label);
+        }
+        items.extend(line(
+            &[to_world(gx0, x_axis), to_world(gx1, x_axis)],
+            gray,
+            1.5,
+        ));
+        items.extend(line(
+            &[to_world(y_axis, gy0), to_world(y_axis, gy1)],
+            gray,
+            1.5,
+        ));
+        const COLORS: [Rgba; 5] = [
+            Rgba::rgb(0x25, 0x63, 0xEB),
+            Rgba::rgb(0xDC, 0x26, 0x26),
+            Rgba::rgb(0x16, 0xA3, 0x4A),
+            Rgba::rgb(0x93, 0x33, 0xEA),
+            Rgba::rgb(0xEA, 0x8A, 0x0C),
+        ];
+        for (i, pieces) in graph.curves.iter().enumerate() {
+            let color = COLORS[i % COLORS.len()];
+            for piece in pieces {
+                let points: Vec<_> = piece.iter().map(|&(x, y)| to_world(x, y)).collect();
+                items.extend(line(&points, color, 2.5));
+            }
+        }
+        // The formulas above the box, each in its curve's color.
+        let title_size = 15.0 / zoom;
+        let mut left = area.x0;
+        for (i, source) in sources.iter().enumerate() {
+            let text = if source.contains('=') {
+                (*source).to_owned()
+            } else {
+                format!("y = {source}")
+            };
+            let color = COLORS[i % COLORS.len()];
+            let title = self.text_object(&text, title_size, color, |_, th| {
+                Point::new(left, area.y0 - 6.0 / zoom - th / 2.0)
+            });
+            left = title.bounds.x1 + 16.0 / zoom;
+            items.push(title);
+        }
+        self.finish_editing();
+        self.tools.set_active(ToolKind::Select);
+        let group = Content::Group(items.into_iter().map(Content::Object).collect());
+        self.apply(Command::Create(vec![group]));
+        self.request_redraw();
+        Ok(())
     }
 
     /// A text object sized to fit `text`. `place` gets the text's width and height and

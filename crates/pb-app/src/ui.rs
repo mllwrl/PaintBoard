@@ -216,6 +216,15 @@ pub enum Action {
     /// Makes a diagram from this Mermaid text.
     InsertDiagram(String),
     CloseDiagram,
+    /// Opens the window that draws graphs of functions.
+    OpenGraph,
+    /// Draws graphs of the formulas (separated by `;`) for x from `from` to `to`.
+    InsertGraph {
+        formulas: String,
+        from: String,
+        to: String,
+    },
+    CloseGraph,
     /// Adds this comment to the thread shown, starting it if new.
     PostComment(String),
     DeleteComment(std::sync::Arc<str>),
@@ -445,6 +454,8 @@ pub struct Model<'a> {
     pub talktracks: Vec<(Arc<str>, String, u32)>,
     /// The diagram-from-text window, when it is open, with the last error.
     pub diagram: Option<Option<String>>,
+    /// The graph window, when it is open, with the last error.
+    pub graph: Option<Option<String>>,
     /// The template gallery is open.
     pub show_templates: bool,
     /// The dark theme is on.
@@ -818,6 +829,8 @@ pub struct Ui {
     search_text: String,
     /// Mermaid text in the diagram window, kept between openings.
     diagram_text: String,
+    /// The graph window's formulas and x range.
+    graph_text: (String, String, String),
     /// A comment being written.
     comment_text: String,
     /// The layer being renamed, with the name typed so far.
@@ -863,6 +876,11 @@ impl Ui {
             link_text: String::new(),
             search_text: String::new(),
             diagram_text: DIAGRAM_EXAMPLE.to_owned(),
+            graph_text: (
+                "sin(x); x^2/4 - 1".to_owned(),
+                "-5".to_owned(),
+                "5".to_owned(),
+            ),
             comment_text: String::new(),
             layer_name: None,
             export: crate::export::Settings::default(),
@@ -976,6 +994,7 @@ impl Ui {
         let link_text = &mut self.link_text;
         let search_text = &mut self.search_text;
         let diagram_text = &mut self.diagram_text;
+        let graph_text = &mut self.graph_text;
         let comment_text = &mut self.comment_text;
         let layer_name = &mut self.layer_name;
         let export = &mut self.export;
@@ -1064,6 +1083,9 @@ impl Ui {
             }
             if let Some(error) = &model.diagram {
                 diagram_window(ctx, error.as_deref(), diagram_text, &mut actions);
+            }
+            if let Some(error) = &model.graph {
+                graph_window(ctx, error.as_deref(), graph_text, &mut actions);
             }
             match model.export {
                 Some(info) => {
@@ -1267,13 +1289,17 @@ fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: 
                             ("Save as…", "Ctrl+Shift+S", Action::SaveAs),
                             ("Insert file…", "", Action::InsertImage),
                             ("Diagram from text…", "", Action::OpenDiagram),
+                            ("Graph of a function…", "", Action::OpenGraph),
                             ("Export…", "Ctrl+Shift+E", Action::OpenExport),
                             ("Print…", "Ctrl+P", Action::Print),
                         ];
                         for (label, shortcut, action) in items {
                             // Inserting changes the board.
                             let on = !model.read_only
-                                || !matches!(action, Action::InsertImage | Action::OpenDiagram);
+                                || !matches!(
+                                    action,
+                                    Action::InsertImage | Action::OpenDiagram | Action::OpenGraph
+                                );
                             let button = Button::new(tr(label)).shortcut_text(shortcut);
                             if ui.add_enabled(on, button).clicked() {
                                 actions.push(action);
@@ -4010,6 +4036,61 @@ fn diagram_window(
     // Esc closes it even from the text field, which keeps the key from the board.
     if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         actions.push(Action::CloseDiagram);
+    }
+}
+
+/// The window that draws graphs of functions: formulas and the range of x.
+fn graph_window(
+    ctx: &Context,
+    error: Option<&str>,
+    (formulas, from, to): &mut (String, String, String),
+    actions: &mut Vec<Action>,
+) {
+    let mut open = true;
+    let mut insert = false;
+    let shown = egui::Window::new(tr("Graph of a function"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .order(Order::Foreground)
+        .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.label(tr("y = … of x, several separated by ;. For example: sin(x); x^2 - 3x + 1; 1/x; sqrt(x); |x|; 2^x; ln(x)"));
+            let field = ui.add(egui::TextEdit::singleline(formulas).desired_width(420.0));
+            insert |= field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.horizontal(|ui| {
+                ui.label(tr("x from"));
+                ui.add(egui::TextEdit::singleline(from).desired_width(60.0));
+                ui.label(tr("to"));
+                ui.add(egui::TextEdit::singleline(to).desired_width(60.0));
+            });
+            if let Some(error) = error {
+                ui.colored_label(Color32::from_rgb(0xD0, 0x30, 0x30), error);
+            }
+            ui.horizontal(|ui| {
+                insert |= ui.button(tr("Insert")).clicked();
+                if ui.button(tr("Cancel")).clicked() {
+                    actions.push(Action::CloseGraph);
+                }
+            });
+        });
+    if insert {
+        actions.push(Action::InsertGraph {
+            formulas: formulas.clone(),
+            from: from.clone(),
+            to: to.clone(),
+        });
+    }
+    if let Some(shown) = shown {
+        let layer = shown.response.layer_id;
+        let on_top = ctx.memory(|m| m.areas().top_layer_id(Order::Foreground)) == Some(layer);
+        if !on_top {
+            ctx.move_to_top(layer);
+            ctx.request_repaint();
+        }
+    }
+    if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        actions.push(Action::CloseGraph);
     }
 }
 

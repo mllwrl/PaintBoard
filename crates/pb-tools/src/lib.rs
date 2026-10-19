@@ -12,6 +12,7 @@ mod handles;
 mod hit;
 mod ink;
 pub mod math;
+pub mod plot;
 pub mod quick;
 mod selection;
 mod table;

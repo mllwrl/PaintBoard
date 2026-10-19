@@ -752,6 +752,18 @@ const RU: &[(&str, &str)] = &[
     ),
     ("Panels", "Панели"),
     ("Board color", "Цвет доски"),
+    ("Graph of a function…", "График функции…"),
+    ("Graph of a function", "График функции"),
+    (
+        "y = … of x, several separated by ;. For example: sin(x); x^2 - 3x + 1; 1/x; sqrt(x); |x|; 2^x; ln(x)",
+        "y = … от x, несколько — через ;. Например: sin(x); x^2 - 3x + 1; 1/x; sqrt(x); |x|; 2^x; ln(x)",
+    ),
+    ("x from", "x от"),
+    ("to", "до"),
+    (
+        "The range of x is not a pair of numbers.",
+        "Диапазон x — не два числа.",
+    ),
     ("Usual", "Обычный"),
     ("Menu", "Меню"),
     ("These controls", "Эта панель"),
