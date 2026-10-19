@@ -782,6 +782,39 @@ fn pen_draws_a_simplified_stroke_and_stays_active() {
 }
 
 #[test]
+fn shift_draws_straight_ink_and_letting_go_goes_on_freehand() {
+    let doc = Document::new();
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Pen);
+    let data = ink_of(draw(
+        &mut tools,
+        &doc,
+        &[
+            at(0.0, 0.0),
+            at(10.0, 0.0),
+            // Shift pressed: wobbles between here and the end are dropped.
+            shift(at(30.0, 40.0)),
+            shift(at(25.0, -30.0)),
+            shift(at(60.0, 0.0)),
+            // Let go: freehand again from the line's end.
+            at(60.0, 50.0),
+        ],
+    ));
+    let ObjectKind::Ink(ink) = &data.kind else {
+        unreachable!()
+    };
+    let points: Vec<_> = ink.points_in(data.bounds).iter().map(|(p, _)| *p).collect();
+    assert_eq!(
+        points,
+        [
+            Point::new(0.0, 0.0),
+            Point::new(60.0, 0.0),
+            Point::new(60.0, 50.0)
+        ]
+    );
+}
+
+#[test]
 fn ink_width_follows_zoom_and_pressure_is_kept() {
     let doc = Document::new();
     let mut tools = Tools::default();

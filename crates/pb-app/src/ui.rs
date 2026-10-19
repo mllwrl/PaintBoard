@@ -3790,6 +3790,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Tab / Enter", "Mind map: add a subtopic / topic"),
             ("F2", "Edit the selected topic"),
             ("P / M / E", "Pen / marker / eraser"),
+            ("Shift (drawing)", "Straight line with the pen or marker"),
         ],
     ),
     (

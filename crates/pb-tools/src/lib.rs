@@ -227,6 +227,9 @@ enum Gesture {
         points: Vec<(Point, f64)>,
         /// Zoom when the stroke started; its width and smoothing follow it.
         zoom: f64,
+        /// While Shift is held, the stroke goes straight from this point (an index into
+        /// `points`) to the pointer.
+        straight_from: Option<usize>,
     },
     Erase {
         last: Point,
@@ -675,6 +678,7 @@ impl Tools {
                     marker,
                     points: vec![(p, pressure)],
                     zoom: pointer.zoom,
+                    straight_from: None,
                 });
                 return true;
             }
@@ -987,12 +991,28 @@ impl Tools {
                 self.selection.set(ids);
                 true
             }
-            Some(Gesture::Ink { marker, points, .. }) => {
+            Some(Gesture::Ink {
+                marker,
+                points,
+                straight_from,
+                ..
+            }) => {
+                let pressure = if *marker { 1.0 } else { pointer.pressure };
+                // Shift draws a straight line from where it was pressed; letting it go
+                // carries on freehand from the line's end.
+                if pointer.shift {
+                    let from = *straight_from.get_or_insert(points.len() - 1);
+                    points.truncate(from + 1);
+                    if pointer.screen_distance(points[from].0) >= ink::MIN_STEP {
+                        points.push((pointer.world, pressure));
+                    }
+                    return true;
+                }
+                *straight_from = None;
                 let last = points.last().map(|(p, _)| *p);
                 if last.is_some_and(|last| pointer.screen_distance(last) < ink::MIN_STEP) {
                     return false;
                 }
-                let pressure = if *marker { 1.0 } else { pointer.pressure };
                 points.push((pointer.world, pressure));
                 true
             }
@@ -1106,6 +1126,7 @@ impl Tools {
                 marker,
                 points,
                 zoom,
+                ..
             } => ink::stroke(points, self.ink_style(*marker), *marker, *zoom, true)
                 .map(|data| Command::Create(vec![data.into()])),
             Gesture::Erase { erased, .. } => {
@@ -1736,6 +1757,7 @@ impl Tools {
                 marker,
                 points,
                 zoom,
+                ..
             }) => ink::stroke(points, self.ink_style(*marker), *marker, *zoom, false)
                 .into_iter()
                 .collect(),

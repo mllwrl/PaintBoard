@@ -4765,13 +4765,19 @@ impl App {
         let style = self.tools.ink_style(marker);
         let diameter = (style.width * self.scale()).round().clamp(4.0, 48.0) as u32;
         let key = (style.color, diameter);
-        if self.ink_cursor.as_ref().is_none_or(|(made, _)| *made != key) {
+        if self
+            .ink_cursor
+            .as_ref()
+            .is_none_or(|(made, _)| *made != key)
+        {
             let (rgba, side) = dot_cursor(style.color, diameter);
             let hot = (side / 2) as u16;
             let source = CustomCursor::from_rgba(rgba, side as u16, side as u16, hot, hot).ok()?;
             self.ink_cursor = Some((key, event_loop.create_custom_cursor(source)));
         }
-        self.ink_cursor.as_ref().map(|(_, cursor)| cursor.clone().into())
+        self.ink_cursor
+            .as_ref()
+            .map(|(_, cursor)| cursor.clone().into())
     }
 
     fn cursor(&mut self, event_loop: &ActiveEventLoop) -> Cursor {

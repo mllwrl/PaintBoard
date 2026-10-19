@@ -744,6 +744,11 @@ const RU: &[(&str, &str)] = &[
     ),
     ("Edit the selected topic", "Править выбранную тему"),
     ("Pen / marker / eraser", "Ручка / маркер / ластик"),
+    ("Shift (drawing)", "Shift (при рисовании)"),
+    (
+        "Straight line with the pen or marker",
+        "Прямая линия ручкой или маркером",
+    ),
     ("Editing", "Правка"),
     ("Enter, double click", "Enter, двойной щелчок"),
     ("Tab / Shift+Tab", "Tab / Shift+Tab"),
