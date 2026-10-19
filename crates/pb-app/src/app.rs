@@ -265,7 +265,7 @@ impl App {
                 let _ = wake.send_event(UserEvent::Saved);
             });
         }
-        Self {
+        let mut app = Self {
             proxy,
             window: None,
             gpu: None,
@@ -292,7 +292,9 @@ impl App {
             sticky_color: STICKY_COLORS[0],
             show_minimap: true,
             filter: pb_core::Filter::default(),
-            me: pb_platform::user_name().into(),
+            me: crate::settings::name()
+                .unwrap_or_else(pb_platform::user_name)
+                .into(),
             last_structure: ToolKind::Frame,
             thread_panel: None,
             show_resolved: false,
@@ -327,7 +329,10 @@ impl App {
             share_error: None,
             next_request: 0,
             shown_title: String::new(),
-        }
+        };
+        // The board was shared when last open: go on sharing it.
+        app.resume_sharing();
+        app
     }
 
     fn scale(&self) -> f64 {
@@ -1166,6 +1171,16 @@ impl App {
                 self.share_error = None;
             }
             Action::CreateShared(server) => self.create_shared(&server),
+            Action::SetName(name) => {
+                let name = name.trim();
+                if !name.is_empty() && name != &*self.me {
+                    self.me = name.into();
+                    crate::settings::save_name(name);
+                    if let Some(sharing) = &mut self.sharing {
+                        sharing.set_name(name);
+                    }
+                }
+            }
             Action::JoinShared(link) => self.join_shared(&link),
             Action::StopSharing => self.stop_sharing(),
             Action::RetrySharing => {
@@ -1179,9 +1194,15 @@ impl App {
             Action::DownloadBoard => self.session.download(&self.document),
             #[cfg(not(target_arch = "wasm32"))]
             Action::DownloadBoard => {}
-            Action::Save => self.session.save(&self.document),
+            Action::Save => {
+                let before = self.board_key();
+                self.session.save(&self.document);
+                self.board_renamed(&before);
+            }
             Action::SaveAs => {
+                let before = self.board_key();
                 self.session.save_as(&self.document);
+                self.board_renamed(&before);
             }
             Action::ZoomIn => self.navigation.zoom_in(&mut self.camera, viewport),
             Action::ZoomOut => self.navigation.zoom_out(&mut self.camera, viewport),
@@ -4123,6 +4144,11 @@ impl App {
         link: crate::sharing::Link,
         view_link: Option<crate::sharing::Link>,
     ) {
+        let view = view_link.as_ref().map(ToString::to_string);
+        crate::settings::save_shared_link(
+            &self.board_key(),
+            Some((&link.to_string(), view.as_deref())),
+        );
         let proxy = self.proxy.clone();
         self.share_error = None;
         self.sharing = Some(crate::sharing::Sharing::start(
@@ -4136,6 +4162,7 @@ impl App {
     }
 
     fn stop_sharing(&mut self) {
+        crate::settings::save_shared_link(&self.board_key(), None);
         self.sharing = None;
         self.document.stop_sharing();
         self.document.set_view_only(false);
@@ -4227,6 +4254,7 @@ impl App {
             (text, s.online)
         });
         let window = self.share_window.then(|| crate::ui::ShareView {
+            name: self.me.to_string(),
             shared,
             server: crate::settings::server(),
             making: self.making_shared,
@@ -4280,6 +4308,7 @@ impl App {
         self.end_style_drag();
         if let Some(document) = self.session.open(path, &self.document) {
             self.replace_document(document);
+            self.resume_sharing();
         }
     }
 
@@ -4288,7 +4317,40 @@ impl App {
         self.end_style_drag();
         if let Some(document) = self.session.new_board(&self.document) {
             self.replace_document(document);
+            // A new untitled board is not the one shared before.
+            crate::settings::save_shared_link("", None);
         }
+    }
+
+    /// The key the open board's links are remembered by: its file, or empty if untitled.
+    fn board_key(&self) -> String {
+        self.session
+            .path()
+            .map_or_else(String::new, |p| p.to_string_lossy().into_owned())
+    }
+
+    /// The board was saved under another name: its links go with it.
+    fn board_renamed(&mut self, before: &str) {
+        let after = self.board_key();
+        if after == before {
+            return;
+        }
+        if let Some((link, view)) = crate::settings::shared_link(before) {
+            crate::settings::save_shared_link(before, None);
+            crate::settings::save_shared_link(&after, Some((&link, view.as_deref())));
+        }
+    }
+
+    /// Shares the open board again if it was shared when last open.
+    fn resume_sharing(&mut self) {
+        let Some((link, view)) = crate::settings::shared_link(&self.board_key()) else {
+            return;
+        };
+        let Some(link) = crate::sharing::Link::parse(&link) else {
+            return;
+        };
+        let view = view.as_deref().and_then(crate::sharing::Link::parse);
+        self.start_sharing(link, view);
     }
 
     /// The pointer for tools, if it is over the canvas.

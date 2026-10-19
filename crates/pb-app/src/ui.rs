@@ -42,6 +42,8 @@ pub enum Action {
     Open,
     /// Opens or closes the sharing window.
     ToggleShare,
+    /// The name to go by on boards (pointers, comments, votes).
+    SetName(String),
     /// Makes a shared board of this one on the server at this address.
     CreateShared(String),
     /// Opens the shared board at this link (in place of this one).
@@ -707,6 +709,8 @@ pub struct Ui {
     /// Server address and shared link typed in the sharing window.
     server_text: String,
     share_link_text: String,
+    /// The name being typed in the sharing window, while it is.
+    share_name: Option<String>,
     repaint_at: Option<Instant>,
 }
 
@@ -744,6 +748,7 @@ impl Ui {
             version_name: String::new(),
             server_text: String::new(),
             share_link_text: String::new(),
+            share_name: None,
             repaint_at: None,
         }
     }
@@ -856,6 +861,7 @@ impl Ui {
         let version_name = &mut self.version_name;
         let server_text = &mut self.server_text;
         let share_link_text = &mut self.share_link_text;
+        let share_name = &mut self.share_name;
         let output = self.ctx.run_pass(input, |ctx| {
             others(ctx, model);
             if let Some(timer) = &model.timer {
@@ -947,7 +953,14 @@ impl Ui {
                 templates_window(ctx, &mut actions);
             }
             if let Some(view) = &model.share_window {
-                share_window(ctx, view, server_text, share_link_text, &mut actions);
+                share_window(
+                    ctx,
+                    view,
+                    server_text,
+                    share_link_text,
+                    share_name,
+                    &mut actions,
+                );
             }
             match &model.thread {
                 Some(thread) => thread_panel(ctx, thread, comment_text, &mut actions),
@@ -1238,6 +1251,8 @@ fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: 
 
 /// What the sharing window shows.
 pub struct ShareView {
+    /// The name the user goes by.
+    pub name: String,
     /// Shared: how it is going, the links and who is there.
     pub shared: Option<SharedView>,
     /// The server address last used.
@@ -1268,6 +1283,7 @@ fn share_window(
     view: &ShareView,
     server_text: &mut String,
     link_text: &mut String,
+    name_text: &mut Option<String>,
     actions: &mut Vec<Action>,
 ) {
     let mut open = true;
@@ -1279,6 +1295,17 @@ fn share_window(
         .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
             ui.set_max_width(460.0);
+            ui.horizontal(|ui| {
+                ui.label(tr("Your name"));
+                let name = name_text.get_or_insert_with(|| view.name.clone());
+                let field = ui.add(egui::TextEdit::singleline(name).desired_width(200.0))
+                    .on_hover_text(tr("Shown to others next to your pointer, comments and votes"));
+                if field.lost_focus() {
+                    actions.push(Action::SetName(name.clone()));
+                    *name_text = None;
+                }
+            });
+            ui.separator();
             if let Some(shared) = &view.shared {
                 ui.horizontal(|ui| {
                     let color = if shared.online {

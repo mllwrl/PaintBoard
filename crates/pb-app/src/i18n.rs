@@ -131,6 +131,11 @@ const RU: &[(&str, &str)] = &[
     ("Open…", "Открыть…"),
     ("Download board", "Скачать доску"),
     ("Share", "Поделиться"),
+    ("Your name", "Ваше имя"),
+    (
+        "Shown to others next to your pointer, comments and votes",
+        "Видно другим рядом с вашим указателем, комментариями и голосами",
+    ),
     (
         "Work on this board together through a server",
         "Работать над доской вместе через сервер",

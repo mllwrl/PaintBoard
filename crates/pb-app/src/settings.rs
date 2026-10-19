@@ -52,6 +52,79 @@ pub fn save_view(scale: f32, high_contrast: bool) {
     }
 }
 
+/// File with the name the user goes by on boards, if they gave one.
+const NAME_FILE: &str = "name.txt";
+
+/// The name the user gave, if any (else the system's is used).
+pub fn name() -> Option<String> {
+    let dir = pb_platform::fs::app_data_dir().ok()?;
+    let text = pb_platform::fs::read(&dir.join(NAME_FILE)).ok()?;
+    let name = String::from_utf8_lossy(&text).trim().to_owned();
+    (!name.is_empty()).then_some(name)
+}
+
+pub fn save_name(name: &str) {
+    let saved = pb_platform::fs::app_data_dir()
+        .and_then(|dir| pb_platform::fs::write_atomic(&dir.join(NAME_FILE), name.as_bytes()));
+    if let Err(err) = saved {
+        log::warn!("name not saved: {err}");
+    }
+}
+
+/// File with the links of shared boards, a line each: the board's file (empty for the
+/// untitled board), its link, and its link to look (empty if unknown), tab-separated.
+/// Kept here rather than in the board, which everyone with a view link gets too.
+const SHARED_FILE: &str = "shared-boards.txt";
+
+fn shared_lines() -> Vec<(String, String, String)> {
+    let text = pb_platform::fs::app_data_dir()
+        .and_then(|dir| pb_platform::fs::read(&dir.join(SHARED_FILE)))
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let board = parts.next()?.to_owned();
+            let link = parts.next().filter(|l| !l.is_empty())?.to_owned();
+            let view = parts.next().unwrap_or_default().to_owned();
+            Some((board, link, view))
+        })
+        .collect()
+}
+
+/// The links the board in file `board` (empty: the untitled board) is shared by: to
+/// edit or look as joined, and to look, if known.
+pub fn shared_link(board: &str) -> Option<(String, Option<String>)> {
+    shared_lines()
+        .into_iter()
+        .find(|(b, ..)| b == board)
+        .map(|(_, link, view)| (link, (!view.is_empty()).then_some(view)))
+}
+
+/// Remembers (or with `None` forgets) the links the board in file `board` is shared by.
+pub fn save_shared_link(board: &str, links: Option<(&str, Option<&str>)>) {
+    let mut lines: Vec<_> = shared_lines()
+        .into_iter()
+        .filter(|(b, ..)| b != board)
+        .collect();
+    if let Some((link, view)) = links {
+        lines.push((
+            board.to_owned(),
+            link.to_owned(),
+            view.unwrap_or_default().to_owned(),
+        ));
+    }
+    let text: String = lines
+        .iter()
+        .map(|(b, l, v)| format!("{b}\t{l}\t{v}\n"))
+        .collect();
+    let saved = pb_platform::fs::app_data_dir()
+        .and_then(|dir| pb_platform::fs::write_atomic(&dir.join(SHARED_FILE), text.as_bytes()));
+    if let Err(err) = saved {
+        log::warn!("shared board not remembered: {err}");
+    }
+}
+
 /// File with the address of the server boards were last shared through.
 const SERVER_FILE: &str = "server.txt";
 

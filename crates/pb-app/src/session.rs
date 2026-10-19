@@ -97,6 +97,11 @@ impl Session {
         (session, doc)
     }
 
+    /// The board's file; `None` for the untitled board.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
     /// File name for the window title.
     pub fn name(&self) -> String {
         self.path.as_deref().and_then(Path::file_stem).map_or_else(

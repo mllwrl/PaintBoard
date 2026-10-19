@@ -300,6 +300,13 @@ impl Sharing {
         self.retry_at = None;
     }
 
+    /// Shows this copy under `name` from now on.
+    pub fn set_name(&mut self, name: &str) {
+        self.mine.name = name.to_owned();
+        self.mine_sent = false;
+        (self.wake)();
+    }
+
     /// Connects again now (the user asked).
     pub fn retry(&mut self) {
         if self.socket.is_none() {
