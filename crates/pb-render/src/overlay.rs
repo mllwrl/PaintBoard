@@ -77,6 +77,7 @@ pub struct TextEditOverlay {
     pub caret_width: f64,
 }
 
+#[derive(Clone, Debug)]
 pub struct OverlayColors {
     pub accent: Color,
     pub handle_fill: Color,

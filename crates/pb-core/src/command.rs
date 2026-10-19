@@ -204,6 +204,8 @@ pub enum Command {
     },
     /// Protects the board from changes, or lifts that. Not undoable.
     SetReadOnly(bool),
+    /// Colors the board's background, or (`None`) gives it the usual one back.
+    SetBackground(Option<crate::Rgba>),
     /// Names the board: shown for a shared board, whose file each person names as they
     /// like. Not undoable.
     SetTitle(Arc<str>),

@@ -46,6 +46,8 @@ mod key {
     /// In `META`: the board is protected from changes.
     pub const READ_ONLY: &str = "readOnly";
     pub const TITLE: &str = "title";
+    /// In `META`: the board's background color (`RRGGBBAA` as a number), if not the usual.
+    pub const BACKGROUND: &str = "background";
     pub const OBJECTS: &str = "objects";
     /// Root map of the board's tags: `RRGGBBAA;name` (hex color) by tag id.
     pub const TAGS: &str = "tags";
@@ -1212,6 +1214,13 @@ impl Document {
                 self.doc.get_map(key::META).insert(key::READ_ONLY, on)?;
                 self.doc.set_next_commit_origin(NOT_UNDONE);
             }
+            Command::SetBackground(color) => {
+                let meta = self.doc.get_map(key::META);
+                match color {
+                    Some(color) => meta.insert(key::BACKGROUND, i64::from(color.0))?,
+                    None => meta.delete(key::BACKGROUND)?,
+                }
+            }
             Command::SetTitle(title) => {
                 self.doc.get_map(key::META).insert(key::TITLE, &*title)?;
                 self.doc.set_next_commit_origin(NOT_UNDONE);
@@ -1340,6 +1349,14 @@ impl Document {
     /// Whether the board is protected from changes (see [`Command::allowed_read_only`]).
     pub fn read_only(&self) -> bool {
         self.read_only || self.view_only
+    }
+
+    /// The board's background color, if it was given one (see [`Command::SetBackground`]).
+    pub fn background(&self) -> Option<Rgba> {
+        match self.doc.get_map(key::META).get(key::BACKGROUND) {
+            Some(ValueOrContainer::Value(LoroValue::I64(v))) => u32::try_from(v).ok().map(Rgba),
+            _ => None,
+        }
     }
 
     /// The board's name, if it was given one (see [`Command::SetTitle`]).
@@ -3621,6 +3638,22 @@ mod tests {
         doc.redo().unwrap();
         let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
         assert!(loaded.is_hidden(c) && !loaded.shows_hidden());
+    }
+
+    #[test]
+    fn the_background_color_is_kept_undone_and_reset() {
+        let mut doc = Document::new();
+        assert_eq!(doc.background(), None);
+        let blue = Rgba::rgb(0xE3, 0xF0, 0xFB);
+        doc.apply(Command::SetBackground(Some(blue))).unwrap();
+        assert_eq!(doc.background(), Some(blue));
+        let copy = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(copy.background(), Some(blue));
+        doc.undo().unwrap();
+        assert_eq!(doc.background(), None);
+        doc.redo().unwrap();
+        doc.apply(Command::SetBackground(None)).unwrap();
+        assert_eq!(doc.background(), None);
     }
 
     #[test]

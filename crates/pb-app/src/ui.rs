@@ -133,6 +133,8 @@ pub enum Action {
     ToggleClean,
     /// The window takes the whole screen or goes back (F11).
     ToggleFullscreen,
+    /// Colors the board's background; `None` is the usual color.
+    SetBackground(Option<Rgba>),
     /// Puts the selected connector back on its automatic path.
     ResetBends,
     /// Adds a row (`rows`) or column to the selected table: after the selected cells
@@ -377,6 +379,8 @@ pub struct Model<'a> {
     pub panels: Panels,
     /// The window fills the screen.
     pub fullscreen: bool,
+    /// The board's own background color, if it has one.
+    pub background: Option<Rgba>,
     pub board: &'a str,
     /// Running in the browser.
     pub web: bool,
@@ -738,6 +742,18 @@ const PALETTE: [Rgba; 16] = [
 ];
 
 /// Sticky note colors, light enough for dark text. The first is the default.
+/// Background colors a board can have, besides the usual one.
+const BOARD_COLORS: [Rgba; 8] = [
+    Rgba::rgb(0xFF, 0xFF, 0xFF),
+    Rgba::rgb(0xFB, 0xF6, 0xE9),
+    Rgba::rgb(0xE9, 0xEC, 0xEF),
+    Rgba::rgb(0xE3, 0xF0, 0xFB),
+    Rgba::rgb(0xE6, 0xF4, 0xE4),
+    Rgba::rgb(0xFF, 0xF6, 0xCC),
+    Rgba::rgb(0xFC, 0xE8, 0xEC),
+    Rgba::rgb(0xEE, 0xE8, 0xF8),
+];
+
 pub const STICKY_COLORS: [Rgba; 8] = [
     Rgba::rgb(0xFF, 0xF1, 0x76),
     Rgba::rgb(0xFF, 0xD0, 0x80),
@@ -2171,6 +2187,18 @@ fn view_controls(ctx: &Context, model: &Model, actions: &mut Vec<Action>) -> Rec
                         {
                             actions.push(Action::ToggleClean);
                             ui.close();
+                        }
+                        ui.separator();
+                        ui.label(tr("Board color"));
+                        if ui
+                            .add(Button::selectable(model.background.is_none(), tr("Usual")))
+                            .clicked()
+                        {
+                            actions.push(Action::SetBackground(None));
+                        }
+                        let current = model.background.unwrap_or(Rgba(0));
+                        if let Some(color) = color_grid(ui, &BOARD_COLORS, current, 4) {
+                            actions.push(Action::SetBackground(Some(color)));
                         }
                         ui.separator();
                         ui.label(tr("Panels"));

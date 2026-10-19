@@ -545,6 +545,7 @@ impl App {
                 ..Overlay::default()
             };
         }
+        let theme = self.theme.clone().on_board(board.background());
         build_scene(
             &mut self.scene,
             &View {
@@ -552,7 +553,7 @@ impl App {
                 viewport: Size::new(size.width, size.height),
                 scale,
                 grid: self.grid,
-                theme: &self.theme,
+                theme: &theme,
                 document: board,
                 assets: board.assets(),
                 overrides: &overrides,
@@ -598,6 +599,7 @@ impl App {
         let (share_window, share_badge) = self.share_model();
         let (cursors, their_selections) = self.others_on_screen();
         let model = Model {
+            background: self.document.background(),
             panels: self.panels,
             fullscreen: self
                 .window
@@ -729,7 +731,12 @@ impl App {
         };
         if let Some(gpu) = &mut self.gpu {
             let ui = &mut self.ui;
-            gpu.render(&self.scene, self.theme.background, |target| {
+            let background = self
+                .theme
+                .clone()
+                .on_board(self.document.background())
+                .background;
+            gpu.render(&self.scene, background, |target| {
                 if let Some(ui) = ui {
                     ui.paint(target);
                 }
@@ -1308,6 +1315,11 @@ impl App {
                 crate::settings::save_panels(self.panels);
             }
             Action::ToggleFullscreen => self.toggle_fullscreen(),
+            Action::SetBackground(color) => {
+                if self.document.background() != color {
+                    self.apply(Command::SetBackground(color));
+                }
+            }
             Action::AddTableLine { rows, after } => {
                 if let Some(command) = self.tools.add_table_line(&self.document, rows, after) {
                     self.apply(command);
@@ -2606,7 +2618,7 @@ impl App {
             return;
         };
         // Pictures are always light, like paper.
-        let light = Theme::light();
+        let light = Theme::light().on_board(self.document.background());
         #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))]
         let mut painters = export::Painters {
             gpu,
@@ -2634,7 +2646,7 @@ impl App {
         let (Some((job, _)), Some(gpu)) = (self.making.as_mut(), self.gpu.as_mut()) else {
             return false;
         };
-        let light = Theme::light();
+        let light = Theme::light().on_board(self.document.background());
         let mut painters = export::Painters {
             gpu,
             text: &mut self.text,

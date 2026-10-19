@@ -30,6 +30,7 @@ impl GridStyle {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct GridColors {
     pub dot: Color,
     pub line: Color,

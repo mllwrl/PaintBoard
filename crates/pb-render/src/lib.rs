@@ -24,6 +24,7 @@ use vello::Scene;
 use vello::kurbo::{Affine, Size};
 use vello::peniko::Color;
 
+#[derive(Clone, Debug)]
 pub struct Theme {
     /// Colors picked for a light board are turned around where they would not show
     /// (see [`for_dark`]).
@@ -37,6 +38,23 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// The theme on a board with its own background `color`: as it is on a light theme;
+    /// on a dark one, a dark shade of it.
+    pub fn on_board(mut self, color: Option<pb_core::Rgba>) -> Self {
+        if let Some(color) = color {
+            let [r, g, b, _] = color.to_bytes();
+            let picked = Color::from_rgb8(r, g, b);
+            self.background = if self.dark {
+                let [r0, g0, b0, _] = self.background.to_rgba8().to_u8_array();
+                let mix = |a: u8, b: u8| ((u16::from(a) * 4 + u16::from(b)) / 5) as u8;
+                Color::from_rgb8(mix(r0, r), mix(g0, g), mix(b0, b))
+            } else {
+                picked
+            };
+        }
+        self
+    }
+
     pub fn light() -> Self {
         Self {
             dark: false,
