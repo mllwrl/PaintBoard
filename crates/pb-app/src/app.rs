@@ -209,6 +209,9 @@ pub struct App {
     pen: crate::settings::PenSettings,
     /// Fingers that started on a panel while fingers move the board: they work the panel.
     ui_touches: Vec<u64>,
+    /// In the browser, which hands pens over as a mouse: whether the pen touches the
+    /// screen, and where it was last.
+    web_pen: (bool, winit::dpi::PhysicalPosition<f64>),
     text: TextRenderer,
     images: ImageCache,
     /// Pages of books (PDFs shown a page at a time) rendered and on their way.
@@ -341,6 +344,8 @@ pub struct App {
 
 impl App {
     pub fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
+        // The browser's pens: told apart from a mouse.
+        pb_platform::pen::listen();
         // A board file named on the command line (a double click on it) opens instead.
         #[cfg(not(target_arch = "wasm32"))]
         let file = std::env::args_os().nth(1).map(PathBuf::from);
@@ -413,6 +418,7 @@ impl App {
             stylus_clock: Instant::now(),
             pen: crate::settings::pen(),
             ui_touches: Vec::new(),
+            web_pen: Default::default(),
             text: TextRenderer::new(),
             images,
             books: Books::default(),
@@ -6582,6 +6588,10 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Touch(touch) => self.on_touch(event_loop, touch),
             // The mouse is back: a pen's eraser end no longer stands in for the tool.
             WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. } => {
+                if let Some((id, pen)) = pb_platform::pen::current() {
+                    self.pen_as_touch(event_loop, &event, id, pen);
+                    return;
+                }
                 if self.tools.set_pen_eraser(false) {
                     self.request_redraw();
                 }
@@ -6593,6 +6603,42 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 impl App {
+    /// The browser hands pens over as a mouse: its events for pen `id` go the way of a
+    /// pen's touches on Windows.
+    fn pen_as_touch(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        event: &WindowEvent,
+        id: u64,
+        pen: pb_platform::pen::PenInfo,
+    ) {
+        let device_id = match *event {
+            WindowEvent::CursorMoved {
+                device_id,
+                position,
+            } => {
+                self.web_pen.1 = position;
+                device_id
+            }
+            WindowEvent::MouseInput { device_id, .. } => device_id,
+            _ => return,
+        };
+        let phase = match (self.web_pen.0, pen.contact) {
+            (false, true) => TouchPhase::Started,
+            (true, false) => TouchPhase::Ended,
+            _ => TouchPhase::Moved,
+        };
+        self.web_pen.0 = pen.contact;
+        let touch = Touch {
+            device_id,
+            phase,
+            location: self.web_pen.1,
+            force: Some(winit::event::Force::Normalized(pen.pressure)),
+            id,
+        };
+        self.on_touch(event_loop, touch);
+    }
+
     /// Windows delivers pens and touch screens as touch events only: winit takes their
     /// pointer messages, so Windows makes no mouse messages from them. [`crate::stylus`]
     /// says what each means: a pen drives the canvas like the left mouse button, with its

@@ -94,6 +94,11 @@ web-sys = { version = "0.3", features = [
     "FileList",
     "HtmlAnchorElement",
     "HtmlInputElement",
+    # Telling pens (and their eraser and side button) from a mouse.
+    "Event",
+    "MouseEvent",
+    "PointerEvent",
+    "UiEvent",
     "Navigator",
     "StorageManager",
     "Url",
