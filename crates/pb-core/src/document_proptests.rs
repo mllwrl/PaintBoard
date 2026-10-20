@@ -14,7 +14,22 @@ use crate::{
 /// An edit, with objects named by their place in the current lists (wrapped around).
 #[derive(Clone, Debug)]
 enum Op {
-    Create { x: i16, y: i16, w: u8, h: u8 },
+    Create {
+        x: i16,
+        y: i16,
+        w: u8,
+        h: u8,
+    },
+    /// Several in one command, e.g. pasted.
+    CreateMany(u8, i16),
+    /// A pen stroke.
+    Ink(i16, i16, u8),
+    DeleteMany(usize, usize, usize),
+    /// Adds (or reorders) layer `n` at an order around the base layer's.
+    DefineLayer(u8, i8),
+    /// New objects go to layer `n` (0 is the base layer).
+    ActiveLayer(u8),
+    SetLayer(usize, u8),
     Connect(usize, usize),
     Move(usize, i8, i8),
     Fill(usize, u8),
@@ -37,7 +52,14 @@ fn op() -> impl Strategy<Value = Op> {
         3 => (any::<usize>(), any::<i8>(), any::<i8>()).prop_map(|(i, x, y)| Op::Move(i, x, y)),
         1 => (any::<usize>(), any::<u8>()).prop_map(|(i, c)| Op::Fill(i, c)),
         1 => (any::<usize>(), "[a-z ]{0,8}").prop_map(|(i, t)| Op::Text(i, t)),
-        1 => any::<usize>().prop_map(Op::Delete),
+        2 => any::<usize>().prop_map(Op::Delete),
+        1 => (1..5u8, any::<i16>()).prop_map(|(n, x)| Op::CreateMany(n, x / 64)),
+        3 => (any::<i16>(), any::<i16>(), 2..20u8).prop_map(|(x, y, n)| Op::Ink(x / 64, y / 64, n)),
+        1 => (any::<usize>(), any::<usize>(), any::<usize>())
+            .prop_map(|(a, b, c)| Op::DeleteMany(a, b, c)),
+        1 => (1..3u8, any::<i8>()).prop_map(|(n, order)| Op::DefineLayer(n, order)),
+        1 => (0..3u8).prop_map(Op::ActiveLayer),
+        1 => (any::<usize>(), 0..3u8).prop_map(|(i, n)| Op::SetLayer(i, n)),
         1 => (any::<usize>(), any::<usize>()).prop_map(|(a, b)| Op::Group(a, b)),
         1 => any::<usize>().prop_map(Op::Ungroup),
         1 => (any::<usize>(), any::<bool>()).prop_map(|(i, on)| Op::Lock(i, on)),
@@ -83,6 +105,14 @@ fn connector(a: ObjectId, b: ObjectId) -> ObjectData {
     }
 }
 
+/// Layer `n`'s id; 0 is the base layer.
+fn layer(n: u8) -> std::sync::Arc<str> {
+    match n {
+        0 => crate::Layer::BASE.into(),
+        n => format!("layer {n}").into(),
+    }
+}
+
 /// Applies `op`; commands that do not apply (a locked object, nothing there) are fine.
 fn apply(doc: &mut Document, op: &Op) {
     let object = |i: usize| {
@@ -103,6 +133,48 @@ fn apply(doc: &mut Document, op: &Op) {
             )
             .into(),
         ])),
+        Op::CreateMany(n, x) => Some(Command::Create(
+            (0..*n)
+                .map(|k| rect(f64::from(*x) * 10.0 + f64::from(k) * 15.0, 0.0, 10.0, 10.0).into())
+                .collect(),
+        )),
+        Op::Ink(x, y, n) => {
+            let points: Vec<_> = (0..*n)
+                .map(|k| {
+                    let k = f64::from(k);
+                    let at = kurbo::Point::new(
+                        f64::from(*x) * 10.0 + k * 4.0,
+                        f64::from(*y) * 10.0 + (k * 0.7).sin() * 6.0,
+                    );
+                    (at, 0.5)
+                })
+                .collect();
+            crate::Ink::from_world(&points).map(|(ink, bounds)| {
+                let mut data = rect(0.0, 0.0, 0.0, 0.0);
+                data.kind = crate::ObjectKind::Ink(ink);
+                data.bounds = bounds;
+                Command::Create(vec![data.into()])
+            })
+        }
+        Op::DeleteMany(a, b, c) => {
+            let ids: Vec<_> = [a, b, c].into_iter().filter_map(|&i| object(i)).collect();
+            (!ids.is_empty()).then_some(Command::Delete(ids))
+        }
+        Op::DefineLayer(n, order) => Some(Command::DefineLayer(crate::Layer {
+            id: layer(*n),
+            name: layer(*n),
+            order: f64::from(*order) / 16.0,
+            visible: true,
+            locked: false,
+        })),
+        Op::ActiveLayer(n) => {
+            doc.set_active_layer(layer(*n));
+            None
+        }
+        Op::SetLayer(i, n) => root(*i).map(|id| Command::SetLayer {
+            ids: vec![id],
+            layer: layer(*n),
+        }),
         Op::Connect(a, b) => object(*a)
             .zip(object(*b))
             .map(|(a, b)| Command::Create(vec![connector(a, b).into()])),
@@ -160,8 +232,18 @@ fn apply(doc: &mut Document, op: &Op) {
     }
 }
 
-/// What a board shows: its objects, how they stack and group, and what is found where.
-fn view(doc: &Document) -> (Vec<crate::Object>, Vec<ObjectId>, Vec<Vec<ObjectId>>) {
+/// What a board shows: its objects, how they stack, group and layer, and what is found
+/// where.
+#[allow(clippy::type_complexity)]
+fn view(
+    doc: &Document,
+) -> (
+    Vec<crate::Object>,
+    Vec<ObjectId>,
+    Vec<Vec<ObjectId>>,
+    Vec<(Option<usize>, std::sync::Arc<str>)>,
+    Vec<crate::Group>,
+) {
     let areas = [
         kurbo::Rect::new(-1e6, -1e6, 1e6, 1e6),
         kurbo::Rect::new(-500.0, -500.0, 0.0, 0.0),
@@ -172,7 +254,33 @@ fn view(doc: &Document) -> (Vec<crate::Object>, Vec<ObjectId>, Vec<Vec<ObjectId>
         .iter()
         .map(|&area| doc.objects_in(area).iter().map(|o| o.id).collect())
         .collect();
-    (doc.objects().to_vec(), doc.roots().to_vec(), found)
+    let placed = doc
+        .objects()
+        .iter()
+        .map(|o| (doc.paint_order(o.id), doc.layer_of(o.id).id.clone()))
+        .collect();
+    let groups = doc
+        .roots()
+        .iter()
+        .filter_map(|&id| doc.group(id).cloned())
+        .collect();
+    assert_eq!(
+        doc.index.len(),
+        doc.objects().len(),
+        "paint order of gone objects"
+    );
+    assert_eq!(
+        doc.spatial.size(),
+        doc.objects().len(),
+        "spatial index size"
+    );
+    (
+        doc.objects().to_vec(),
+        doc.roots().to_vec(),
+        found,
+        placed,
+        groups,
+    )
 }
 
 fn fresh(doc: &Document) -> Document {

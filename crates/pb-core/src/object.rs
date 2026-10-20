@@ -27,6 +27,14 @@ impl ObjectId {
         }
     }
 
+    /// The tree node that first held the object.
+    pub(crate) fn first_node(self) -> TreeID {
+        TreeID {
+            peer: self.peer,
+            counter: self.counter,
+        }
+    }
+
     /// Reads the text form, `counter@peer`.
     pub fn parse(s: &str) -> Option<Self> {
         let (counter, peer) = s.split_once('@')?;

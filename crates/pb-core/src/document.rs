@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use kurbo::{Point, Rect, Vec2};
 use loro::{
-    ExportMode, LoroDoc, LoroError, LoroMap, LoroTree, LoroValue, TreeID, TreeParentId,
-    UndoManager, ValueOrContainer,
+    ExportMode, LoroDoc, LoroError, LoroMap, LoroTree, LoroValue, TreeExternalDiff, TreeID,
+    TreeParentId, UndoManager, ValueOrContainer,
 };
 #[cfg(test)]
 use pb_geom::ShapeKind;
@@ -232,8 +232,8 @@ pub struct Document {
     doc: LoroDoc,
     tree: LoroTree,
     undo: UndoManager,
-    /// Cached objects in paint order (back to front, groups flattened), rebuilt after every
-    /// change.
+    /// Cached objects in paint order (back to front, groups flattened), brought up to date
+    /// after every change (see [`Self::refresh`]).
     objects: Vec<Object>,
     index: HashMap<ObjectId, usize>,
     groups: HashMap<ObjectId, Group>,
@@ -244,7 +244,7 @@ pub struct Document {
     revision: u64,
     /// Connectors' resolved ends and paths, by connector id; rebuilt with `objects`.
     connectors: HashMap<ObjectId, Resolved>,
-    /// Bounds of `objects` for finding those in an area; rebuilt with `objects`.
+    /// Bounds of `objects` for finding those in an area; kept with `objects`.
     spatial: RTree<Placed>,
     /// What each tree node held when last read, so a refresh reads only nodes that changed.
     node_cache: HashMap<TreeID, NodeData>,
@@ -287,14 +287,17 @@ pub struct Document {
     versions: Vec<crate::Version>,
     /// Local changes waiting to be sent while the board is shared.
     outbox: Option<sync::Outbox>,
+    /// How many times the cache was rebuilt rather than updated in place.
+    #[cfg(test)]
+    full_refreshes: usize,
 }
 
-/// An object in the spatial index: its world bounds (outline included) and its place in
-/// paint order.
+/// An object in the spatial index: its world bounds (outline included) and its id. Ids,
+/// not places in paint order, so objects can come and go without touching the others.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Placed {
     bounds: AABB<[f64; 2]>,
-    slot: usize,
+    id: ObjectId,
 }
 
 impl RTreeObject for Placed {
@@ -309,11 +312,12 @@ fn envelope(r: Rect) -> AABB<[f64; 2]> {
     AABB::from_corners([r.x0, r.y0], [r.x1, r.y1])
 }
 
-fn placed(slot: usize, data: &ObjectData) -> Placed {
+fn placed(object: &Object) -> Placed {
+    let data = &object.data;
     let pad = data.style.stroke_width / 2.0;
     Placed {
         bounds: envelope(data.frame().aabb().inflate(pad, pad)),
-        slot,
+        id: object.id,
     }
 }
 
@@ -355,8 +359,13 @@ impl SnapshotSource {
 #[derive(Debug, Default)]
 struct Changes {
     nodes: HashSet<TreeID>,
-    /// Nodes were created, moved or deleted: the tree is walked again.
-    structure: bool,
+    /// Nodes created (or brought back) in order, with their parent and their place among
+    /// its children right then.
+    created: Vec<(TreeID, TreeParentId, usize)>,
+    /// Nodes deleted.
+    deleted: Vec<TreeID>,
+    /// Nodes moved: the tree is walked again.
+    moved: bool,
     /// Something changed that cannot be tied to nodes: read everything again.
     all: bool,
 }
@@ -374,8 +383,14 @@ impl Changes {
             if let Diff::Tree(tree) = &diff.diff {
                 for item in &tree.diff {
                     self.nodes.insert(item.target);
+                    match item.action {
+                        TreeExternalDiff::Create { parent, index, .. } => {
+                            self.created.push((item.target, parent, index));
+                        }
+                        TreeExternalDiff::Delete { .. } => self.deleted.push(item.target),
+                        TreeExternalDiff::Move { .. } => self.moved = true,
+                    }
                 }
-                self.structure = true;
                 found = true;
             }
             // The board-wide maps (tags, comments, layers, …) are read again on every
@@ -476,6 +491,8 @@ impl Document {
             talktracks: Vec::new(),
             versions: Vec::new(),
             outbox: None,
+            #[cfg(test)]
+            full_refreshes: 0,
         };
         document.refresh();
         document
@@ -744,21 +761,31 @@ impl Document {
         match command {
             Command::Create(contents) => {
                 let mut made = Vec::new();
+                let mut groups = Vec::new();
                 for content in &contents {
-                    applied
-                        .created
-                        .push(self.create(TreeParentId::Root, content, &mut made)?);
+                    let id = self.create(TreeParentId::Root, content, &mut made)?;
+                    if matches!(content, Content::Group(_)) {
+                        groups.push(id.first_node());
+                    }
+                    applied.created.push(id);
                 }
                 self.attach_copies(&made)?;
-                self.prune_empty_groups(TreeParentId::Root)?;
+                self.prune_empty_groups_in(&groups)?;
             }
             Command::Delete(ids) => {
                 let outermost = self.outermost(&ids)?;
                 self.remember_connector_ends(&outermost)?;
+                // Groups that may be left empty.
+                let groups: Vec<TreeID> = outermost
+                    .iter()
+                    .map(|&id| self.top_level(id))
+                    .filter(|unit| self.groups.contains_key(unit))
+                    .map(|unit| self.nodes[&unit])
+                    .collect();
                 for id in outermost {
                     self.tree.delete(self.nodes[&id])?;
                 }
-                self.prune_empty_groups(TreeParentId::Root)?;
+                self.prune_empty_groups_in(&groups)?;
             }
             Command::Move { ids, delta } => {
                 let moves: Vec<_> = ids.into_iter().map(|id| (id, delta)).collect();
@@ -1645,6 +1672,19 @@ impl Document {
             .collect())
     }
 
+    /// Deletes groups left without children among the top-level groups `units` (each
+    /// with what it holds), not looking through the whole board.
+    fn prune_empty_groups_in(&self, units: &[TreeID]) -> Result<()> {
+        for &node in units {
+            if !self.tree.is_node_deleted(&node)?
+                && !self.prune_empty_groups(TreeParentId::Node(node))?
+            {
+                self.tree.delete(node)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Deletes groups left without children. Returns whether `parent` still has children.
     fn prune_empty_groups(&self, parent: TreeParentId) -> Result<bool> {
         let mut any = false;
@@ -1659,9 +1699,8 @@ impl Document {
         Ok(any)
     }
 
-    /// Rebuilds the cache from the CRDT.
-    ///
-    /// TODO: update incrementally from Loro diff events once boards get large.
+    /// Brings the cache up to date with the CRDT: in place for the common edits (see
+    /// [`Self::update_in_place`]), else rebuilt, reading again only the nodes that changed.
     fn refresh(&mut self) {
         let changes = self
             .changes
@@ -1671,9 +1710,13 @@ impl Document {
                 all: true,
                 ..Changes::default()
             });
-        if !changes.all && !changes.structure && self.update_in_place(&changes.nodes) {
+        if !changes.all && !changes.moved && self.update_in_place(&changes) {
             self.revision += 1;
             return;
+        }
+        #[cfg(test)]
+        {
+            self.full_refreshes += 1;
         }
         self.objects.clear();
         self.unit_layers.clear();
@@ -1704,36 +1747,69 @@ impl Document {
         let placed_objects = self
             .objects
             .iter()
-            .enumerate()
-            .filter(|(_, o)| !matches!(o.data.kind, ObjectKind::Connector(_)))
-            .map(|(i, o)| placed(i, &o.data))
+            .filter(|o| !matches!(o.data.kind, ObjectKind::Connector(_)))
+            .map(placed)
             .collect();
         self.spatial = RTree::bulk_load(placed_objects);
         self.resolve_connectors();
-        for (i, o) in self.objects.iter().enumerate() {
+        for o in &self.objects {
             if matches!(o.data.kind, ObjectKind::Connector(_)) {
-                self.spatial.insert(placed(i, &o.data));
+                self.spatial.insert(placed(o));
             }
         }
         self.revision += 1;
     }
 
-    /// The quick refresh after edits that only change objects (moved, restyled, retyped),
-    /// not the tree: those objects are read again and updated where they are, in the
-    /// list and the spatial index. Returns false, having changed nothing that a full
-    /// refresh would not redo, if the edit is more than that (groups, layers, new nodes).
-    fn update_in_place(&mut self, nodes: &HashSet<TreeID>) -> bool {
+    /// The quick refresh after the common edits: objects changed (moved, restyled,
+    /// retyped), top-level objects created or deleted, as when writing by hand. Changed
+    /// objects are read again and updated where they are; deleted ones leave the list, the
+    /// roots and the spatial index; new ones go in at their place in paint order; then
+    /// connectors are routed again. Returns false if the edit is more than that (groups,
+    /// layers, moves in the tree, many objects put in among others); what it changed by
+    /// then, a full refresh redoes.
+    fn update_in_place(&mut self, changes: &Changes) -> bool {
         let layers = read_layers(&self.doc.get_map(key::LAYERS));
         if layers != self.layers {
             return false;
         }
-        let mut updates = Vec::with_capacity(nodes.len());
-        for &node in nodes {
-            let Some(NodeData::Object { id, layer, .. }) = self.node_cache.get(&node) else {
+        let created: HashSet<TreeID> = changes.created.iter().map(|c| c.0).collect();
+        let mut removed = Vec::new();
+        let mut added = Vec::new();
+        let mut updates = Vec::with_capacity(changes.nodes.len());
+        for &node in &changes.nodes {
+            let Ok(deleted) = self.tree.is_node_deleted(&node) else {
+                return false;
+            };
+            let known = self.node_cache.get(&node);
+            if deleted {
+                match known {
+                    // Made and deleted since the last refresh: never shown.
+                    None => {}
+                    Some(NodeData::Object { id, .. })
+                        if self.nodes.get(id) == Some(&node)
+                            && self
+                                .index
+                                .get(id)
+                                .is_some_and(|&i| self.objects[i].parent.is_none()) =>
+                    {
+                        removed.push(*id);
+                    }
+                    Some(_) => return false,
+                }
+                continue;
+            }
+            let Some(NodeData::Object { id, layer, .. }) = known else {
+                if known.is_none() && created.contains(&node) {
+                    added.push(node);
+                    continue;
+                }
                 return false;
             };
             let (id, layer) = (*id, layer.clone());
-            if self.nodes.get(&id) != Some(&node) || !self.index.contains_key(&id) {
+            if created.contains(&node)
+                || self.nodes.get(&id) != Some(&node)
+                || !self.index.contains_key(&id)
+            {
                 return false;
             }
             self.node_cache.remove(&node);
@@ -1752,25 +1828,175 @@ impl Document {
             }
             updates.push((id, data, locked, hidden));
         }
+        // New nodes: top-level objects only.
+        let mut new_ids = HashSet::new();
+        let mut adds = Vec::with_capacity(added.len());
+        for &node in &added {
+            if self.tree.parent(node) != Some(TreeParentId::Root) {
+                return false;
+            }
+            let Some(NodeData::Object {
+                id,
+                data,
+                locked,
+                hidden,
+                layer,
+            }) = self.node_data(node)
+            else {
+                return false;
+            };
+            // Two replicas undoing the same deletion can each restore the object.
+            if self.nodes.contains_key(&id) || !new_ids.insert(id) {
+                return false;
+            }
+            adds.push((node, id, data, locked, hidden, layer));
+        }
+        // Where the new nodes are among the top level, in tree order, each with whether
+        // only new nodes follow it: appended one after another (the usual case, told from
+        // the events alone) or found in the list of all.
+        let appended = removed.is_empty()
+            && changes.deleted.is_empty()
+            && changes.created.len() == adds.len()
+            && changes.created.first().is_some_and(|&(_, _, first)| {
+                changes
+                    .created
+                    .iter()
+                    .enumerate()
+                    .all(|(k, &(_, parent, index))| {
+                        parent == TreeParentId::Root && index == first + k
+                    })
+                    && self.tree.children_num(TreeParentId::Root) == Some(first + adds.len())
+            });
+        let mut places: Vec<(usize, bool)> = Vec::with_capacity(adds.len());
+        let mut siblings = Vec::new();
+        if appended {
+            let order: HashMap<TreeID, usize> = changes
+                .created
+                .iter()
+                .enumerate()
+                .map(|(k, c)| (c.0, k))
+                .collect();
+            adds.sort_by_key(|a| order[&a.0]);
+            places.extend((0..adds.len()).map(|k| (k, true)));
+        } else if !adds.is_empty() {
+            siblings = self.tree.children(TreeParentId::Root).unwrap_or_default();
+            let wanted: HashMap<TreeID, usize> =
+                adds.iter().enumerate().map(|(k, a)| (a.0, k)).collect();
+            let mut at = vec![usize::MAX; adds.len()];
+            for (p, node) in siblings.iter().enumerate() {
+                if let Some(&k) = wanted.get(node) {
+                    at[k] = p;
+                }
+            }
+            if at.contains(&usize::MAX) {
+                return false;
+            }
+            let mut order: Vec<usize> = (0..adds.len()).collect();
+            order.sort_by_key(|&k| at[k]);
+            let mut sorted: Vec<Option<_>> = adds.into_iter().map(Some).collect();
+            adds = order.iter().filter_map(|&k| sorted[k].take()).collect();
+            let (n, k) = (siblings.len(), order.len());
+            places.extend(
+                order
+                    .iter()
+                    .enumerate()
+                    .map(|(j, &o)| (at[o], at[o] + (k - j) == n)),
+            );
+            // Each one put in among others moves those after it.
+            if places.iter().filter(|p| !p.1).count() > 16 {
+                return false;
+            }
+        }
         let mut index_ok = true;
+        if !removed.is_empty() {
+            let mut slots = Vec::with_capacity(removed.len());
+            for id in &removed {
+                let slot = self.index.remove(id).expect("checked above");
+                slots.push(slot);
+                index_ok &= self.spatial.remove(&placed(&self.objects[slot])).is_some();
+                if let Some(node) = self.nodes.remove(id) {
+                    self.node_cache.remove(&node);
+                }
+                self.unit_layers.remove(id);
+            }
+            slots.sort_unstable();
+            let mut i = 0;
+            self.objects.retain(|_| {
+                let keep = slots.binary_search(&i).is_err();
+                i += 1;
+                keep
+            });
+            self.reindex_from(slots[0]);
+            let gone: HashSet<ObjectId> = removed.iter().copied().collect();
+            if gone.len() <= 8 {
+                for id in &removed {
+                    if let Some(p) = self.roots.iter().rposition(|r| r == id) {
+                        self.roots.remove(p);
+                    }
+                }
+            } else {
+                self.roots.retain(|r| !gone.contains(r));
+            }
+        }
         for (id, data, locked, hidden) in updates {
             let slot = self.index[&id];
+            index_ok &= self.spatial.remove(&placed(&self.objects[slot])).is_some();
             let object = &mut self.objects[slot];
-            index_ok &= self.spatial.remove(&placed(slot, &object.data)).is_some();
             object.data = *data;
             object.locked = locked;
             object.hidden = hidden;
-            self.spatial.insert(placed(slot, &object.data));
+            self.spatial.insert(placed(&self.objects[slot]));
+        }
+        for ((node, id, data, locked, hidden, layer), (at, at_end)) in adds.into_iter().zip(places)
+        {
+            let layered = !self.unit_layers.is_empty() || layer.is_some();
+            let (slot, root) = if at_end && (!layered || self.on_top(layer.as_deref())) {
+                (self.objects.len(), self.roots.len())
+            } else if !layered {
+                // Right after the nearest unit before it in the tree.
+                let before = siblings[..at].iter().rev().find_map(|&n| {
+                    let unit = match self.node_cache.get(&n)? {
+                        NodeData::Group { id, .. } | NodeData::Object { id, .. } => *id,
+                        NodeData::Unknown { .. } => return None,
+                    };
+                    let shown = self.groups.contains_key(&unit)
+                        || self
+                            .index
+                            .get(&unit)
+                            .is_some_and(|&i| self.objects[i].parent.is_none());
+                    (self.nodes.get(&unit) == Some(&n) && shown).then_some(unit)
+                });
+                match before {
+                    None => (0, 0),
+                    Some(unit) => {
+                        let Some(root) = self.roots.iter().rposition(|&r| r == unit) else {
+                            return false;
+                        };
+                        (self.paint_rank(unit) + 1, root + 1)
+                    }
+                }
+            } else {
+                return false;
+            };
+            let object = Object {
+                id,
+                data: *data,
+                parent: None,
+                locked,
+                hidden,
+            };
+            self.spatial.insert(placed(&object));
+            self.objects.insert(slot, object);
+            self.reindex_from(slot);
+            self.roots.insert(root, id);
+            self.nodes.insert(id, node);
+            if let Some(layer) = layer {
+                self.unit_layers.insert(id, layer);
+            }
         }
         if !index_ok {
             // Should not happen; rebuild the index rather than keep a stale entry.
-            let all = self
-                .objects
-                .iter()
-                .enumerate()
-                .map(|(i, o)| placed(i, &o.data))
-                .collect();
-            self.spatial = RTree::bulk_load(all);
+            self.spatial = RTree::bulk_load(self.objects.iter().map(placed).collect());
         }
         self.layers = layers;
         self.talktracks = read_talktracks(&self.doc.get_map(key::TALKTRACKS));
@@ -1792,13 +2018,38 @@ impl Document {
             .map(|(i, _)| i)
             .collect();
         for &i in &connectors {
-            self.spatial.remove(&placed(i, &self.objects[i].data));
+            self.spatial.remove(&placed(&self.objects[i]));
         }
         self.resolve_connectors();
         for &i in &connectors {
-            self.spatial.insert(placed(i, &self.objects[i].data));
+            self.spatial.insert(placed(&self.objects[i]));
         }
         true
+    }
+
+    /// Whether a new top-level unit on `layer` stacks above every unit there is.
+    fn on_top(&self, layer: Option<&str>) -> bool {
+        let rank = |layer: Option<&str>| {
+            let base = || self.layers.iter().position(|l| l.is_base());
+            layer
+                .and_then(|l| self.layers.iter().position(|x| &*x.id == l))
+                .or_else(base)
+        };
+        let Some(last) = self.roots.last() else {
+            return true;
+        };
+        rank(layer) >= rank(self.unit_layers.get(last).map(|l| &**l))
+    }
+
+    /// Points `index` at the objects from `slot` on, after objects came or went there.
+    fn reindex_from(&mut self, slot: usize) {
+        for (i, o) in self.objects.iter().enumerate().skip(slot) {
+            if let Some(at) = self.index.get_mut(&o.id) {
+                *at = i;
+            } else {
+                self.index.insert(o.id, i);
+            }
+        }
     }
 
     /// Puts the roots and objects in layer order, keeping the order within each layer.
@@ -1919,7 +2170,7 @@ impl Document {
         let mut slots: Vec<usize> = self
             .spatial
             .locate_in_envelope_intersecting(&envelope(area))
-            .map(|p| p.slot)
+            .filter_map(|p| self.index.get(&p.id).copied())
             .collect();
         slots.sort_unstable();
         slots.into_iter().map(|i| &self.objects[i]).collect()
@@ -4448,6 +4699,144 @@ mod tests {
         assert_eq!(loaded.objects().len(), N);
     }
 
+    /// The middle of `runs` timings of `f`, each run given its number.
+    fn median(runs: usize, mut f: impl FnMut(usize)) -> std::time::Duration {
+        let mut times: Vec<_> = (0..runs)
+            .map(|i| {
+                let t = std::time::Instant::now();
+                f(i);
+                t.elapsed()
+            })
+            .collect();
+        times.sort();
+        times[runs / 2]
+    }
+
+    #[test]
+    #[ignore = "timing, run by hand"]
+    fn big_board_edit_timing() {
+        use kurbo::Point;
+        for n in [10_000, 100_000] {
+            let mut doc = Document::new();
+            let items: Vec<Content> = (0..n)
+                .map(|i| rect((i % 316) as f64 * 30.0, (i / 316) as f64 * 30.0, 20.0, 20.0).into())
+                .collect();
+            doc.apply(Command::Create(items)).unwrap();
+            let t = std::time::Instant::now();
+            let children = doc.tree.children(TreeParentId::Root).unwrap().len();
+            eprintln!("[{n}] list the tree's {children} roots: {:?}", t.elapsed());
+            let one = |doc: &mut Document, i: usize| {
+                let x = (i % 50) as f64 * 40.0;
+                create(doc, rect(x, x, 10.0, 10.0))
+            };
+            let took = median(9, |i| {
+                one(&mut doc, i);
+            });
+            eprintln!("[{n}] create one: {took:?}");
+            {
+                let t = std::time::Instant::now();
+                let node = doc.tree.create(TreeParentId::Root).unwrap();
+                let meta = doc.tree.get_meta(node).unwrap();
+                meta.insert(key::ID, ObjectId::from_node(node).to_string())
+                    .unwrap();
+                write_data(&meta, &rect(1.0, 1.0, 5.0, 5.0)).unwrap();
+                let made = t.elapsed();
+                doc.doc.commit();
+                let committed = t.elapsed();
+                doc.refresh();
+                eprintln!(
+                    "[{n}]   (loro create {made:?}, commit {:?}, refresh {:?})",
+                    committed - made,
+                    t.elapsed() - committed
+                );
+            }
+            let stroke = |i: usize| {
+                let points: Vec<_> = (0..20)
+                    .map(|k| {
+                        let k = k as f64;
+                        (
+                            Point::new(i as f64 * 7.0 + k * 3.0, 100.0 + k.sin() * 9.0),
+                            0.5,
+                        )
+                    })
+                    .collect();
+                let (ink, bounds) = Ink::from_world(&points).unwrap();
+                let mut data = rect(0.0, 0.0, 0.0, 0.0);
+                data.kind = ObjectKind::Ink(ink);
+                data.bounds = bounds;
+                data
+            };
+            let took = median(9, |i| {
+                create(&mut doc, stroke(i));
+            });
+            eprintln!("[{n}] create a 20-point ink stroke: {took:?}");
+            let took = median(9, |_| {
+                let id = doc.objects().last().unwrap().id;
+                doc.apply(Command::Delete(vec![id])).unwrap();
+            });
+            eprintln!("[{n}] delete the newest: {took:?}");
+            let took = median(9, |i| {
+                let objects = doc.objects();
+                let id = objects[objects.len() / 3 + i * 17].id;
+                doc.apply(Command::Delete(vec![id])).unwrap();
+            });
+            eprintln!("[{n}] delete one in the middle: {took:?}");
+            let took = median(5, |i| {
+                let objects = doc.objects();
+                let ids = (0..100).map(|k| objects[(k * 97 + i * 13) % objects.len()].id);
+                doc.apply(Command::Delete(ids.collect())).unwrap();
+            });
+            eprintln!("[{n}] delete 100: {took:?}");
+            let mut undo = Vec::new();
+            for _ in 0..9 {
+                one(&mut doc, 0);
+                let t = std::time::Instant::now();
+                doc.undo().unwrap();
+                undo.push(t.elapsed());
+            }
+            undo.sort();
+            eprintln!("[{n}] undo a create: {:?}", undo[4]);
+            let mut undo = Vec::new();
+            for i in 0..9 {
+                let objects = doc.objects();
+                let id = objects[objects.len() / 2 + i].id;
+                doc.apply(Command::Delete(vec![id])).unwrap();
+                let t = std::time::Instant::now();
+                doc.undo().unwrap();
+                undo.push(t.elapsed());
+            }
+            undo.sort();
+            eprintln!("[{n}] undo a delete in the middle: {:?}", undo[4]);
+            let mut undo = Vec::new();
+            for i in 0..9 {
+                let id = doc.objects()[i].id;
+                doc.apply(Command::Move {
+                    ids: vec![id],
+                    delta: Vec2::new(1.0, 1.0),
+                })
+                .unwrap();
+                let t = std::time::Instant::now();
+                doc.undo().unwrap();
+                undo.push(t.elapsed());
+            }
+            undo.sort();
+            eprintln!("[{n}] undo a move: {:?}", undo[4]);
+            let mut undo = Vec::new();
+            for i in 0..9 {
+                doc.apply(Command::SetBackground(Some(Rgba(i)))).unwrap();
+                let t = std::time::Instant::now();
+                doc.undo().unwrap();
+                undo.push(t.elapsed());
+            }
+            undo.sort();
+            eprintln!("[{n}] undo a background color: {:?}", undo[4]);
+            let t = std::time::Instant::now();
+            let fresh = Document::from_snapshot(&doc.snapshot()).unwrap();
+            eprintln!("[{n}] snapshot and load: {:?}", t.elapsed());
+            assert_eq!(fresh.objects(), doc.objects());
+        }
+    }
+
     #[test]
     fn mind_map_nodes_are_stored_one_by_one() {
         let mut doc = Document::new();
@@ -5216,6 +5605,95 @@ mod tests {
         same(&doc);
         lock(&mut doc, &[a], true);
         same(&doc);
+    }
+
+    #[test]
+    fn creating_and_deleting_objects_update_in_place() {
+        use kurbo::Point;
+        let mut doc = Document::new();
+        let a = create(&mut doc, rect(0.0, 0.0, 100.0, 100.0));
+        let b = create(&mut doc, rect(300.0, 0.0, 100.0, 100.0));
+        create(&mut doc, connector(auto(a), auto(b)));
+        let [p, q, ..] = four(&mut doc);
+        group(&mut doc, &[p, q]);
+        let same = |doc: &Document| {
+            let fresh = Document::from_snapshot(&doc.snapshot()).unwrap();
+            assert_eq!(doc.objects(), fresh.objects());
+            assert_eq!(doc.roots(), fresh.roots());
+            for (i, o) in doc.objects().iter().enumerate() {
+                assert_eq!(doc.paint_order(o.id), Some(i));
+                assert_eq!(doc.layer_of(o.id).id, fresh.layer_of(o.id).id);
+            }
+            for area in [
+                Rect::new(-10.0, -10.0, 10.0, 10.0),
+                Rect::new(150.0, 0.0, 250.0, 100.0),
+                Rect::new(-1e4, -1e4, 1e4, 1e4),
+            ] {
+                let ids = |d: &Document| -> Vec<ObjectId> {
+                    d.objects_in(area).iter().map(|o| o.id).collect()
+                };
+                assert_eq!(ids(doc), ids(&fresh), "{area:?}");
+            }
+        };
+        let full = doc.full_refreshes;
+        let stroke = {
+            let points = [(Point::new(5.0, 5.0), 1.0), (Point::new(60.0, 30.0), 0.5)];
+            let (ink, bounds) = Ink::from_world(&points).unwrap();
+            let mut data = rect(0.0, 0.0, 0.0, 0.0);
+            data.kind = ObjectKind::Ink(ink);
+            data.bounds = bounds;
+            data
+        };
+        let s = create(&mut doc, stroke.clone());
+        same(&doc);
+        create(&mut doc, rect(20.0, 20.0, 10.0, 10.0));
+        same(&doc);
+        doc.apply(Command::Delete(vec![s])).unwrap();
+        same(&doc);
+        // The connector comes loose where it was and is routed again.
+        doc.apply(Command::Delete(vec![b])).unwrap();
+        same(&doc);
+        doc.undo().unwrap();
+        same(&doc);
+        assert_eq!(doc.paint_order(b), Some(1));
+        doc.undo().unwrap();
+        same(&doc);
+        doc.redo().unwrap();
+        same(&doc);
+        doc.apply(Command::Delete(vec![a, b])).unwrap();
+        same(&doc);
+        doc.undo().unwrap();
+        same(&doc);
+        assert_eq!(doc.full_refreshes, full, "all in place so far");
+        // On a layer above: on top of everything, still in place.
+        doc.apply(Command::DefineLayer(Layer {
+            id: "top".into(),
+            name: "Top".into(),
+            order: 1.0,
+            visible: true,
+            locked: false,
+        }))
+        .unwrap();
+        let full = doc.full_refreshes;
+        doc.set_active_layer("top".into());
+        let t = create(&mut doc, stroke.clone());
+        same(&doc);
+        doc.undo().unwrap();
+        same(&doc);
+        doc.redo().unwrap();
+        same(&doc);
+        assert_eq!(doc.full_refreshes, full, "on top, in place");
+        // Back on the base layer, under what is on the top layer: read again.
+        doc.set_active_layer(Layer::BASE.into());
+        create(&mut doc, stroke);
+        same(&doc);
+        assert!(doc.paint_order(t) > doc.paint_order(b));
+        // Deleting from a group too.
+        doc.apply(Command::Delete(vec![p])).unwrap();
+        same(&doc);
+        doc.apply(Command::Delete(vec![q])).unwrap();
+        same(&doc);
+        assert!(doc.group(doc.top_level(q)).is_none());
     }
 
     #[test]
