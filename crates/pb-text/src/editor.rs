@@ -93,6 +93,8 @@ impl Mark {
 pub struct TextEditor {
     editor: RichEditor,
     size: f64,
+    /// Where lines wrap and how they sit, as last set.
+    wrap: (Option<f64>, TextAlign),
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
     /// The kind of the last edit, while further edits of that kind join its step.
@@ -123,6 +125,7 @@ impl TextEditor {
         let mut this = Self {
             editor,
             size,
+            wrap: (None, TextAlign::Start),
             undo: Vec::new(),
             redo: Vec::new(),
             last_edit: None,
@@ -151,8 +154,15 @@ impl TextEditor {
     /// Wraps lines at `width` and aligns them within it, matching
     /// [`TextEngine::layout_aligned`] with the same arguments.
     pub fn set_wrap(&mut self, width: Option<f64>, align: TextAlign) {
+        self.wrap = (width, align);
         self.editor.set_width(width.map(|w| w as f32));
         self.editor.set_alignment(align.to_parley());
+    }
+
+    /// Takes the size and wrapping of `other`, keeping this editor's text and history.
+    pub fn match_layout(&mut self, other: &TextEditor) {
+        self.set_size(other.size);
+        self.set_wrap(other.wrap.0, other.wrap.1);
     }
 
     /// The text without any IME composition in progress.

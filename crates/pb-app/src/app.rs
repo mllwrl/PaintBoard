@@ -4483,46 +4483,13 @@ impl App {
             self.request_redraw();
         }
         if ticked.changed {
-            // Someone may have changed the text being edited here.
-            if let Some(theirs) = self.edited_text_on_board()
-                && let Some(edit) = &mut self.editing
-            {
-                edit.take_in(self.text.engine(), &theirs);
+            // Someone may have changed what is being edited here.
+            if let Some(edit) = &mut self.editing {
+                edit.follow(self.text.engine(), &self.document);
             }
             self.tools.sync(&self.document);
             self.request_redraw();
         }
-    }
-
-    /// The text on the board of what is being edited: an object's, a table cell's, a kanban
-    /// card's or a mind map node's.
-    fn edited_text_on_board(&self) -> Option<String> {
-        let edit = self.editing.as_ref()?;
-        let kind = |id| self.document.get(id).map(|o| &o.data.kind);
-        if let Some((id, (row, col))) = edit.edited_cell() {
-            let Some(ObjectKind::Table(table)) = kind(id) else {
-                return None;
-            };
-            return Some(table.text(row, col).0.to_owned());
-        }
-        if let Some((id, card)) = edit.edited_card() {
-            let Some(ObjectKind::Kanban(kanban)) = kind(id) else {
-                return None;
-            };
-            let i = kanban.card_index(&card)?;
-            return Some(kanban.cards[i].text.to_string());
-        }
-        if let Some((id, node)) = edit.edited_node() {
-            let Some(ObjectKind::MindMap(map)) = kind(id) else {
-                return None;
-            };
-            let i = map.index(&node)?;
-            return Some(map.nodes[i].text.to_string());
-        }
-        let crate::editing::Target::Existing(id) = edit.target else {
-            return None;
-        };
-        kind(id)?.text().map(str::to_owned)
     }
 
     /// The board's name to show: a shared board's own name, else its file's.

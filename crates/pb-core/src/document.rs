@@ -2328,7 +2328,7 @@ fn lines_from_string(s: &str) -> Vec<Line> {
 /// Writes a web page card's fields.
 fn write_embed(meta: &LoroMap, embed: &crate::Embed) -> Result<()> {
     meta.insert(key::URL, &*embed.url)?;
-    meta.insert(key::TEXT, &*embed.title)?;
+    write_text(meta, &embed.title)?;
     meta.insert(key::DESCRIPTION, &*embed.description)?;
     meta.insert(key::SITE, &*embed.site)?;
     Ok(())
@@ -2927,7 +2927,7 @@ fn read_bends(meta: &LoroMap) -> Arc<[Point]> {
 }
 
 fn write_label(meta: &LoroMap, label: &Label) -> Result<()> {
-    meta.insert(key::TEXT, &*label.text)?;
+    write_text(meta, &label.text)?;
     meta.insert(key::LABEL_AT, label.at.clamp(0.0, 1.0))?;
     meta.insert(key::LABEL_W, label.size.width)?;
     meta.insert(key::LABEL_H, label.size.height)?;

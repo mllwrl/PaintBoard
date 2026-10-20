@@ -1011,16 +1011,96 @@ impl TextEdit {
         self.selecting = false;
     }
 
-    /// Someone else changed the text being edited (shared boards): `theirs` is the text on
-    /// the board now. Their change is merged into what is being typed, so ending the edit
-    /// keeps both. Connector labels and web page titles are not merged.
-    pub fn take_in(&mut self, engine: &mut TextEngine, theirs: &str) {
-        let merged = self.connector.is_none() && self.embed.is_none() && !self.new_card;
-        if !merged || theirs == self.original {
+    /// Someone else changed the board while this is edited (shared boards). The edit takes
+    /// in where the object is now, its size and the rest of it (other cells, cards or
+    /// nodes), and merges their change of this text into what is being typed, so ending
+    /// the edit keeps both. What someone deleted meanwhile is edited on as it was.
+    pub fn follow(&mut self, engine: &mut TextEngine, doc: &Document) {
+        let Some(fresh) = self.reopen(engine, doc) else {
             return;
+        };
+        if fresh.original != self.original {
+            self.editor.rebase(engine, &self.original, &fresh.original);
+            self.original = fresh.original;
         }
-        self.editor.rebase(engine, &self.original, theirs);
-        self.original = theirs.to_owned();
+        self.editor.match_layout(&fresh.editor);
+        self.placement = fresh.placement;
+        self.rotation = fresh.rotation;
+        self.style = fresh.style;
+        self.connector = fresh.connector;
+        self.table = fresh.table;
+        self.kanban = fresh.kanban;
+        self.mindmap = fresh.mindmap;
+        self.embed = fresh.embed;
+        self.refit(engine);
+    }
+
+    /// The same part of the same object edited afresh from `doc`, with the text there.
+    fn reopen(&self, engine: &mut TextEngine, doc: &Document) -> Option<Self> {
+        let Target::Existing(id) = self.target else {
+            return None;
+        };
+        let data = &doc.get(id)?.data;
+        let index = |lines: &[pb_core::Line], line: &pb_core::Line| {
+            lines.iter().position(|l| l.id == line.id)
+        };
+        match (self.placement, &data.kind) {
+            (Placement::Cell { row, col, .. }, ObjectKind::Table(now)) => {
+                let was = self.table.as_ref()?;
+                let row = index(&now.rows, was.rows.get(row)?)?;
+                let col = index(&now.cols, was.cols.get(col)?)?;
+                Self::cell(engine, self.target, data, now, row, col)
+            }
+            (Placement::Board { part, .. }, ObjectKind::Kanban(now)) => {
+                let was = self.kanban.as_ref()?;
+                let (kanban, part) = match part {
+                    // A new card is only in the edit: it joins the board as it is now.
+                    BoardPart::Card(i) if self.new_card => {
+                        let card = was.cards.get(i)?.clone();
+                        now.columns.iter().find(|c| c.id == card.column)?;
+                        let kanban = now.with_card(card.clone());
+                        let i = kanban.card_index(&card.id)?;
+                        (kanban, BoardPart::Card(i))
+                    }
+                    BoardPart::Card(i) => {
+                        let i = now.card_index(&was.cards.get(i)?.id)?;
+                        (now.clone(), BoardPart::Card(i))
+                    }
+                    BoardPart::Title(col) => {
+                        let column = &was.columns.get(col)?.id;
+                        let col = now.columns.iter().position(|c| &c.id == column)?;
+                        (now.clone(), BoardPart::Title(col))
+                    }
+                };
+                Self::board(engine, self.target, data, kanban, part, self.new_card)
+            }
+            (Placement::MindNode, ObjectKind::MindMap(now)) => {
+                let (_, _, node) = self.mindmap.as_ref()?;
+                let node = match now.index(&node.id) {
+                    Some(i) => now.nodes[i].clone(),
+                    // A new node is only in the edit, under a node still there.
+                    None if self.new_card && now.index(node.parent.as_deref()?).is_some() => {
+                        node.clone()
+                    }
+                    None => return None,
+                };
+                Some(Self::mind_node(
+                    engine,
+                    self.target,
+                    data,
+                    now,
+                    node,
+                    self.new_card,
+                ))
+            }
+            (Placement::Cell { .. } | Placement::Board { .. } | Placement::MindNode, _) => None,
+            // A label not on the board yet stays where it was started.
+            (Placement::Label { center, .. }, _) => {
+                Self::existing(engine, doc, id, Some(center), 1.0)
+            }
+            (Placement::Title { zoom, .. }, _) => Self::existing(engine, doc, id, None, zoom),
+            _ => Self::existing(engine, doc, id, None, 1.0),
+        }
     }
 
     pub fn select_all(&mut self, engine: &mut TextEngine) {
@@ -1938,6 +2018,128 @@ mod tests {
         // Nothing for the "add card" row.
         let add = k.add_rect(data.bounds, 2).unwrap().center();
         assert!(TextEdit::existing(&mut e, &doc, id, Some(add), 1.0).is_none());
+    }
+
+    #[test]
+    fn edits_follow_what_someone_else_changes_meanwhile() {
+        let mut e = engine();
+        let mut doc = Document::new();
+        // A sticky note moved by someone else: the text box goes with it.
+        let sticky = ObjectData {
+            kind: ObjectKind::Sticky(Sticky {
+                spans: Default::default(),
+                text: "idea".into(),
+            }),
+            bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+            rotation: 0.0,
+            style: sticky_style(),
+            tags: Default::default(),
+            link: None,
+        };
+        let id = doc
+            .apply(Command::Create(vec![sticky.into()]))
+            .unwrap()
+            .created[0];
+        let mut edit = TextEdit::existing(&mut e, &doc, id, None, 1.0).unwrap();
+        edit.editor.insert(&mut e, "s");
+        let delta = Vec2::new(300.0, 50.0);
+        doc.apply(Command::Move {
+            ids: vec![id],
+            delta,
+        })
+        .unwrap();
+        edit.follow(&mut e, &doc);
+        assert_eq!(edit.frame(&mut e).rect.center(), Point::new(350.0, 100.0));
+        let Some(Command::SetText { text, bounds, .. }) = edit.finish(&mut e) else {
+            panic!("expected SetText");
+        };
+        assert_eq!(
+            (&*text, bounds),
+            ("ideas", Rect::new(300.0, 50.0, 400.0, 150.0))
+        );
+
+        // A card moved to another column and retitled: both stay, with the typing.
+        let kanban = Kanban::starter(|| doc.new_line_id());
+        let card = Card {
+            id: doc.new_line_id().into(),
+            column: kanban.columns[1].id.clone(),
+            order: 1.0,
+            text: "Ship it".into(),
+            spans: Default::default(),
+        };
+        let data = ObjectData {
+            bounds: kanban.fitted(Rect::new(0.0, 0.0, 720.0, 1.0)),
+            kind: ObjectKind::Kanban(kanban.with_card(card.clone())),
+            rotation: 0.0,
+            style: Kanban::style(),
+            tags: Default::default(),
+            link: None,
+        };
+        let id = doc
+            .apply(Command::Create(vec![data.clone().into()]))
+            .unwrap()
+            .created[0];
+        let mut edit = TextEdit::card(&mut e, &doc, id, &card.id).unwrap();
+        edit.editor.insert(&mut e, "!");
+        doc.apply(Command::SetCard {
+            id,
+            card: Card {
+                column: kanban.columns[0].id.clone(),
+                text: "Ship it now".into(),
+                ..card.clone()
+            },
+            bounds: data.bounds,
+        })
+        .unwrap();
+        edit.follow(&mut e, &doc);
+        let Some(Command::SetCard { card: kept, .. }) = edit.finish(&mut e) else {
+            panic!("expected SetCard");
+        };
+        assert_eq!(&*kept.text, "Ship it now!");
+        assert_eq!(kept.column, kanban.columns[0].id);
+
+        // A connector label retyped and slid along by someone else.
+        let line = ObjectData {
+            kind: ObjectKind::Connector(pb_core::Connector {
+                bends: Default::default(),
+                start: pb_core::End::Free(Point::new(0.0, 0.0)),
+                end: pb_core::End::Free(Point::new(400.0, 0.0)),
+                route: pb_core::Route::Straight,
+                start_cap: pb_core::Cap::None,
+                end_cap: pb_core::Cap::None,
+                label: Label {
+                    text: "yes".into(),
+                    at: 0.25,
+                    size: Size::new(30.0, 20.0),
+                },
+            }),
+            bounds: Rect::ZERO,
+            rotation: 0.0,
+            style: Style::default(),
+            tags: Default::default(),
+            link: None,
+        };
+        let id = doc
+            .apply(Command::Create(vec![line.into()]))
+            .unwrap()
+            .created[0];
+        let mut edit = TextEdit::existing(&mut e, &doc, id, None, 1.0).unwrap();
+        edit.editor.insert(&mut e, " or no");
+        doc.apply(Command::SetLabel {
+            id,
+            label: Label {
+                text: "Yes".into(),
+                at: 0.75,
+                size: Size::new(30.0, 20.0),
+            },
+        })
+        .unwrap();
+        edit.follow(&mut e, &doc);
+        let Some(Command::SetLabel { label, .. }) = edit.finish(&mut e) else {
+            panic!("expected SetLabel");
+        };
+        assert_eq!(&*label.text, "Yes or no");
+        assert_eq!(label.at, 0.75);
     }
 
     #[test]

@@ -350,4 +350,72 @@ mod tests {
         doc.apply(Command::SetTitle("  ".into())).unwrap();
         assert_eq!(doc.title(), None);
     }
+
+    #[test]
+    fn edits_of_a_label_or_page_title_at_once_both_stay() {
+        use crate::{Cap, Connector, Embed, End, Label, ObjectKind, Route};
+
+        let mut doc = Document::new();
+        let free = |x| End::Free(kurbo::Point::new(x, 0.0));
+        let data = |kind| ObjectData {
+            kind,
+            bounds: kurbo::Rect::new(0.0, 0.0, 100.0, 10.0),
+            rotation: 0.0,
+            style: Style::default(),
+            tags: Default::default(),
+            link: None,
+        };
+        let connector = ObjectKind::Connector(Connector {
+            bends: Default::default(),
+            start: free(0.0),
+            end: free(100.0),
+            route: Route::Straight,
+            start_cap: Cap::None,
+            end_cap: Cap::Arrow,
+            label: Label::default(),
+        });
+        let page = ObjectKind::Embed(Embed {
+            url: "https://example.com".into(),
+            title: "Example page".into(),
+            description: "".into(),
+            site: "example.com".into(),
+        });
+        doc.apply(Command::Create(vec![
+            data(connector).into(),
+            data(page).into(),
+        ]))
+        .unwrap();
+        let (line, card) = (doc.objects()[0].id, doc.objects()[1].id);
+        let label = |text: &str| Label {
+            text: text.into(),
+            at: 0.5,
+            size: kurbo::Size::new(40.0, 12.0),
+        };
+        doc.apply(Command::SetLabel {
+            id: line,
+            label: label("yes no"),
+        })
+        .unwrap();
+        let (mut a, mut b) = two(&doc);
+        a.apply(Command::SetLabel {
+            id: line,
+            label: label("yes or no"),
+        })
+        .unwrap();
+        b.apply(Command::SetLabel {
+            id: line,
+            label: label("yes no?"),
+        })
+        .unwrap();
+        set_text(&mut a, card, "An example page");
+        set_text(&mut b, card, "Example web page");
+        exchange(&mut a, &mut b);
+        for doc in [&a, &b] {
+            let ObjectKind::Connector(c) = &doc.get(line).unwrap().data.kind else {
+                panic!("a connector");
+            };
+            assert_eq!(&*c.label.text, "yes or no?");
+            assert_eq!(text_of(doc, card), "An example web page");
+        }
+    }
 }
