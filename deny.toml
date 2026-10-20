@@ -26,6 +26,8 @@ unused-allowed-license = "allow"
 allow = [
     "MIT",
     "MIT-0",
+    # Public-domain-like: not even a notice to keep (quoted_printable, via lettre).
+    "0BSD",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",

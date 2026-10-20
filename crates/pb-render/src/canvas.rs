@@ -27,6 +27,12 @@ pub trait Canvas {
     /// Glyphs of `run`, positioned relative to `transform`'s origin.
     fn glyphs(&mut self, transform: Affine, run: &pb_text::GlyphRun, brush: Color);
 
+    /// Pictures are wanted at their full decoded size rather than just big enough for the
+    /// screen (for files, which may be looked at closer).
+    fn full_pictures(&self) -> bool {
+        false
+    }
+
     /// The picture of `image` placed by `image_transform` (from its pixels to the space
     /// of `transform`) and cut to `bounds`. `file` is the image file it was decoded from.
     fn image(

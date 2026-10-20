@@ -25,6 +25,12 @@ tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "ti
 # SQLite built in, so the server is one file to copy.
 rusqlite = { version = "0.40", features = ["bundled"] }
 getrandom = "0.3"
+# Link previews for the web version (PB_PREVIEWS): pages fetched over the system's TLS.
+ureq = { version = "3.4", default-features = false, features = ["native-tls", "gzip"] }
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+# Sign-in links by email (PB_SMTP), over the system's TLS like ureq.
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "native-tls", "hostname"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio-tungstenite = "0.29"

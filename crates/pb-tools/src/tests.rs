@@ -149,6 +149,17 @@ fn click_selects_and_empty_click_clears() {
 }
 
 #[test]
+fn picking_the_pen_drops_the_selection() {
+    let (doc, ids) = doc_with(&[Rect::new(0.0, 0.0, 100.0, 100.0)]);
+    let mut tools = Tools::default();
+    click(&mut tools, &doc, at(50.0, 50.0));
+    tools.set_active(ToolKind::Shape(ShapeKind::Rectangle));
+    assert_eq!(tools.selection().ids(), [ids[0]]);
+    tools.set_active(ToolKind::Pen);
+    assert!(tools.selection().is_empty());
+}
+
+#[test]
 fn shift_click_toggles() {
     let (doc, ids) = doc_with(&[
         Rect::new(0.0, 0.0, 100.0, 100.0),
@@ -658,6 +669,33 @@ fn resize_snaps_dragged_edge() {
 }
 
 #[test]
+fn corners_keeping_aspect_snap_too() {
+    let (doc, ids) = doc_with(&[
+        Rect::new(0.0, 0.0, 100.0, 100.0),
+        Rect::new(0.0, 200.0, 153.0, 300.0),
+    ]);
+    let mut tools = Tools::default();
+    tools.select_only([ids[0]]);
+    tools.pointer_down(&doc, shift(at(100.0, 100.0)));
+    tools.pointer_move(&doc, shift(at(149.0, 120.0)));
+    assert_eq!(
+        tools.guides(&doc),
+        [Line::new(Point::new(153.0, 0.0), Point::new(153.0, 300.0))]
+    );
+    let frames = frame_of_cmd(tools.pointer_up(&doc, shift(at(149.0, 120.0))));
+    assert_eq!(frames[0].rect, Rect::new(0.0, 0.0, 153.0, 153.0));
+    // Nothing in reach: no snapping, the aspect is kept.
+    tools.select_only([ids[0]]);
+    let frames = frame_of_cmd(drag(
+        &mut tools,
+        &doc,
+        shift(at(100.0, 100.0)),
+        shift(at(130.0, 110.0)),
+    ));
+    assert_eq!(frames[0].rect, Rect::new(0.0, 0.0, 130.0, 130.0));
+}
+
+#[test]
 fn image_corners_keep_aspect_unless_shift() {
     let mut doc = Document::new();
     let asset = doc.add_asset(b"img".to_vec());
@@ -768,6 +806,75 @@ fn pen_draws_a_simplified_stroke_and_stays_active() {
     assert_eq!(data.bounds, Rect::new(0.0, 10.0, 100.0, 10.0));
     assert_eq!(data.style.stroke_width, InkStyle::PEN.width);
     assert_eq!(tools.active(), ToolKind::Pen);
+}
+
+#[test]
+fn shift_draws_straight_ink_and_letting_go_goes_on_freehand() {
+    let doc = Document::new();
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Pen);
+    let data = ink_of(draw(
+        &mut tools,
+        &doc,
+        &[
+            at(0.0, 0.0),
+            at(10.0, 0.0),
+            // Shift pressed: wobbles between here and the end are dropped.
+            shift(at(30.0, 40.0)),
+            shift(at(25.0, -30.0)),
+            shift(at(60.0, 0.0)),
+            // Let go: freehand again from the line's end.
+            at(60.0, 50.0),
+        ],
+    ));
+    let ObjectKind::Ink(ink) = &data.kind else {
+        unreachable!()
+    };
+    let points: Vec<_> = ink.points_in(data.bounds).iter().map(|(p, _)| *p).collect();
+    assert_eq!(
+        points,
+        [
+            Point::new(0.0, 0.0),
+            Point::new(60.0, 0.0),
+            Point::new(60.0, 50.0)
+        ]
+    );
+}
+
+#[test]
+fn straight_ink_is_even_and_snaps_level_or_upright() {
+    let doc = Document::new();
+    let pen = |x, y, pressure| Pointer {
+        pressure,
+        ..at(x, y)
+    };
+    let straight = |tools: &mut Tools, end: Point| {
+        tools.set_active(ToolKind::Pen);
+        // A stylus touches down lightly, then presses.
+        let data = ink_of(draw(
+            tools,
+            &doc,
+            &[pen(0.0, 0.0, 0.05), shift(pen(end.x, end.y, 0.6))],
+        ));
+        let ObjectKind::Ink(ink) = &data.kind else {
+            unreachable!()
+        };
+        ink.points_in(data.bounds)
+    };
+    let mut tools = Tools::default();
+    // Nearly level: level, and as wide at its start as at its end.
+    let points = straight(&mut tools, Point::new(100.0, 7.0));
+    let ends: Vec<_> = points.iter().map(|(p, _)| *p).collect();
+    assert_eq!(ends, [Point::ZERO, Point::new(100.0, 0.0)]);
+    for (_, pressure) in &points {
+        assert!((pressure - 0.6).abs() < 0.01, "{points:?}");
+    }
+    // Nearly upright: upright.
+    let points = straight(&mut tools, Point::new(-6.0, 80.0));
+    assert_eq!(points[1].0, Point::new(0.0, 80.0));
+    // Clearly slanted: as drawn.
+    let points = straight(&mut tools, Point::new(50.0, 40.0));
+    assert_eq!(points[1].0, Point::new(50.0, 40.0));
 }
 
 #[test]
@@ -1206,6 +1313,72 @@ fn table_cells_are_selected_and_lines_go_in_between() {
     assert!(t.cols.iter().all(|c| c.id != gone));
     assert_eq!(tools.table_cells(&doc), None);
     assert_eq!(tools.selection().ids(), &[id]);
+}
+
+#[test]
+fn ctrl_picks_more_cells_and_marks_go_on_all_of_them() {
+    let mut doc = Document::new();
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Table);
+    let cmd = click(&mut tools, &doc, at(0.0, 0.0)).unwrap();
+    let id = doc.apply(cmd).unwrap().created[0];
+    let table = |doc: &Document| match &doc.get(id).unwrap().data.kind {
+        ObjectKind::Table(t) => t.clone(),
+        _ => panic!("not a table"),
+    };
+    let t = table(&doc);
+    for (r, c, text) in [(0, 0, "a"), (2, 2, "b"), (1, 1, "c")] {
+        doc.apply(Command::SetCell {
+            id,
+            row: t.rows[r].id.clone(),
+            col: t.cols[c].id.clone(),
+            cell: pb_core::Cell {
+                text: text.into(),
+                spans: Default::default(),
+            },
+        })
+        .unwrap();
+    }
+    let bounds = doc.get(id).unwrap().data.bounds;
+    let laid_out = table(&doc);
+    let center = |r: usize, c: usize| {
+        let rect = laid_out.cell_rect(bounds, r, c).unwrap();
+        at(rect.center().x, rect.center().y)
+    };
+    tools.select_only([id]);
+    click(&mut tools, &doc, center(0, 0));
+    click(&mut tools, &doc, ctrl(center(2, 2)));
+    click(&mut tools, &doc, ctrl(center(1, 1)));
+    let blocks = tools.table_cell_blocks(&doc).unwrap().1;
+    assert_eq!(
+        blocks,
+        [(0, 0), (2, 2), (1, 1)].map(CellRange::cell).to_vec()
+    );
+    assert_eq!(tools.cells_frames(&doc).len(), 3);
+    // Ctrl+click on a picked cell takes it back.
+    click(&mut tools, &doc, ctrl(center(1, 1)));
+    let blocks = tools.table_cell_blocks(&doc).unwrap().1;
+    assert_eq!(blocks, [(0, 0), (2, 2)].map(CellRange::cell).to_vec());
+    // Bold goes on the text of both picked cells, and off again.
+    let bold = |m: &pb_core::TextMarks| m.bold;
+    let set = |mut m: pb_core::TextMarks, on| {
+        m.bold = on;
+        m
+    };
+    let commands = tools.mark_cells(&doc, bold, set);
+    assert_eq!(commands.len(), 2);
+    for command in commands {
+        doc.apply(command).unwrap();
+    }
+    let t = table(&doc);
+    assert!(t.text(0, 0).1[0].marks.bold && t.text(2, 2).1[0].marks.bold);
+    assert!(t.text(1, 1).1.is_empty());
+    for command in tools.mark_cells(&doc, bold, set) {
+        doc.apply(command).unwrap();
+    }
+    assert!(table(&doc).text(0, 0).1.is_empty());
+    // Several blocks cannot be merged.
+    assert!(!tools.can_merge_cells(&doc, true));
 }
 
 #[test]

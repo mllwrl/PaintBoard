@@ -3,16 +3,21 @@
 // Release builds on Windows open no console window next to the app.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod account;
 mod app;
 mod books;
 mod editing;
 mod export;
 mod i18n;
 mod navigation;
+mod palette;
 mod pictures;
+mod plugin_api;
+mod plugins;
 mod session;
 mod settings;
 mod sharing;
+mod sounds;
 mod talktrack;
 mod templates;
 mod ui;
@@ -26,6 +31,11 @@ fn main() {
         env_logger::Env::default().default_filter_or("warn,pb_app=info,pb_render=info"),
     )
     .init();
+    // PaintBoard is running already: it opens the file (or just shows itself) instead.
+    let file = std::env::args_os().nth(1).map(std::path::PathBuf::from);
+    if pb_platform::instance::hand_over(file.as_deref()) {
+        return;
+    }
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .expect("failed to create event loop");

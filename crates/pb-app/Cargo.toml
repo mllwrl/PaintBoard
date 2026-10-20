@@ -22,11 +22,13 @@ pb-io.workspace = true
 pb-tools.workspace = true
 pb-platform.workspace = true
 pb-sync.workspace = true
+pb-plugin.workspace = true
 winit.workspace = true
 egui.workspace = true
 egui-winit.workspace = true
 egui-wgpu.workspace = true
 log.workspace = true
+serde_json.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # The system clipboard for text fields and Wayland/X11 support; not available on the web.

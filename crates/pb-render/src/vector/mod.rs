@@ -197,6 +197,10 @@ impl Canvas for Drawing {
         }
     }
 
+    fn full_pictures(&self) -> bool {
+        true
+    }
+
     fn image(
         &mut self,
         transform: Affine,

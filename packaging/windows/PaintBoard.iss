@@ -55,6 +55,11 @@ Root: HKA; Subkey: "Software\Classes\.pboard"; ValueType: string; ValueName: "";
 Root: HKA; Subkey: "Software\Classes\PaintBoard.Board"; ValueType: string; ValueName: ""; ValueData: "PaintBoard board"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\PaintBoard.Board\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"",0"
 Root: HKA; Subkey: "Software\Classes\PaintBoard.Board\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
+; .pbplugin files (plugins in one file) open in PaintBoard, which offers to install them.
+Root: HKA; Subkey: "Software\Classes\.pbplugin"; ValueType: string; ValueName: ""; ValueData: "PaintBoard.Plugin"; Flags: uninsdeletevalue uninsdeletekeyifempty
+Root: HKA; Subkey: "Software\Classes\PaintBoard.Plugin"; ValueType: string; ValueName: ""; ValueData: "PaintBoard plugin"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\PaintBoard.Plugin\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"",0"
+Root: HKA; Subkey: "Software\Classes\PaintBoard.Plugin\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent

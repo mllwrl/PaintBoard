@@ -2,13 +2,14 @@
 //! `GET /ws`, where the first message is the client's `Hello`.
 
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
 use axum::extract::ws::{self, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
@@ -16,7 +17,8 @@ use pb_core::AssetId;
 use pb_sync::{ClientId, MAX_ASSET, Message, Outgoing, PROTOCOL, Room};
 use tokio::sync::mpsc;
 
-use crate::store::{Access, Store};
+use crate::metrics::bump;
+use crate::store::Store;
 
 /// How long a new connection has to say which board it wants.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -69,6 +71,17 @@ pub struct Shared {
     web: Option<std::path::PathBuf>,
     /// The most boards the server keeps; `None` for no limit.
     pub max_boards: Option<usize>,
+    /// Link previews for the web version, when the server makes them.
+    pub previews: Option<crate::preview::Previews>,
+    /// What one address may do.
+    pub limits: crate::limits::Limits,
+    /// Counts for monitoring, served at `/metrics` when `serve_metrics`.
+    pub metrics: crate::metrics::Metrics,
+    pub serve_metrics: bool,
+    /// Sends emails; accounts exist only with it.
+    pub mailer: Option<crate::mail::Mailer>,
+    /// `PB_PUBLIC_URL`: where the server is seen from outside, for links in emails.
+    pub public_url: Option<String>,
 }
 
 /// A board in memory and the connections to it.
@@ -77,6 +90,8 @@ struct Live {
     senders: HashMap<ClientId, mpsc::UnboundedSender<Message>>,
     /// Pictures already in the database.
     saved_assets: HashSet<AssetId>,
+    /// Deleted from the database: never written again.
+    deleted: bool,
 }
 
 impl Shared {
@@ -97,7 +112,32 @@ impl Shared {
             create_key,
             web,
             max_boards: None,
+            previews: None,
+            limits: crate::limits::Limits::default(),
+            metrics: crate::metrics::Metrics::default(),
+            serve_metrics: false,
+            mailer: None,
+            public_url: None,
         })
+    }
+
+    /// The database, for a moment.
+    pub fn store(&self) -> std::sync::MutexGuard<'_, Store> {
+        self.store.lock().expect("store lock")
+    }
+
+    /// A board was deleted: everyone on it is disconnected and it is not written again.
+    pub fn close_board(&self, board: &str) {
+        let live = self.rooms.lock().expect("rooms lock").remove(board);
+        if let Some(live) = live {
+            let mut live = live.lock().expect("room lock");
+            live.deleted = true;
+            for sender in live.senders.values() {
+                let _ = sender.send(Message::Error("the board was deleted".into()));
+            }
+            // Without their senders the connections end.
+            live.senders.clear();
+        }
     }
 
     /// The board in memory, loaded from the database if needed.
@@ -120,6 +160,7 @@ impl Shared {
             room,
             senders: HashMap::new(),
             saved_assets,
+            deleted: false,
         }));
         rooms.insert(board.to_owned(), live.clone());
         Ok(live)
@@ -127,7 +168,7 @@ impl Shared {
 
     /// Writes `live` if it changed.
     fn save(&self, board: &str, live: &mut Live) {
-        if !live.room.take_changed() {
+        if !live.room.take_changed() || live.deleted {
             return;
         }
         let snapshot = live.room.snapshot();
@@ -138,11 +179,12 @@ impl Shared {
             .filter_map(|id| Some((id, live.room.asset(id)?.clone())))
             .collect();
         let assets: Vec<(AssetId, &[u8])> = new.iter().map(|(id, b)| (*id, &**b)).collect();
-        let saved = self
-            .store
-            .lock()
-            .expect("store lock")
-            .save(board, &snapshot, &assets);
+        let saved = self.store.lock().expect("store lock").save(
+            board,
+            &snapshot,
+            live.room.title().as_deref(),
+            &assets,
+        );
         match saved {
             Ok(()) => live.saved_assets.extend(new.iter().map(|(id, _)| *id)),
             Err(err) => log::error!("could not save board {board}: {err}"),
@@ -217,9 +259,12 @@ impl Shared {
 
 pub fn router(shared: Arc<Shared>) -> Router {
     Router::new()
+        .merge(crate::accounts::routes())
         .route("/health", get(|| async { "ok" }))
         .route("/boards", post(create_board).options(allow_other_sites))
         .route("/ws", get(connect))
+        .route("/preview", get(preview))
+        .route("/metrics", get(metrics))
         .route(
             "/",
             get(|state, headers| web_file(state, headers, "index.html".to_owned())),
@@ -294,26 +339,102 @@ async fn web_file(State(shared): State<Arc<Shared>>, headers: HeaderMap, name: S
 }
 
 /// The web version may be served from another site than the server: let browsers ask.
-fn cors(mut response: Response) -> Response {
+/// Accounts are sent as `Authorization` headers, never cookies, so this lets no other
+/// site act as someone.
+pub fn cors(mut response: Response) -> Response {
     let headers = response.headers_mut();
     headers.insert("access-control-allow-origin", "*".parse().expect("valid"));
     headers.insert(
         "access-control-allow-methods",
-        "POST".parse().expect("valid"),
+        "GET, POST, DELETE".parse().expect("valid"),
     );
     headers.insert(
         "access-control-allow-headers",
-        "x-create-key".parse().expect("valid"),
+        "x-create-key, authorization, content-type"
+            .parse()
+            .expect("valid"),
     );
     response
 }
 
-async fn allow_other_sites() -> Response {
+/// The head of a web page for a link preview: `GET /preview?url=<address>`.
+async fn preview(
+    State(shared): State<Arc<Shared>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<HashMap<String, String>>,
+) -> Response {
+    let Some(previews) = &shared.previews else {
+        return cors((StatusCode::NOT_FOUND, "this server does not make previews").into_response());
+    };
+    if !shared.limits.preview(shared.limits.client(peer, &headers)) {
+        return cors(too_many(
+            &shared,
+            "too many previews, try again in a minute",
+        ));
+    }
+    let Some(url) = query.get("url") else {
+        return cors((StatusCode::BAD_REQUEST, "which page?").into_response());
+    };
+    cors(match previews.head_of(url).await {
+        Ok(head) => {
+            bump(&shared.metrics.previews);
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                head,
+            )
+                .into_response()
+        }
+        Err(err) => (StatusCode::BAD_GATEWAY, err).into_response(),
+    })
+}
+
+pub async fn allow_other_sites() -> Response {
     cors(StatusCode::NO_CONTENT.into_response())
 }
 
-async fn create_board(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Response {
+async fn create_board(
+    State(shared): State<Arc<Shared>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if !shared
+        .limits
+        .make_board(shared.limits.client(peer, &headers))
+    {
+        return cors(too_many(
+            &shared,
+            "too many boards made from here, try again later",
+        ));
+    }
     cors(make_board(&shared, &headers))
+}
+
+pub fn too_many(shared: &Shared, why: &'static str) -> Response {
+    bump(&shared.metrics.limited);
+    (StatusCode::TOO_MANY_REQUESTS, why).into_response()
+}
+
+/// Counts for monitoring, when the server shows them.
+async fn metrics(State(shared): State<Arc<Shared>>) -> Response {
+    if !shared.serve_metrics {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let boards = shared
+        .store
+        .lock()
+        .expect("store lock")
+        .board_count()
+        .unwrap_or(0) as u64;
+    let rooms = shared.rooms.lock().expect("rooms lock").len() as u64;
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        shared.metrics.render(boards, rooms),
+    )
+        .into_response()
 }
 
 fn make_board(shared: &Shared, headers: &HeaderMap) -> Response {
@@ -324,6 +445,21 @@ fn make_board(shared: &Shared, headers: &HeaderMap) -> Response {
         }
     }
     let store = shared.store.lock().expect("store lock");
+    // Made while signed in, the board is the account's.
+    let owner = match crate::accounts::session_of(headers) {
+        Some(session) if shared.mailer.is_some() => match store.session_user(session) {
+            Ok(Some(email)) => Some(email),
+            Ok(None) => {
+                return (StatusCode::UNAUTHORIZED, "signed out: sign in again").into_response();
+            }
+            Err(err) => {
+                log::error!("session check failed: {err}");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "could not make a board")
+                    .into_response();
+            }
+        },
+        _ => None,
+    };
     if let Some(max) = shared.max_boards
         && store.board_count().unwrap_or(0) >= max
     {
@@ -333,14 +469,16 @@ fn make_board(shared: &Shared, headers: &HeaderMap) -> Response {
         )
             .into_response();
     }
-    let made = store.create_board();
+    let made = store.create_board(owner.as_deref());
     drop(store);
     match made {
         Ok(new) => {
             log::info!("board {} made", new.board);
+            bump(&shared.metrics.boards_made);
             Json(std::collections::BTreeMap::from([
                 ("board", new.board),
                 ("edit", new.edit),
+                ("comment", new.comment),
                 ("view", new.view),
             ]))
             .into_response()
@@ -352,10 +490,21 @@ fn make_board(shared: &Shared, headers: &HeaderMap) -> Response {
     }
 }
 
-async fn connect(State(shared): State<Arc<Shared>>, upgrade: WebSocketUpgrade) -> Response {
+async fn connect(
+    State(shared): State<Arc<Shared>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    let Some(counted) = shared.limits.connect(shared.limits.client(peer, &headers)) else {
+        return too_many(&shared, "too many connections from here");
+    };
     upgrade
         .max_message_size(MAX_ASSET + (1 << 20))
-        .on_upgrade(move |socket| serve(socket, shared))
+        .on_upgrade(move |socket| async move {
+            serve(socket, shared).await;
+            drop(counted);
+        })
 }
 
 async fn send(socket: &mut WebSocket, message: &Message) -> bool {
@@ -379,7 +528,8 @@ async fn receive(socket: &mut WebSocket) -> Option<Result<Message, String>> {
     }
 }
 
-async fn refuse(mut socket: WebSocket, why: &str) {
+async fn refuse(shared: &Shared, mut socket: WebSocket, why: &str) {
+    bump(&shared.metrics.refused);
     send(&mut socket, &Message::Error(why.to_owned())).await;
     let _ = socket.send(ws::Message::Close(None)).await;
 }
@@ -390,43 +540,65 @@ async fn serve(mut socket: WebSocket, shared: Arc<Shared>) {
         protocol,
         board,
         token,
+        session,
         name,
         version,
         assets,
     }))) = hello
     else {
-        return refuse(socket, "expected a greeting").await;
+        return refuse(&shared, socket, "expected a greeting").await;
     };
     if protocol != PROTOCOL {
         return refuse(
+            &shared,
             socket,
             "this server speaks another version: update PaintBoard",
         )
         .await;
     }
-    let access = shared
-        .store
-        .lock()
-        .expect("store lock")
-        .access(&board, &token);
-    let can_edit = match access {
-        Ok(Some(access)) => access == Access::Edit,
-        Ok(None) => return refuse(socket, "no such board, or the link is wrong").await,
+    // The link's right or the account's, whichever is more.
+    let access = {
+        let store = shared.store();
+        let by_link = if token.is_empty() {
+            Ok(None)
+        } else {
+            store.access(&board, &token)
+        };
+        let by_account = match store.session_user(&session) {
+            Ok(Some(email)) if shared.mailer.is_some() => {
+                store.membership(&board, &email).map(|m| m.map(|m| m.role))
+            }
+            Ok(_) => Ok(None),
+            Err(err) => Err(err),
+        };
+        by_link.and_then(|l| by_account.map(|a| l.max(a)))
+    };
+    let role = match access {
+        Ok(Some(role)) => role,
+        Ok(None) if token.is_empty() => {
+            return refuse(
+                &shared,
+                socket,
+                "sign in to open this board, or ask for a link",
+            )
+            .await;
+        }
+        Ok(None) => return refuse(&shared, socket, "no such board, or the link is wrong").await,
         Err(err) => {
             log::error!("access check failed: {err}");
-            return refuse(socket, "the server could not check the link").await;
+            return refuse(&shared, socket, "the server could not check the link").await;
         }
     };
     let live = match shared.room(&board) {
         Ok(live) => live,
-        Err(err) => return refuse(socket, &err).await,
+        Err(err) => return refuse(&shared, socket, &err).await,
     };
     let client = shared.next_client.fetch_add(1, Ordering::Relaxed);
     let (outbox, mut inbox) = mpsc::unbounded_channel();
     let joined = {
         let mut live = live.lock().expect("room lock");
         live.senders.insert(client, outbox);
-        let joined = live.room.join(client, can_edit, &version, &assets);
+        let joined = live.room.join(client, role, &version, &assets);
         match joined {
             Ok(out) => {
                 dispatch(&live, out);
@@ -440,9 +612,11 @@ async fn serve(mut socket: WebSocket, shared: Arc<Shared>) {
     };
     if let Err(err) = joined {
         shared.unload_if_empty(&board);
-        return refuse(socket, &err).await;
+        return refuse(&shared, socket, &err).await;
     }
     log::info!("{name} ({client}) joined board {board}");
+    bump(&shared.metrics.joins);
+    bump(&shared.metrics.connected);
     let mut bucket = Bucket::new();
 
     loop {
@@ -454,13 +628,24 @@ async fn serve(mut socket: WebSocket, shared: Arc<Shared>) {
                 } else {
                     Err("too many messages: slow down".to_owned())
                 };
+                bump(&shared.metrics.messages);
                 let result = incoming.and_then(|message| {
+                    let size = match &message {
+                        Message::Updates(bytes) | Message::Asset(bytes) => bytes.len(),
+                        Message::Remarks(json) => json.len(),
+                        _ => 0,
+                    };
+                    shared
+                        .metrics
+                        .bytes_in
+                        .fetch_add(size as u64, Ordering::Relaxed);
                     let mut live = live.lock().expect("room lock");
                     let out = live.room.receive(client, message)?;
                     dispatch(&live, out);
                     Ok(())
                 });
                 if let Err(err) = result {
+                    bump(&shared.metrics.cut_off);
                     log::info!("{client} on {board}: {err}");
                     send(&mut socket, &Message::Error(err)).await;
                     break;
@@ -482,6 +667,7 @@ async fn serve(mut socket: WebSocket, shared: Arc<Shared>) {
         dispatch(&live, out);
     }
     log::info!("{client} left board {board}");
+    shared.metrics.connected.fetch_sub(1, Ordering::Relaxed);
     shared.unload_if_empty(&board);
 }
 

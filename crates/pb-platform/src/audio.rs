@@ -55,6 +55,12 @@ mod imp {
             })
         }
 
+        /// Whether the microphone was refused or failed after starting (in the browser,
+        /// which asks first): the recording has no sound.
+        pub fn refused(&self) -> bool {
+            false
+        }
+
         /// Stops recording and hands over what was recorded.
         pub fn finish(self) -> Clip {
             drop(self.stream);
@@ -220,37 +226,220 @@ mod imp {
 
 #[cfg(target_arch = "wasm32")]
 mod imp {
+    //! Web Audio: the microphone through `getUserMedia`, sound played from an
+    //! `AudioBuffer`.
+
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
     use std::sync::Arc;
+
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::{JsCast, JsValue};
+    use web_sys::{
+        AudioBuffer, AudioBufferSourceNode, AudioContext, AudioProcessingEvent, MediaStream,
+        MediaStreamConstraints, MediaStreamTrack, ScriptProcessorNode,
+    };
 
     use super::Clip;
 
-    const UNAVAILABLE: &str = "Sound is not available in the browser yet";
+    /// Samples per chunk the page hands over while recording.
+    const CHUNK: u32 = 4096;
 
-    pub struct Recorder;
+    type OnAudio = Closure<dyn FnMut(AudioProcessingEvent)>;
+
+    fn js(err: JsValue) -> String {
+        err.as_string().unwrap_or_else(|| format!("{err:?}"))
+    }
+
+    /// What recording has so far; the page fills it as sound comes.
+    #[derive(Default)]
+    struct Taken {
+        samples: Vec<f32>,
+        /// The microphone, once the browser was allowed to use it.
+        stream: Option<MediaStream>,
+        processor: Option<ScriptProcessorNode>,
+        on_audio: Option<OnAudio>,
+        refused: bool,
+    }
+
+    /// Records the default microphone until finished. The browser asks whether the page
+    /// may use it; the sound starts when it is allowed, after silence for the wait, so it
+    /// stays in step with the view.
+    pub struct Recorder {
+        context: AudioContext,
+        taken: Rc<RefCell<Taken>>,
+    }
 
     impl Recorder {
         pub fn start() -> Result<Self, String> {
-            Err(UNAVAILABLE.into())
+            let window = web_sys::window().ok_or("No window")?;
+            let devices = window
+                .navigator()
+                .media_devices()
+                .map_err(|_| "No microphone access in this browser")?;
+            let constraints = MediaStreamConstraints::new();
+            constraints.set_audio(&JsValue::TRUE);
+            let asked = devices
+                .get_user_media_with_constraints(&constraints)
+                .map_err(js)?;
+            let context = AudioContext::new().map_err(js)?;
+            let started = context.current_time();
+            let taken = Rc::new(RefCell::new(Taken::default()));
+            let (ctx, into) = (context.clone(), taken.clone());
+            wasm_bindgen_futures::spawn_local(async move {
+                let stream = match wasm_bindgen_futures::JsFuture::from(asked).await {
+                    Ok(stream) => stream.unchecked_into::<MediaStream>(),
+                    Err(err) => {
+                        log::warn!("microphone: {}", js(err));
+                        into.borrow_mut().refused = true;
+                        return;
+                    }
+                };
+                if let Err(err) = listen(&ctx, &stream, &into, started) {
+                    log::warn!("microphone: {err}");
+                    into.borrow_mut().refused = true;
+                }
+                into.borrow_mut().stream = Some(stream);
+            });
+            Ok(Self { context, taken })
         }
 
+        /// Whether the microphone was refused or failed: the recording has no sound.
+        pub fn refused(&self) -> bool {
+            self.taken.borrow().refused
+        }
+
+        /// Stops recording and hands over what was recorded.
         pub fn finish(self) -> Clip {
-            Clip::default()
+            let mut taken = self.taken.borrow_mut();
+            if let Some(processor) = taken.processor.take() {
+                processor.set_onaudioprocess(None);
+                let _ = processor.disconnect();
+            }
+            taken.on_audio = None;
+            if let Some(stream) = taken.stream.take() {
+                for track in stream.get_tracks().iter() {
+                    track.unchecked_into::<MediaStreamTrack>().stop();
+                }
+            }
+            let _ = self.context.close();
+            Clip {
+                rate: self.context.sample_rate() as u32,
+                samples: std::mem::take(&mut taken.samples),
+            }
         }
     }
 
-    pub struct Player;
+    /// Feeds the microphone's sound into `taken`, after silence for the time it took to
+    /// be allowed (since `started`, on `context`'s clock).
+    fn listen(
+        context: &AudioContext,
+        stream: &MediaStream,
+        taken: &Rc<RefCell<Taken>>,
+        started: f64,
+    ) -> Result<(), String> {
+        let source = context.create_media_stream_source(stream).map_err(js)?;
+        let processor = context
+            .create_script_processor_with_buffer_size_and_number_of_input_channels_and_number_of_output_channels(
+                CHUNK, 1, 1,
+            )
+            .map_err(js)?;
+        let rate = f64::from(context.sample_rate());
+        let waited = ((context.current_time() - started).max(0.0) * rate) as usize;
+        taken.borrow_mut().samples.resize(waited, 0.0);
+        let into = taken.clone();
+        let on_audio = OnAudio::new(move |event: AudioProcessingEvent| {
+            if let Ok(buffer) = event.input_buffer()
+                && let Ok(chunk) = buffer.get_channel_data(0)
+            {
+                into.borrow_mut().samples.extend_from_slice(&chunk);
+            }
+        });
+        processor.set_onaudioprocess(Some(on_audio.as_ref().unchecked_ref()));
+        source.connect_with_audio_node(&processor).map_err(js)?;
+        // The processor only runs while connected on; it writes nothing, so it is silent.
+        processor
+            .connect_with_audio_node(&context.destination())
+            .map_err(js)?;
+        let mut taken = taken.borrow_mut();
+        taken.processor = Some(processor);
+        taken.on_audio = Some(on_audio);
+        Ok(())
+    }
+
+    /// Plays mono samples, from a position, pausable.
+    pub struct Player {
+        context: AudioContext,
+        buffer: AudioBuffer,
+        node: RefCell<Option<AudioBufferSourceNode>>,
+        /// Seconds into the sound, and when that was on the context's clock.
+        from: Cell<(f64, f64)>,
+    }
 
     impl Player {
-        pub fn start(_samples: Arc<[i16]>, _rate: u32, _from: f64) -> Result<Self, String> {
-            Err(UNAVAILABLE.into())
+        /// Starts playing `samples` (at `rate` per second) from `from` seconds in.
+        pub fn start(samples: Arc<[i16]>, rate: u32, from: f64) -> Result<Self, String> {
+            if samples.is_empty() {
+                return Err("No sound".into());
+            }
+            let context = AudioContext::new().map_err(js)?;
+            let buffer = context
+                .create_buffer(1, samples.len() as u32, rate as f32)
+                .map_err(js)?;
+            let floats: Vec<f32> = samples.iter().map(|&s| f32::from(s) / 32768.0).collect();
+            buffer.copy_to_channel(&floats, 0).map_err(js)?;
+            // Pages may only make sound after a click; this follows one.
+            let _ = context.resume();
+            let player = Self {
+                context,
+                buffer,
+                node: RefCell::new(None),
+                from: Cell::new((0.0, 0.0)),
+            };
+            player.seek(from);
+            Ok(player)
         }
 
+        /// Seconds played so far.
         pub fn position(&self) -> f64 {
-            0.0
+            let (at, since) = self.from.get();
+            (at + self.context.current_time() - since).clamp(0.0, self.buffer.duration())
         }
 
-        pub fn seek(&self, _seconds: f64) {}
+        pub fn seek(&self, seconds: f64) {
+            let at = seconds.clamp(0.0, self.buffer.duration());
+            if let Some(old) = self.node.borrow_mut().take() {
+                #[allow(deprecated)]
+                let _ = old.stop();
+                let _ = old.disconnect();
+            }
+            self.from.set((at, self.context.current_time()));
+            let Ok(node) = self.context.create_buffer_source() else {
+                return;
+            };
+            node.set_buffer(Some(&self.buffer));
+            let started = node
+                .connect_with_audio_node(&self.context.destination())
+                .and_then(|_| node.start_with_when_and_grain_offset(0.0, at));
+            match started {
+                Ok(()) => *self.node.borrow_mut() = Some(node),
+                Err(err) => log::warn!("talktrack sound: {}", js(err)),
+            }
+        }
 
-        pub fn set_playing(&self, _playing: bool) {}
+        /// Pauses the context's clock together with the sound, or runs both on.
+        pub fn set_playing(&self, playing: bool) {
+            let _ = if playing {
+                self.context.resume()
+            } else {
+                self.context.suspend()
+            };
+        }
+    }
+
+    impl Drop for Player {
+        fn drop(&mut self) {
+            let _ = self.context.close();
+        }
     }
 }

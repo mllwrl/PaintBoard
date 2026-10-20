@@ -1,0 +1,4 @@
+# Shell scripts run in Linux containers and CI: keep them LF even on Windows checkouts.
+*.sh text eol=lf
+# Plugin packages are zips.
+*.pbplugin binary

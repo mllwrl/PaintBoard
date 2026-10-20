@@ -8,10 +8,29 @@
 //!   in a browser.
 //!
 //! - `PB_MAX_BOARDS`: the most boards the server keeps (no limit if unset);
-//! - `PB_BACKUP`: a folder for a daily copy of the database (the newest 7 are kept).
+//! - `PB_BACKUP`: a folder for a daily copy of the database (the newest 7 are kept);
+//! - `PB_TRUST_PROXY`: set to `1` behind a proxy (Caddy) that puts the client's address
+//!   in `X-Forwarded-For`, so limits per address count clients, not the proxy;
+//! - `PB_METRICS`: if set to `1`, `GET /metrics` shows counts for Prometheus (close it to
+//!   the public at the proxy);
+//! - `PB_PREVIEWS`: if set to `1`, the server fetches the heads of web pages for link
+//!   previews in the web version (see `preview`);
+//! - `PB_SMTP`, `PB_MAIL_FROM`, `PB_PUBLIC_URL`: accounts, signed in with links sent by
+//!   email through this SMTP server (see `mail`); `PB_PUBLIC_URL` is the server's address
+//!   for the links. `PB_MAIL=log` writes the emails to the log instead, to try it out.
 //!
 //! Put it behind a proxy with TLS (e.g. Caddy) so links work over `wss://`.
 
+#[cfg(not(target_arch = "wasm32"))]
+mod accounts;
+#[cfg(not(target_arch = "wasm32"))]
+mod limits;
+#[cfg(not(target_arch = "wasm32"))]
+mod mail;
+#[cfg(not(target_arch = "wasm32"))]
+mod metrics;
+#[cfg(not(target_arch = "wasm32"))]
+mod preview;
 #[cfg(not(target_arch = "wasm32"))]
 mod server;
 #[cfg(not(target_arch = "wasm32"))]
@@ -48,6 +67,45 @@ async fn main() {
             .expect("not shared yet")
             .max_boards = Some(max);
     }
+    if std::env::var("PB_TRUST_PROXY").is_ok_and(|v| v == "1") {
+        std::sync::Arc::get_mut(&mut shared)
+            .expect("not shared yet")
+            .limits
+            .trust_proxy = true;
+    }
+    if std::env::var("PB_METRICS").is_ok_and(|v| v == "1") {
+        std::sync::Arc::get_mut(&mut shared)
+            .expect("not shared yet")
+            .serve_metrics = true;
+    }
+    if std::env::var("PB_PREVIEWS").is_ok_and(|v| v == "1") {
+        std::sync::Arc::get_mut(&mut shared)
+            .expect("not shared yet")
+            .previews = Some(preview::Previews::new());
+    }
+    let mailer = match mail::Mailer::from_env() {
+        Ok(mailer) => mailer,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+    };
+    let public_url = std::env::var("PB_PUBLIC_URL")
+        .ok()
+        .map(|u| u.trim().trim_end_matches('/').to_owned())
+        .filter(|u| !u.is_empty());
+    if matches!(mailer, Some(mail::Mailer::Smtp { .. })) && public_url.is_none() {
+        eprintln!("PB_SMTP needs PB_PUBLIC_URL, the server's address for links in emails");
+        std::process::exit(1);
+    }
+    if mailer.is_some() {
+        log::info!("accounts on");
+    }
+    {
+        let shared = std::sync::Arc::get_mut(&mut shared).expect("not shared yet");
+        shared.mailer = mailer;
+        shared.public_url = public_url;
+    }
     if let Some(dir) = std::env::var_os("PB_BACKUP").map(PathBuf::from) {
         let backer = shared.clone();
         tokio::spawn(async move {
@@ -77,7 +135,8 @@ async fn main() {
         }
     };
     log::info!("listening on {addr}, boards in {}", db.display());
-    let app = server::router(shared.clone());
+    let app = server::router(shared.clone())
+        .into_make_service_with_connect_info::<std::net::SocketAddr>();
     let stopped = axum::serve(listener, app).with_graceful_shutdown(async {
         let _ = tokio::signal::ctrl_c().await;
         log::info!("stopping");

@@ -46,6 +46,10 @@ mod key {
     /// In `META`: the board is protected from changes.
     pub const READ_ONLY: &str = "readOnly";
     pub const TITLE: &str = "title";
+    /// In `META`: the board's background color (`RRGGBBAA` as a number), if not the usual.
+    pub const BACKGROUND: &str = "background";
+    /// In `META`: the board's countdown, see `Timer::to_value`.
+    pub const TIMER: &str = "timer";
     pub const OBJECTS: &str = "objects";
     /// Root map of the board's tags: `RRGGBBAA;name` (hex color) by tag id.
     pub const TAGS: &str = "tags";
@@ -159,6 +163,24 @@ mod key {
     pub const GROUP: &str = "group";
 }
 
+/// The name of the board in `doc`, if it was given one: for the server, which keeps
+/// boards as bare CRDT documents.
+pub fn board_title(doc: &LoroDoc) -> Option<String> {
+    get_str(&doc.get_map(key::META), key::TITLE).filter(|t| !t.trim().is_empty())
+}
+
+/// Whether someone who may only comment may write `key` of the root map `map`: exactly
+/// what [`Command::allowed_commenting`](crate::Command::allowed_commenting) commands write
+/// (their own votes, not the voting's settings). The server checks such people's changes
+/// with it.
+pub fn commenting_writes(map: &str, key: &str) -> bool {
+    match map {
+        key::COMMENTS | key::REACTIONS => true,
+        key::VOTING => key.starts_with("v|"),
+        _ => false,
+    }
+}
+
 #[derive(Debug)]
 pub enum Error {
     UnknownObject(ObjectId),
@@ -250,9 +272,9 @@ pub struct Document {
     show_hidden: bool,
     /// The board is protected from changes; rebuilt with `objects`.
     read_only: bool,
-    /// This copy may only look (a shared board opened with a view link): no command at
-    /// all is applied. Not stored.
-    view_only: bool,
+    /// What this copy may do: less than editing for a shared board opened with a link
+    /// to look or to comment. Not stored.
+    role: crate::Role,
     /// The board's layers, bottom to top, the base layer among them; rebuilt with `objects`.
     layers: Vec<Layer>,
     /// The layers of top-level objects and groups not on the base layer.
@@ -447,7 +469,7 @@ impl Document {
             focus: None,
             show_hidden: false,
             read_only: false,
-            view_only: false,
+            role: crate::Role::Edit,
             layers: vec![Layer::base()],
             unit_layers: HashMap::new(),
             active_layer: Layer::BASE.into(),
@@ -715,7 +737,7 @@ impl Document {
     }
 
     pub fn apply(&mut self, command: Command) -> Result<Applied> {
-        if self.view_only || (self.read_only && !command.allowed_read_only()) {
+        if !self.role.allows(&command) || (self.read_only && !command.allowed_read_only()) {
             return Err(Error::ReadOnly);
         }
         let mut applied = Applied::default();
@@ -1212,6 +1234,22 @@ impl Document {
                 self.doc.get_map(key::META).insert(key::READ_ONLY, on)?;
                 self.doc.set_next_commit_origin(NOT_UNDONE);
             }
+            Command::SetBackground(color) => {
+                let meta = self.doc.get_map(key::META);
+                match color {
+                    Some(color) => meta.insert(key::BACKGROUND, i64::from(color.0))?,
+                    None => meta.delete(key::BACKGROUND)?,
+                }
+            }
+            Command::SetTimer(timer) => {
+                let meta = self.doc.get_map(key::META);
+                match timer {
+                    Some(timer) => meta.insert(key::TIMER, timer.to_value())?,
+                    None if meta.get(key::TIMER).is_some() => meta.delete(key::TIMER)?,
+                    None => {}
+                }
+                self.doc.set_next_commit_origin(NOT_UNDONE);
+            }
             Command::SetTitle(title) => {
                 self.doc.get_map(key::META).insert(key::TITLE, &*title)?;
                 self.doc.set_next_commit_origin(NOT_UNDONE);
@@ -1339,22 +1377,41 @@ impl Document {
 
     /// Whether the board is protected from changes (see [`Command::allowed_read_only`]).
     pub fn read_only(&self) -> bool {
-        self.read_only || self.view_only
+        self.read_only || self.role != crate::Role::Edit
+    }
+
+    /// The board's background color, if it was given one (see [`Command::SetBackground`]).
+    pub fn background(&self) -> Option<Rgba> {
+        match self.doc.get_map(key::META).get(key::BACKGROUND) {
+            Some(ValueOrContainer::Value(LoroValue::I64(v))) => u32::try_from(v).ok().map(Rgba),
+            _ => None,
+        }
+    }
+
+    /// The board's countdown, if one is set (see [`Command::SetTimer`]).
+    pub fn timer(&self) -> Option<crate::Timer> {
+        crate::Timer::from_value(&get_str(&self.doc.get_map(key::META), key::TIMER)?)
     }
 
     /// The board's name, if it was given one (see [`Command::SetTitle`]).
     pub fn title(&self) -> Option<String> {
-        get_str(&self.doc.get_map(key::META), key::TITLE).filter(|t| !t.trim().is_empty())
+        board_title(&self.doc)
     }
 
-    /// Whether this copy may only look, changing nothing (see [`Document::set_view_only`]).
+    /// What this copy may do (see [`Document::set_role`]).
+    pub fn role(&self) -> crate::Role {
+        self.role
+    }
+
+    /// Whether this copy may only look, changing nothing.
     pub fn view_only(&self) -> bool {
-        self.view_only
+        self.role == crate::Role::View
     }
 
-    /// Lets this copy only look: for a shared board opened with a view link.
-    pub fn set_view_only(&mut self, view_only: bool) {
-        self.view_only = view_only;
+    /// Lets this copy do only what `role` allows: for a shared board opened with a link
+    /// to look or to comment.
+    pub fn set_role(&mut self, role: crate::Role) {
+        self.role = role;
     }
 
     /// Starts merging the following commands into one undo step, e.g. while a slider is
@@ -2311,7 +2368,7 @@ fn lines_from_string(s: &str) -> Vec<Line> {
 /// Writes a web page card's fields.
 fn write_embed(meta: &LoroMap, embed: &crate::Embed) -> Result<()> {
     meta.insert(key::URL, &*embed.url)?;
-    meta.insert(key::TEXT, &*embed.title)?;
+    write_text(meta, &embed.title)?;
     meta.insert(key::DESCRIPTION, &*embed.description)?;
     meta.insert(key::SITE, &*embed.site)?;
     Ok(())
@@ -2910,7 +2967,7 @@ fn read_bends(meta: &LoroMap) -> Arc<[Point]> {
 }
 
 fn write_label(meta: &LoroMap, label: &Label) -> Result<()> {
-    meta.insert(key::TEXT, &*label.text)?;
+    write_text(meta, &label.text)?;
     meta.insert(key::LABEL_AT, label.at.clamp(0.0, 1.0))?;
     meta.insert(key::LABEL_W, label.size.width)?;
     meta.insert(key::LABEL_H, label.size.height)?;
@@ -3621,6 +3678,22 @@ mod tests {
         doc.redo().unwrap();
         let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
         assert!(loaded.is_hidden(c) && !loaded.shows_hidden());
+    }
+
+    #[test]
+    fn the_background_color_is_kept_undone_and_reset() {
+        let mut doc = Document::new();
+        assert_eq!(doc.background(), None);
+        let blue = Rgba::rgb(0xE3, 0xF0, 0xFB);
+        doc.apply(Command::SetBackground(Some(blue))).unwrap();
+        assert_eq!(doc.background(), Some(blue));
+        let copy = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(copy.background(), Some(blue));
+        doc.undo().unwrap();
+        assert_eq!(doc.background(), None);
+        doc.redo().unwrap();
+        doc.apply(Command::SetBackground(None)).unwrap();
+        assert_eq!(doc.background(), None);
     }
 
     #[test]

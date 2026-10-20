@@ -1,0 +1,26 @@
+[package]
+name = "pb-plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Plugins for PaintBoard: manifests, the messages between a plugin and the app, and the JavaScript engine they run in"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+# .pbplugin files are zips; both already come with the PDF and PNG readers.
+flate2 = "1"
+crc32fast = "1"
+
+# On the desktop plugins run in QuickJS, built in (MIT); in the browser, in a Web Worker.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rquickjs = "0.14"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["Worker", "Blob", "BlobPropertyBag", "Url", "MessageEvent", "ErrorEvent"] }

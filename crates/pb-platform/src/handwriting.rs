@@ -16,22 +16,34 @@ pub fn is_available() -> bool {
 }
 
 /// Recognizes the strokes as one line of text on a background thread, then calls `done`
-/// there with the best guess.
+/// there with its words, each as the recognizer's guesses, best first.
 pub fn recognize(strokes: Vec<Stroke>, done: impl Done) {
     imp::recognize(strokes, done);
+}
+
+/// Words of recognized text, each with alternatives (best first); see [`best_guess`].
+pub type Reading = Vec<Vec<String>>;
+
+/// The recognizer's best guess: the first alternative of each word.
+pub fn best_guess(reading: &Reading) -> String {
+    reading
+        .iter()
+        .filter_map(|word| word.first().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// What [`recognize`] calls with its result. It runs on another thread where there are
 /// threads, so it must be `Send` there; the web has none.
 #[cfg(not(target_arch = "wasm32"))]
-pub trait Done: FnOnce(Result<String, String>) + Send + 'static {}
+pub trait Done: FnOnce(Result<Reading, String>) + Send + 'static {}
 #[cfg(not(target_arch = "wasm32"))]
-impl<F: FnOnce(Result<String, String>) + Send + 'static> Done for F {}
+impl<F: FnOnce(Result<Reading, String>) + Send + 'static> Done for F {}
 
 #[cfg(target_arch = "wasm32")]
-pub trait Done: FnOnce(Result<String, String>) + 'static {}
+pub trait Done: FnOnce(Result<Reading, String>) + 'static {}
 #[cfg(target_arch = "wasm32")]
-impl<F: FnOnce(Result<String, String>) + 'static> Done for F {}
+impl<F: FnOnce(Result<Reading, String>) + 'static> Done for F {}
 
 /// Line height recognizers expect, in their device-independent pixels.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -82,7 +94,7 @@ mod imp {
         });
     }
 
-    fn recognize_blocking(strokes: &[Stroke]) -> windows::core::Result<String> {
+    fn recognize_blocking(strokes: &[Stroke]) -> windows::core::Result<super::Reading> {
         #[allow(unsafe_code)]
         // SAFETY: called once at the start of a thread we own, before any WinRT use; the
         // thread joins the multithreaded apartment, which waiting on async results needs.
@@ -112,11 +124,14 @@ mod imp {
         let mut words = Vec::new();
         for i in 0..results.Size()? {
             let candidates = results.GetAt(i)?.GetTextCandidates()?;
-            if candidates.Size()? > 0 {
-                words.push(candidates.GetAt(0)?.to_string());
+            let word: Vec<String> = (0..candidates.Size()?)
+                .map(|j| candidates.GetAt(j).map(|c| c.to_string()))
+                .collect::<windows::core::Result<_>>()?;
+            if !word.is_empty() {
+                words.push(word);
             }
         }
-        Ok(words.join(" "))
+        Ok(words)
     }
 }
 
@@ -126,7 +141,7 @@ mod imp {
 
     pub fn recognize(_strokes: Vec<Stroke>, done: impl super::Done) {
         done(Err(
-            "handwriting recognition is not available on this platform yet".into(),
+            "handwriting recognition is not available on this system (only on Windows)".into(),
         ));
     }
 }

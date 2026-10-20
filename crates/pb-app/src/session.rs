@@ -244,6 +244,59 @@ impl Session {
         Vec::new()
     }
 
+    /// Gives the board kept in the browser at `from` the name `name`; the open board
+    /// (`doc`) goes on in its new place. Returns where it is now.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn rename_stored(
+        &mut self,
+        from: &Path,
+        name: &str,
+        doc: &Document,
+    ) -> io::Result<PathBuf> {
+        let name = file_stem_for(name);
+        if name.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                tr("The name is empty"),
+            ));
+        }
+        let to = from.with_file_name(format!("{name}.{EXTENSION}"));
+        if to == from {
+            return Ok(to);
+        }
+        if fs::exists(&to) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                tr("There is already a board with this name"),
+            ));
+        }
+        if self.path.as_deref() == Some(from) {
+            self.collect_saving(true, Instant::now());
+            fs::write_atomic(&to, &encode(doc))?;
+            fs::remove(from)?;
+            self.switch_to(Some(to.clone()), doc);
+        } else {
+            fs::write_atomic(&to, &fs::read(from)?)?;
+            fs::remove(from)?;
+        }
+        Ok(to)
+    }
+
+    /// Lets the browser download the board kept in it at `path`; the open board is
+    /// `doc`, perhaps not written back yet.
+    #[cfg(target_arch = "wasm32")]
+    pub fn download_stored(&self, path: &Path, doc: &Document) {
+        if self.path.as_deref() == Some(path) {
+            return self.download(doc);
+        }
+        let name = path.file_name().unwrap_or_default();
+        let saved = fs::read(path)
+            .and_then(|bytes| fs::write_atomic(&fs::downloads_dir().join(name), &bytes));
+        if let Err(err) = saved {
+            dialog::show_error(tr("Could not save the board"), &err.to_string());
+        }
+    }
+
     /// Lets the browser download the board as a file (the web keeps boards inside the
     /// browser otherwise).
     #[cfg(target_arch = "wasm32")]
@@ -440,4 +493,29 @@ fn keep_in_browser(path: &Path) -> io::Result<PathBuf> {
 
 fn load(path: &Path) -> Result<Document, Box<dyn std::error::Error>> {
     Ok(decode(&fs::read(path)?)?)
+}
+/// `name` as a file name: trimmed, without characters file systems refuse.
+fn file_stem_for(name: &str) -> String {
+    name.trim()
+        .chars()
+        .map(|c| {
+            if r#"/\:*?"<>|"#.contains(c) || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_become_file_names() {
+        assert_eq!(file_stem_for("  Plan: Q4/2026? "), "Plan_ Q4_2026_");
+        assert_eq!(file_stem_for("Доска"), "Доска");
+        assert_eq!(file_stem_for("   "), "");
+    }
 }

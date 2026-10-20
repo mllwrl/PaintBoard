@@ -327,3 +327,49 @@ fn sample_boards_look_as_kept() {
         .collect();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// vello fits all images drawn in a frame into one atlas of at most 8192×8192 pixels; nine
+/// big photos at full size would not fit, and some would silently be missing.
+#[test]
+fn many_big_photos_all_show() {
+    let Some(mut gpu) = pollster::block_on(Offscreen::new()) else {
+        eprintln!("no GPU found: snapshot tests skipped");
+        return;
+    };
+    let mut doc = Document::new();
+    let colors: Vec<[u8; 3]> = (0..9u8)
+        .map(|i| [40 + i * 20, 200 - i * 20, if i % 2 == 0 { 30 } else { 220 }])
+        .collect();
+    let (w, h) = (4000u32, 3000u32);
+    let mut items = Vec::new();
+    for (i, c) in colors.iter().enumerate() {
+        let rgba = [c[0], c[1], c[2], 255].repeat((w * h) as usize);
+        let png = pb_io::image::encode_png(&pb_io::image::Pixels {
+            width: w,
+            height: h,
+            rgba,
+        })
+        .unwrap();
+        let asset = doc.add_asset(png);
+        let (col, row) = ((i % 3) as f64, (i / 3) as f64);
+        let bounds = Rect::new(
+            col * 160.0,
+            row * 106.0,
+            col * 160.0 + 150.0,
+            row * 106.0 + 100.0,
+        );
+        items.push(object(
+            ObjectKind::Image(pb_core::Image::new(asset)),
+            bounds,
+            Style::default(),
+        ));
+    }
+    doc.apply(Command::Create(items.into_iter().map(Into::into).collect()))
+        .unwrap();
+    let rgba = draw(&mut gpu, &doc, &Theme::light());
+    for (i, c) in colors.iter().enumerate() {
+        let (x, y) = ((i % 3) * 160 + 75, (i / 3) * 106 + 50);
+        let at = (y * WIDTH as usize + x) * 4;
+        assert_eq!(&rgba[at..at + 3], c, "image {i} is missing");
+    }
+}

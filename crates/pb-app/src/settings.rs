@@ -1,6 +1,7 @@
 //! The app's own preferences, kept in its data folder between runs.
 
 use crate::i18n::Lang;
+use crate::ui::Panels;
 
 /// File with the chosen theme: `dark` or `light`.
 const THEME_FILE: &str = "theme.txt";
@@ -52,6 +53,27 @@ pub fn save_view(scale: f32, high_contrast: bool) {
     }
 }
 
+/// File with the panels put away (see [`Panels::to_words`]).
+const PANELS_FILE: &str = "panels.txt";
+
+/// The panels as left last time; all shown if never changed.
+pub fn panels() -> Panels {
+    pb_platform::fs::app_data_dir()
+        .and_then(|dir| pb_platform::fs::read(&dir.join(PANELS_FILE)))
+        .map(|bytes| Panels::from_words(&String::from_utf8_lossy(&bytes)))
+        .unwrap_or_default()
+}
+
+/// Remembers which panels are put away.
+pub fn save_panels(panels: Panels) {
+    let saved = pb_platform::fs::app_data_dir().and_then(|dir| {
+        pb_platform::fs::write_atomic(&dir.join(PANELS_FILE), panels.to_words().as_bytes())
+    });
+    if let Err(err) = saved {
+        log::warn!("panels not saved: {err}");
+    }
+}
+
 /// File with the name the user goes by on boards, if they gave one.
 const NAME_FILE: &str = "name.txt";
 
@@ -76,7 +98,16 @@ pub fn save_name(name: &str) {
 /// Kept here rather than in the board, which everyone with a view link gets too.
 const SHARED_FILE: &str = "shared-boards.txt";
 
-fn shared_lines() -> Vec<(String, String, String)> {
+/// The links a board is shared by, as text: the one this copy joined with, and, when it
+/// made the board, those to look and to comment.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SharedLinks {
+    pub link: String,
+    pub view: Option<String>,
+    pub comment: Option<String>,
+}
+
+fn shared_lines() -> Vec<(String, SharedLinks)> {
     let text = pb_platform::fs::app_data_dir()
         .and_then(|dir| pb_platform::fs::read(&dir.join(SHARED_FILE)))
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
@@ -86,37 +117,66 @@ fn shared_lines() -> Vec<(String, String, String)> {
             let mut parts = line.split('\t');
             let board = parts.next()?.to_owned();
             let link = parts.next().filter(|l| !l.is_empty())?.to_owned();
-            let view = parts.next().unwrap_or_default().to_owned();
-            Some((board, link, view))
+            let mut next = || parts.next().filter(|l| !l.is_empty()).map(str::to_owned);
+            let (view, comment) = (next(), next());
+            Some((
+                board,
+                SharedLinks {
+                    link,
+                    view,
+                    comment,
+                },
+            ))
         })
         .collect()
 }
 
-/// The links the board in file `board` (empty: the untitled board) is shared by: to
-/// edit or look as joined, and to look, if known.
-pub fn shared_link(board: &str) -> Option<(String, Option<String>)> {
+/// The links the board in file `board` (empty: the untitled board) is shared by.
+pub fn shared_link(board: &str) -> Option<SharedLinks> {
     shared_lines()
         .into_iter()
-        .find(|(b, ..)| b == board)
-        .map(|(_, link, view)| (link, (!view.is_empty()).then_some(view)))
+        .find(|(b, _)| b == board)
+        .map(|(_, links)| links)
+}
+
+/// The file of the board shared by `link` (any of its links), if one is remembered.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn board_with_link(link: &str) -> Option<String> {
+    shared_lines()
+        .into_iter()
+        .find(|(_, l)| {
+            l.link == link || l.view.as_deref() == Some(link) || l.comment.as_deref() == Some(link)
+        })
+        .map(|(board, _)| board)
+}
+
+/// The links of the board in file `from` are now those of the board in `to`.
+pub fn move_shared_link(from: &str, to: &str) {
+    if let Some(links) = shared_link(from) {
+        save_shared_link(from, None);
+        save_shared_link(to, Some(&links));
+    }
 }
 
 /// Remembers (or with `None` forgets) the links the board in file `board` is shared by.
-pub fn save_shared_link(board: &str, links: Option<(&str, Option<&str>)>) {
+pub fn save_shared_link(board: &str, links: Option<&SharedLinks>) {
     let mut lines: Vec<_> = shared_lines()
         .into_iter()
-        .filter(|(b, ..)| b != board)
+        .filter(|(b, _)| b != board)
         .collect();
-    if let Some((link, view)) = links {
-        lines.push((
-            board.to_owned(),
-            link.to_owned(),
-            view.unwrap_or_default().to_owned(),
-        ));
+    if let Some(links) = links {
+        lines.push((board.to_owned(), links.clone()));
     }
     let text: String = lines
         .iter()
-        .map(|(b, l, v)| format!("{b}\t{l}\t{v}\n"))
+        .map(|(b, l)| {
+            format!(
+                "{b}\t{}\t{}\t{}\n",
+                l.link,
+                l.view.as_deref().unwrap_or_default(),
+                l.comment.as_deref().unwrap_or_default()
+            )
+        })
         .collect();
     let saved = pb_platform::fs::app_data_dir()
         .and_then(|dir| pb_platform::fs::write_atomic(&dir.join(SHARED_FILE), text.as_bytes()));
@@ -163,5 +223,52 @@ pub fn save_dark_theme(dark: bool) {
     });
     if let Err(err) = saved {
         log::warn!("theme not saved: {err}");
+    }
+}
+
+/// File with the accounts signed in, a line each: server, email, session.
+const ACCOUNTS_FILE: &str = "accounts.txt";
+
+fn account_lines() -> Vec<(String, String, String)> {
+    let text = pb_platform::fs::app_data_dir()
+        .and_then(|dir| pb_platform::fs::read(&dir.join(ACCOUNTS_FILE)))
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let server = parts.next()?.to_owned();
+            let email = parts.next()?.to_owned();
+            let session = parts.next().filter(|s| !s.is_empty())?.to_owned();
+            Some((server, email, session))
+        })
+        .collect()
+}
+
+/// The account signed in on `server`: its email and session.
+pub fn account(server: &str) -> Option<(String, String)> {
+    account_lines()
+        .into_iter()
+        .find(|(s, ..)| s == server)
+        .map(|(_, email, session)| (email, session))
+}
+
+/// Remembers (or with `None` forgets) the account signed in on `server`.
+pub fn save_account(server: &str, account: Option<(&str, &str)>) {
+    let mut lines: Vec<_> = account_lines()
+        .into_iter()
+        .filter(|(s, ..)| s != server)
+        .collect();
+    if let Some((email, session)) = account {
+        lines.push((server.to_owned(), email.to_owned(), session.to_owned()));
+    }
+    let text: String = lines
+        .iter()
+        .map(|(s, e, k)| format!("{s}\t{e}\t{k}\n"))
+        .collect();
+    let saved = pb_platform::fs::app_data_dir()
+        .and_then(|dir| pb_platform::fs::write_atomic(&dir.join(ACCOUNTS_FILE), text.as_bytes()));
+    if let Err(err) = saved {
+        log::warn!("account not remembered: {err}");
     }
 }

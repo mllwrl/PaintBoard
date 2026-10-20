@@ -12,6 +12,7 @@ mod handles;
 mod hit;
 mod ink;
 pub mod math;
+pub mod plot;
 pub mod quick;
 mod selection;
 mod table;
@@ -227,6 +228,9 @@ enum Gesture {
         points: Vec<(Point, f64)>,
         /// Zoom when the stroke started; its width and smoothing follow it.
         zoom: f64,
+        /// While Shift is held, the stroke goes straight from this point (an index into
+        /// `points`) to the pointer.
+        straight_from: Option<usize>,
     },
     Erase {
         last: Point,
@@ -299,12 +303,14 @@ pub struct Tools {
     node: Option<(ObjectId, std::sync::Arc<str>)>,
 }
 
-/// A block of cells of table `id`, from the cell first picked to the one picked last.
-#[derive(Clone, Copy, Debug)]
+/// Cells of table `id`: the block from the cell first picked to the one picked last, and
+/// blocks picked before it with Ctrl held.
+#[derive(Clone, Debug)]
 struct CellSelection {
     id: ObjectId,
     anchor: (usize, usize),
     end: (usize, usize),
+    more: Vec<CellRange>,
 }
 
 impl Default for Tools {
@@ -340,6 +346,10 @@ impl Tools {
             self.last_shape = shape;
         }
         self.active = tool;
+        // Pen, marker and eraser cannot touch the selection, so it would only glow there.
+        if tool.draws_ink() || tool == ToolKind::Eraser {
+            self.clear_selection();
+        }
         self.gesture = None;
         self.hover = None;
         self.hover_grip = None;
@@ -531,27 +541,66 @@ impl Tools {
             id,
             anchor: cell,
             end: cell,
+            more: Vec::new(),
         });
     }
 
-    /// The selected cells, if a block of cells of the single selected table is selected.
+    /// The block of cells picked last, if cells of the single selected table are selected.
     pub fn table_cells(&self, doc: &Document) -> Option<(ObjectId, CellRange)> {
-        let sel = self.cells?;
+        let sel = self.cells.as_ref()?;
         let (id, _, table) = self.single_table(doc).filter(|(id, ..)| *id == sel.id)?;
         let range = CellRange::new(sel.anchor, sel.end);
         (range.row1 < table.rows.len() && range.col1 < table.cols.len())
             .then(|| (id, table.expand(range)))
     }
 
+    /// All selected blocks of cells (see [`Self::table_cells`]), those picked with Ctrl too.
+    pub fn table_cell_blocks(&self, doc: &Document) -> Option<(ObjectId, Vec<CellRange>)> {
+        let (id, last) = self.table_cells(doc)?;
+        let (_, _, table) = self.single_table(doc)?;
+        let fits = |r: &CellRange| r.row1 < table.rows.len() && r.col1 < table.cols.len();
+        let mut blocks: Vec<CellRange> = self
+            .cells
+            .as_ref()?
+            .more
+            .iter()
+            .copied()
+            .filter(fits)
+            .map(|r| table.expand(r))
+            .collect();
+        blocks.push(last);
+        Some((id, blocks))
+    }
+
+    /// Each selected cell once, by row and column.
+    fn selected_cells(&self, doc: &Document) -> Option<(ObjectId, Vec<(usize, usize)>)> {
+        let (id, blocks) = self.table_cell_blocks(doc)?;
+        let mut cells: Vec<_> = blocks
+            .iter()
+            .flat_map(|b| b.rows().flat_map(move |r| b.cols().map(move |c| (r, c))))
+            .collect();
+        cells.sort_unstable();
+        cells.dedup();
+        Some((id, cells))
+    }
+
     /// Where the selected cells or card are (world), following the object's rotation.
-    pub fn cells_frame(&self, doc: &Document) -> Option<Frame> {
+    pub fn cells_frames(&self, doc: &Document) -> Vec<Frame> {
         if let Some(frame) = self.card_frame(doc).or_else(|| self.node_frame(doc)) {
-            return Some(frame);
+            return vec![frame];
         }
-        let (_, range) = self.table_cells(doc)?;
-        let (_, data, table) = self.single_table(doc)?;
-        let rect = table.range_rect(data.bounds, range)?;
-        Some(Frame::axis_aligned(rect).rotated_about(data.bounds.center(), data.rotation))
+        let (Some((_, blocks)), Some((_, data, table))) =
+            (self.table_cell_blocks(doc), self.single_table(doc))
+        else {
+            return Vec::new();
+        };
+        blocks
+            .into_iter()
+            .filter_map(|range| table.range_rect(data.bounds, range))
+            .map(|rect| {
+                Frame::axis_aligned(rect).rotated_about(data.bounds.center(), data.rotation)
+            })
+            .collect()
     }
 
     /// Deselects the cells or card but keeps their table or board selected. Returns true if
@@ -671,6 +720,7 @@ impl Tools {
                     marker,
                     points: vec![(p, pressure)],
                     zoom: pointer.zoom,
+                    straight_from: None,
                 });
                 return true;
             }
@@ -862,17 +912,43 @@ impl Tools {
         self.card = None;
         let mut cell_on_click = None;
         if let Some((id, cell)) = cell {
-            let picking = self.cells.is_some_and(|c| c.id == id);
+            let picking = self.cells.as_ref().is_some_and(|c| c.id == id)
+                || (pointer.ctrl && self.selection.ids() == [id]);
             if picking || pointer.shift {
-                // With cells selected, a drag selects cells; Shift extends the block.
-                let anchor = match self.cells {
-                    Some(c) if c.id == id && pointer.shift => c.anchor,
-                    _ => cell,
+                // With cells selected, a drag selects cells; Shift extends the block, and
+                // Ctrl (like in Explorer) adds a cell or takes a picked one back.
+                let (anchor, more) = match self.cells.take() {
+                    Some(c) if c.id == id && pointer.shift => (c.anchor, c.more),
+                    Some(c) if c.id == id && pointer.ctrl => {
+                        let mut more = c.more;
+                        more.push(CellRange::new(c.anchor, c.end));
+                        let before = more.len();
+                        more.retain(|b| !b.contains(cell));
+                        if more.len() < before {
+                            // Took cells back: the last block left becomes the current one.
+                            match more.pop() {
+                                Some(last) => {
+                                    self.cells = Some(CellSelection {
+                                        id,
+                                        anchor: (last.row0, last.col0),
+                                        end: (last.row1, last.col1),
+                                        more,
+                                    });
+                                }
+                                None => self.cells = None,
+                            }
+                            self.hover = None;
+                            return true;
+                        }
+                        (cell, more)
+                    }
+                    _ => (cell, Vec::new()),
                 };
                 self.cells = Some(CellSelection {
                     id,
                     anchor,
                     end: cell,
+                    more,
                 });
                 self.gesture = Some(Gesture::SelectCells);
                 self.hover = None;
@@ -983,12 +1059,33 @@ impl Tools {
                 self.selection.set(ids);
                 true
             }
-            Some(Gesture::Ink { marker, points, .. }) => {
+            Some(Gesture::Ink {
+                marker,
+                points,
+                straight_from,
+                ..
+            }) => {
+                let pressure = if *marker { 1.0 } else { pointer.pressure };
+                // Shift draws a straight line from where it was pressed; letting it go
+                // carries on freehand from the line's end.
+                if pointer.shift {
+                    let from = *straight_from.get_or_insert(points.len() - 1);
+                    points.truncate(from + 1);
+                    // One width all along, the firmest so far: a line from where a stylus
+                    // touched down would start from next to no pressure.
+                    let firm = points.iter().map(|&(_, p)| p).fold(pressure, f64::max);
+                    points[from].1 = firm;
+                    let start = points[from].0;
+                    if pointer.screen_distance(start) >= ink::MIN_STEP {
+                        points.push((ink::straighten(start, pointer.world), firm));
+                    }
+                    return true;
+                }
+                *straight_from = None;
                 let last = points.last().map(|(p, _)| *p);
                 if last.is_some_and(|last| pointer.screen_distance(last) < ink::MIN_STEP) {
                     return false;
                 }
-                let pressure = if *marker { 1.0 } else { pointer.pressure };
                 points.push((pointer.world, pressure));
                 true
             }
@@ -1102,6 +1199,7 @@ impl Tools {
                 marker,
                 points,
                 zoom,
+                ..
             } => ink::stroke(points, self.ink_style(*marker), *marker, *zoom, true)
                 .map(|data| Command::Create(vec![data.into()])),
             Gesture::Erase { erased, .. } => {
@@ -1456,6 +1554,21 @@ impl Tools {
                 *i += 1;
             }
         }
+        // So do blocks picked before, wherever they are.
+        if let Some(sel) = &mut self.cells {
+            for block in &mut sel.more {
+                let (a, b) = if rows {
+                    (&mut block.row0, &mut block.row1)
+                } else {
+                    (&mut block.col0, &mut block.col1)
+                };
+                for i in [a, b] {
+                    if *i >= at {
+                        *i += 1;
+                    }
+                }
+            }
+        }
         Some(command)
     }
 
@@ -1494,6 +1607,9 @@ impl Tools {
             return false;
         };
         let merged = table.merged();
+        if self.cells.as_ref().is_some_and(|c| !c.more.is_empty()) {
+            return false;
+        }
         if merge {
             !range.is_single() && !merged.contains(&range)
         } else {
@@ -1524,21 +1640,64 @@ impl Tools {
 
     /// Empties the selected cells, one command per cell with text.
     pub fn clear_cells_text(&self, doc: &Document) -> Vec<Command> {
-        let Some((id, range)) = self.table_cells(doc) else {
+        self.change_cells(doc, |text, _| {
+            (!text.is_empty()).then(pb_core::Cell::default)
+        })
+    }
+
+    /// Turns a mark on for all text of the selected cells, or off when all of it has it:
+    /// `has` reads the mark and `set` changes it. One command per changed cell.
+    pub fn mark_cells(
+        &self,
+        doc: &Document,
+        has: impl Fn(&pb_core::TextMarks) -> bool,
+        set: impl Fn(pb_core::TextMarks, bool) -> pb_core::TextMarks,
+    ) -> Vec<Command> {
+        let Some((_, cells)) = self.selected_cells(doc) else {
             return Vec::new();
         };
         let Some((_, _, table)) = self.single_table(doc) else {
             return Vec::new();
         };
-        range
-            .rows()
-            .flat_map(|r| range.cols().map(move |c| (r, c)))
-            .filter(|&(r, c)| !table.text(r, c).0.is_empty())
-            .map(|(r, c)| Command::SetCell {
-                id,
-                row: table.rows[r].id.clone(),
-                col: table.cols[c].id.clone(),
-                cell: pb_core::Cell::default(),
+        let on = !cells.iter().all(|&(r, c)| {
+            let (text, spans) = table.text(r, c);
+            pb_core::rich::all(spans, 0..text.len(), &has)
+        });
+        self.change_cells(doc, |text, spans| {
+            if text.is_empty() {
+                return None;
+            }
+            let marked = pb_core::rich::apply(spans, 0..text.len(), text.len(), |m| set(m, on));
+            (*marked != *spans).then(|| pb_core::Cell {
+                text: text.into(),
+                spans: marked.into(),
+            })
+        })
+    }
+
+    /// A command for each selected cell that `change` gives a new content, from its text
+    /// and spans.
+    fn change_cells(
+        &self,
+        doc: &Document,
+        change: impl Fn(&str, &[pb_core::Span]) -> Option<pb_core::Cell>,
+    ) -> Vec<Command> {
+        let (Some((id, cells)), Some((_, _, table))) =
+            (self.selected_cells(doc), self.single_table(doc))
+        else {
+            return Vec::new();
+        };
+        cells
+            .into_iter()
+            .filter_map(|(r, c)| {
+                let (text, spans) = table.text(r, c);
+                let cell = change(text, spans)?;
+                Some(Command::SetCell {
+                    id,
+                    row: table.rows[r].id.clone(),
+                    col: table.cols[c].id.clone(),
+                    cell,
+                })
             })
             .collect()
     }
@@ -1732,6 +1891,7 @@ impl Tools {
                 marker,
                 points,
                 zoom,
+                ..
             }) => ink::stroke(points, self.ink_style(*marker), *marker, *zoom, false)
                 .into_iter()
                 .collect(),
@@ -1746,6 +1906,26 @@ impl Tools {
                 .collect(),
             _ => Vec::new(),
         }
+    }
+
+    /// The gesture in progress drags something along (objects, a corner, a marquee, a
+    /// line's end): the view should follow when the pointer nears the window's edge.
+    pub fn autopans(&self) -> bool {
+        matches!(
+            self.gesture,
+            Some(
+                Gesture::Move { dragging: true, .. }
+                    | Gesture::MoveCard { dragging: true, .. }
+                    | Gesture::Resize { .. }
+                    | Gesture::Marquee { .. }
+                    | Gesture::Shape { .. }
+                    | Gesture::Connect { .. }
+                    | Gesture::MoveEnd { .. }
+                    | Gesture::SelectCells
+                    | Gesture::MoveBend { .. }
+                    | Gesture::MoveLabel { .. }
+            )
+        )
     }
 
     /// Smart guides of the gesture in progress, in world space.
@@ -2024,8 +2204,9 @@ impl Tools {
 
     /// Frame-local bounds the resize gesture in progress leads to, with snapping guides.
     ///
-    /// Only axis-aligned frames snap, and not while a corner keeps the aspect ratio: with
-    /// Shift held, or by default when images are selected (then Shift stretches them).
+    /// Only axis-aligned frames snap. A corner keeps the aspect ratio with Shift held, or
+    /// by default when images are selected (then Shift stretches them); then whichever of
+    /// its two edges is closer to lining up snaps, and the other follows.
     fn resize_target(&self, doc: &Document) -> Option<(Rect, Vec<Line>)> {
         let Some(Gesture::Resize {
             handle,
@@ -2044,7 +2225,7 @@ impl Tools {
                 .any(|o| matches!(o.data.kind, ObjectKind::Image(_)))
         });
         let keep_aspect = current.shift != has_image;
-        let snapper = (from.rotation == 0.0 && !(keep_aspect && handle.is_corner()))
+        let snapper = (from.rotation == 0.0)
             .then(|| self.snapper(doc, current, self.selection.ids()))
             .flatten();
         let Some(snapper) = snapper else {
@@ -2053,6 +2234,9 @@ impl Tools {
                 Vec::new(),
             ));
         };
+        if keep_aspect && handle.is_corner() {
+            return Some(snap_aspect_corner(&snapper, from.rect, *handle, delta));
+        }
         let (x, y) = handle.dragged_edges(handles::resize(from.rect, *handle, delta, keep_aspect));
         delta += snapper.offset(&Vec::from_iter(x), &Vec::from_iter(y));
         let to = handles::resize(from.rect, *handle, delta, keep_aspect);
@@ -2253,6 +2437,58 @@ fn shape_rect(anchor: Point, end: Point, square: bool) -> Rect {
         delta = Vec2::new(side.copysign(delta.x), side.copysign(delta.y));
     }
     Rect::from_points(anchor, anchor + delta)
+}
+
+/// A corner resize of `bounds` by `delta` that keeps the aspect ratio, with one of the
+/// dragged edges snapped (the one that lines up with less of a jump), and its guides.
+fn snap_aspect_corner(
+    snapper: &Snapper,
+    bounds: Rect,
+    handle: Handle,
+    delta: Vec2,
+) -> (Rect, Vec<Line>) {
+    let free = handles::resize(bounds, handle, delta, true);
+    let (Some(x), Some(y)) = handle.dragged_edges(free) else {
+        return (free, Vec::new());
+    };
+    let (w0, h0) = (bounds.width(), bounds.height());
+    if w0 <= 0.0 || h0 <= 0.0 {
+        return (free, Vec::new());
+    }
+    let (Some(bx), Some(by)) = handle.dragged_edges(bounds) else {
+        return (free, Vec::new());
+    };
+    let off = snapper.offset(&[x], &[y]);
+    // The corner opposite the handle stays; the dragged one goes where `scale` puts it.
+    let (fx, fy) = (free.x0 + free.x1 - x, free.y0 + free.y1 - y);
+    let at_scale = |scale: f64| {
+        let corner = Vec2::new(
+            fx + (w0 * scale).copysign(x - fx) - bx,
+            fy + (h0 * scale).copysign(y - fy) - by,
+        );
+        handles::resize(bounds, handle, corner, true)
+    };
+    let by_x = at_scale((x + off.x - fx).abs() / w0);
+    let by_y = at_scale((y + off.y - fy).abs() / h0);
+    let guides_of = |r: Rect| {
+        let (gx, gy) = handle.dragged_edges(r);
+        snapper.guides(r.abs(), &Vec::from_iter(gx), &Vec::from_iter(gy))
+    };
+    let mut candidates = [(off.x.abs(), by_x), (off.y.abs(), by_y)];
+    candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // Lining up with an object wins over the grid.
+    for (_, r) in candidates {
+        let guides = guides_of(r);
+        if !guides.is_empty() {
+            return (r, guides);
+        }
+    }
+    let r = if snapper.grid.is_some() {
+        candidates[0].1
+    } else {
+        free
+    };
+    (r, guides_of(r))
 }
 
 #[cfg(test)]

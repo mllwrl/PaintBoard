@@ -73,7 +73,26 @@ pub fn post(
     header: Option<(&str, &str)>,
     done: impl FnOnce(Result<String, String>) + MaybeSend + 'static,
 ) {
-    imp::post(url, header, Box::new(done));
+    let headers: Vec<_> = header.into_iter().collect();
+    imp::request("POST", url, &headers, None, Box::new(done));
+}
+
+/// GETs `url` and hands the answer's body (or why there is none) to `done`.
+pub fn get(url: &str, done: impl FnOnce(Result<String, String>) + MaybeSend + 'static) {
+    imp::request("GET", url, &[], None, Box::new(done));
+}
+
+/// Any request: `method` to `url` with `headers` (name, value) and `body` (JSON, if
+/// any). `done` gets the answer's body on success (2xx), else `"<status>: <body>"` or
+/// why there was no answer.
+pub fn fetch(
+    method: &'static str,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: Option<&str>,
+    done: impl FnOnce(Result<String, String>) + MaybeSend + 'static,
+) {
+    imp::request(method, url, headers, body, Box::new(done));
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -208,41 +227,55 @@ mod imp {
         }
     }
 
-    pub fn post(
+    pub fn request(
+        method: &'static str,
         url: &str,
-        header: Option<(&str, &str)>,
+        headers: &[(&str, &str)],
+        body: Option<&str>,
         done: Box<dyn FnOnce(Result<String, String>) + Send>,
     ) {
         let url = url.to_owned();
-        let header = header.map(|(k, v)| (k.to_owned(), v.to_owned()));
+        let headers: Vec<(String, String)> = headers
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        let body = body.map(str::to_owned);
         std::thread::spawn(move || {
             let agent: ureq::Agent = ureq::Agent::config_builder()
                 .timeout_global(Some(Duration::from_secs(20)))
                 .http_status_as_error(false)
                 .build()
                 .into();
-            let mut request = agent.post(&url);
-            if let Some((name, value)) = &header {
+            let mut request = ureq::http::Request::builder().method(method).uri(&url);
+            for (name, value) in &headers {
                 request = request.header(name, value);
             }
-            let result = request
-                .send_empty()
-                .map_err(|e| e.to_string())
-                .and_then(|response| {
-                    let status = response.status();
-                    let mut body = String::new();
-                    response
-                        .into_body()
-                        .into_reader()
-                        .take(1 << 20)
-                        .read_to_string(&mut body)
-                        .map_err(|e| e.to_string())?;
-                    if status.is_success() {
-                        Ok(body)
-                    } else {
-                        Err(format!("{status}: {body}"))
-                    }
-                });
+            let sent = match body {
+                Some(body) => request
+                    .header("content-type", "application/json")
+                    .body(body)
+                    .map_err(|e| e.to_string())
+                    .and_then(|request| agent.run(request).map_err(|e| e.to_string())),
+                None => request
+                    .body(())
+                    .map_err(|e| e.to_string())
+                    .and_then(|request| agent.run(request).map_err(|e| e.to_string())),
+            };
+            let result = sent.and_then(|response| {
+                let status = response.status();
+                let mut body = String::new();
+                response
+                    .into_body()
+                    .into_reader()
+                    .take(1 << 20)
+                    .read_to_string(&mut body)
+                    .map_err(|e| e.to_string())?;
+                if status.is_success() {
+                    Ok(body)
+                } else {
+                    Err(format!("{status}: {body}"))
+                }
+            });
             done(result);
         });
     }
@@ -382,18 +415,24 @@ mod imp {
             .unwrap_or_else(|| format!("{err:?}"))
     }
 
-    pub fn post(
+    pub fn request(
+        method: &'static str,
         url: &str,
-        header: Option<(&str, &str)>,
+        headers: &[(&str, &str)],
+        body: Option<&str>,
         done: Box<dyn FnOnce(Result<String, String>)>,
     ) {
         let init = RequestInit::new();
-        init.set_method("POST");
-        if let Some((name, value)) = header {
-            let headers = web_sys::Headers::new().expect("empty headers");
-            let _ = headers.set(name, value);
-            init.set_headers(&headers);
+        init.set_method(method);
+        let all = web_sys::Headers::new().expect("empty headers");
+        for (name, value) in headers {
+            let _ = all.set(name, value);
         }
+        if let Some(body) = body {
+            let _ = all.set("content-type", "application/json");
+            init.set_body(&wasm_bindgen::JsValue::from_str(body));
+        }
+        init.set_headers(&all);
         let Some(window) = web_sys::window() else {
             done(Err("no window".into()));
             return;

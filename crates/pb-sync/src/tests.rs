@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 
 use kurbo::{Rect, Vec2};
-use pb_core::{Command, Document, ObjectData, ObjectId, ShapeKind, Style};
+use pb_core::{
+    Command, Comment, Document, ObjectData, ObjectId, Role, ShapeKind, Style, ThreadAnchor,
+};
 
 use crate::{Client, ClientId, Event, Memory, Message, Room, Transport};
 
@@ -31,7 +33,8 @@ impl Server {
         client
     }
 
-    /// Handles everything that arrived. Tokens: "edit" may edit, others only look.
+    /// Handles everything that arrived. Tokens: "edit" may edit, "comment" may comment,
+    /// others only look.
     fn pump(&mut self) {
         let ids: Vec<ClientId> = self.links.keys().copied().collect();
         for id in ids {
@@ -42,7 +45,14 @@ impl Server {
                         version,
                         assets,
                         ..
-                    } => self.room.join(id, token == "edit", &version, &assets),
+                    } => {
+                        let role = match token.as_str() {
+                            "edit" => Role::Edit,
+                            "comment" => Role::Comment,
+                            _ => Role::View,
+                        };
+                        self.room.join(id, role, &version, &assets)
+                    }
                     other => self.room.receive(id, other),
                 };
                 match out {
@@ -159,7 +169,7 @@ fn edits_reach_everyone() {
     settle(&mut server, &mut [&mut a, &mut b]);
     assert!(a.events.contains(&Event::Joined {
         client: 1,
-        can_edit: true
+        role: Role::Edit
     }));
 
     let first = a.add_rect(0.0);
@@ -234,9 +244,11 @@ fn lookers_cannot_change_the_board() {
     a.add_rect(0.0);
     settle(&mut server, &mut [&mut a, &mut v]);
     assert_eq!(v.view().len(), 1);
-    assert_eq!(v.client.joined(), Some(false));
+    assert_eq!(v.client.joined(), Some(Role::View));
+    assert!(v.doc.view_only());
 
-    // A looker's edit (the app would not allow one) stays with them.
+    // A looker's edit (the board would not allow one) stays with them.
+    v.doc.set_role(Role::Edit);
     v.add_rect(100.0);
     settle(&mut server, &mut [&mut a, &mut v]);
     assert_eq!(a.view().len(), 1);
@@ -338,4 +350,109 @@ fn random_edits_converge() {
     settle(&mut server, &mut refs);
     assert_eq!(peers[0].view(), peers[1].view());
     assert_eq!(peers[1].view(), peers[2].view());
+}
+
+fn comment(id: &str) -> Comment {
+    Comment {
+        id: id.into(),
+        author: "cat".into(),
+        at_ms: 1,
+        text: "looks good".into(),
+    }
+}
+
+#[test]
+fn commenters_comment_but_cannot_edit() {
+    let mut server = Server::new();
+    let mut a = Peer::join(&mut server, shared_doc(1), "edit");
+    // The commenter's copy has a change of its own, which the server will never get.
+    let mut own = shared_doc(2);
+    own.apply(Command::SetTitle("mine".into())).unwrap();
+    let mut c = Peer::join(&mut server, own, "comment");
+    let rect = a.add_rect(0.0);
+    settle(&mut server, &mut [&mut a, &mut c]);
+    assert_eq!(c.client.joined(), Some(Role::Comment));
+    assert_eq!(c.doc.title(), None);
+    assert_eq!(c.view(), a.view());
+    assert_eq!(c.doc.role(), Role::Comment);
+    assert!(c.doc.apply(Command::Delete(vec![rect])).is_err());
+
+    // Comments and reactions reach the others; the commenter took a new peer for them.
+    assert_ne!(c.doc.peer(), 2);
+    c.doc
+        .apply(Command::AddComment {
+            thread: "t".into(),
+            anchor: Some(ThreadAnchor::Object(rect)),
+            comment: comment("1"),
+        })
+        .unwrap();
+    c.doc
+        .apply(Command::React {
+            id: rect,
+            reaction: pb_core::Reaction::ALL[0],
+            author: "cat".into(),
+            on: true,
+        })
+        .unwrap();
+    settle(&mut server, &mut [&mut a, &mut c]);
+    assert!(
+        !c.events.iter().any(|e| matches!(e, Event::Error(_))),
+        "{:?}",
+        c.events
+    );
+    assert_eq!(a.doc.threads().len(), 1);
+    assert_eq!(a.doc.reactions(rect).len(), 1);
+    // An editor's reply gets back to the commenter.
+    a.doc
+        .apply(Command::AddComment {
+            thread: "t".into(),
+            anchor: None,
+            comment: comment("2"),
+        })
+        .unwrap();
+    settle(&mut server, &mut [&mut a, &mut c]);
+    assert_eq!(c.doc.threads()[0].comments.len(), 2);
+    assert!(!c.events.iter().any(|e| matches!(e, Event::Error(_))));
+
+    // An edit sneaked in (the board would not allow one) is refused as remarks too.
+    c.doc.set_role(Role::Edit);
+    c.add_rect(100.0);
+    settle(&mut server, &mut [&mut a, &mut c]);
+    assert_eq!(a.view().len(), 1);
+    assert!(c.events.iter().any(|e| matches!(e, Event::Error(_))));
+}
+
+#[test]
+fn remarks_cannot_pass_for_an_editors_changes() {
+    let mut server = Server::new();
+    let mut a = Peer::join(&mut server, shared_doc(1), "edit");
+    let mut c = Peer::join(&mut server, shared_doc(2), "comment");
+    let rect = a.add_rect(0.0);
+    settle(&mut server, &mut [&mut a, &mut c]);
+    // A comment written as the editor's peer, continuing the editor's changes.
+    let mut forged = Document::from_snapshot(&a.doc.snapshot()).unwrap();
+    forged.set_peer(1).unwrap();
+    let from = a.doc.own_changes_json(0).unwrap().unwrap().1;
+    forged
+        .apply(Command::AddComment {
+            thread: "t".into(),
+            anchor: Some(ThreadAnchor::Object(rect)),
+            comment: comment("1"),
+        })
+        .unwrap();
+    let (json, _) = forged.own_changes_json(from).unwrap().unwrap();
+    c.link.send(&Message::Remarks(json));
+    settle(&mut server, &mut [&mut a, &mut c]);
+    assert!(a.doc.threads().is_empty());
+    assert!(c.events.iter().any(|e| matches!(e, Event::Error(_))));
+}
+
+#[test]
+fn lookers_cannot_send_remarks() {
+    let mut server = Server::new();
+    let mut v = Peer::join(&mut server, shared_doc(2), "view");
+    settle(&mut server, &mut [&mut v]);
+    v.link.send(&Message::Remarks("{}".into()));
+    settle(&mut server, &mut [&mut v]);
+    assert!(v.events.iter().any(|e| matches!(e, Event::Error(_))));
 }

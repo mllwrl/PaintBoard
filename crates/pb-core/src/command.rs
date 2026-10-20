@@ -204,6 +204,10 @@ pub enum Command {
     },
     /// Protects the board from changes, or lifts that. Not undoable.
     SetReadOnly(bool),
+    /// Colors the board's background, or (`None`) gives it the usual one back.
+    SetBackground(Option<crate::Rgba>),
+    /// Sets the board's countdown, or removes it with `None`. Undo leaves it alone.
+    SetTimer(Option<crate::Timer>),
     /// Names the board: shown for a shared board, whose file each person names as they
     /// like. Not undoable.
     SetTitle(Arc<str>),
@@ -234,7 +238,44 @@ pub enum Command {
     },
 }
 
+/// What a copy of a shared board may do (see [`Document::set_role`](crate::Document::set_role)).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Role {
+    /// Only look: no command at all is applied.
+    View,
+    /// Look, comment, react and vote ([`Command::allowed_commenting`]); the board itself
+    /// stays as it is.
+    Comment,
+    #[default]
+    Edit,
+}
+
+impl Role {
+    pub fn allows(self, command: &Command) -> bool {
+        match self {
+            Role::View => false,
+            Role::Comment => command.allowed_commenting(),
+            Role::Edit => true,
+        }
+    }
+}
+
 impl Command {
+    /// Whether someone who may only comment can apply it: it writes only comments,
+    /// reactions and their own votes. The server checks the same for such people's
+    /// changes (`pb_sync`), so the two must agree.
+    pub fn allowed_commenting(&self) -> bool {
+        matches!(
+            self,
+            Self::AddComment { .. }
+                | Self::RemoveComment { .. }
+                | Self::SetResolved { .. }
+                | Self::RemoveThread(_)
+                | Self::React { .. }
+                | Self::Vote { .. }
+        )
+    }
+
     /// Whether it may change a read-only board: it does not touch the content, like
     /// comments, reactions, voting and talktracks.
     pub fn allowed_read_only(&self) -> bool {
@@ -254,6 +295,7 @@ impl Command {
                 | Self::Vote { .. }
                 | Self::SaveTalktrack(_)
                 | Self::RemoveTalktrack(_)
+                | Self::SetTimer(_)
                 // Reading a book does not change what it says.
                 | Self::TurnPage { .. }
         )

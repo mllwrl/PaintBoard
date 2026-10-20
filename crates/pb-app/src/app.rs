@@ -7,7 +7,7 @@ use pb_core::{
     Style, Text, ZOrder,
 };
 use pb_geom::Camera;
-use pb_geom::kurbo::{Point, Size, Vec2};
+use pb_geom::kurbo::{Point, Rect, Size, Vec2};
 use pb_platform::Instant;
 use pb_platform::{clipboard, dialog, handwriting};
 use pb_render::vello::Scene;
@@ -22,7 +22,7 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, MouseButton, Touch, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
-use winit::window::{CursorIcon, Window, WindowId};
+use winit::window::{Cursor, CursorIcon, CustomCursor, Window, WindowId};
 
 use crate::books::{self, Books, Turn};
 use crate::editing::{self, KeyOutcome, NEW_TEXT_SIZE, TextEdit};
@@ -33,7 +33,7 @@ use crate::pictures::{self, Picture};
 use crate::session::Session;
 use crate::talktrack::{Playback, Recording};
 use crate::ui::{
-    Action, CommentView, ContextMenuInfo, ExportInfo, LayersView, LinkInfo, Minimap, Model,
+    Action, CommentView, ContextMenuInfo, ExportInfo, LayersView, LinkInfo, Minimap, Model, Panels,
     PlaybackView, STICKY_COLORS, SearchInfo, SelectionInfo, ShapeText, TableInfo, TextFormat,
     ThreadView, Ui, VersionBanner, VersionItem, VotingView,
 };
@@ -49,6 +49,9 @@ struct VersionView {
     summary: String,
 }
 
+/// How long a plugin's message shows.
+const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub enum UserEvent {
     /// GPU initialization finished (asynchronous on the web).
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -56,7 +59,7 @@ pub enum UserEvent {
     /// Handwriting recognition finished on its background thread.
     Recognized {
         request: u64,
-        result: Result<String, String>,
+        result: Result<handwriting::Reading, String>,
     },
     /// A web page card's page was fetched and read on a background thread.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -78,8 +81,28 @@ pub enum UserEvent {
     /// The server answered the request to make a shared board: its address, and the
     /// answer.
     BoardMade(String, Result<String, String>),
+    /// The server answered a request about the account.
+    Account(crate::account::Reply),
+    /// A plugin posted something (in the browser, where plugins run in workers).
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    PluginPosted,
+    /// A plugin's fetch was answered: the plugin, its call, and the answer.
+    PluginFetched {
+        plugin: String,
+        call: u64,
+        result: Result<String, String>,
+    },
+    /// Files to install a plugin from were picked.
+    PluginFiles(Vec<PathBuf>),
+    /// A plugin's manifest was picked to develop it from its folder.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    DevPluginPicked(PathBuf),
     /// A board file was picked to open (later than asked on the web).
     BoardPicked(PathBuf),
+    /// PaintBoard was started again, with this file to open (or none): this copy opens it
+    /// and comes to the front instead.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    StartedAgain(Option<PathBuf>),
     /// Files were picked to add to the board.
     FilesPicked(Vec<PathBuf>),
     /// Files were dropped on the page at this point (physical pixels; the web only).
@@ -176,10 +199,16 @@ pub struct App {
     editing: Option<TextEdit>,
     /// The image being cropped, if any.
     cropping: Option<Crop>,
+    /// The pen's dot cursor, made for this ink color and diameter.
+    ink_cursor: Option<((Rgba, u32), CustomCursor)>,
     /// Color of new sticky notes.
     sticky_color: Rgba,
     /// Whether the minimap is shown.
     show_minimap: bool,
+    /// Which panels around the board show.
+    panels: Panels,
+    /// When the view last moved because a drag neared the window's edge.
+    autopan: Option<Instant>,
     /// Objects it does not let through are faded. Not saved with the board.
     filter: pb_core::Filter,
     /// Who reactions and comments are by.
@@ -194,6 +223,8 @@ pub struct App {
     picking_link: Option<ObjectId>,
     /// Searching the board, while the search bar is open.
     search: Option<Search>,
+    /// Objects found for the command palette, while it is open.
+    palette: Option<Vec<(String, Rect)>>,
     /// The right-click menu, where it was opened: on screen (logical pixels) and on the
     /// board.
     context_menu: Option<(Point, Point)>,
@@ -201,6 +232,8 @@ pub struct App {
     show_shortcuts: bool,
     /// The template gallery is open.
     show_templates: bool,
+    /// The boards kept in the browser are listed (the web version's start screen).
+    show_boards: bool,
     /// Presenting the board frame by frame.
     presentation: Option<Presentation>,
     /// In focus mode (the area is the document's): where the camera was before.
@@ -211,8 +244,12 @@ pub struct App {
     recording: Option<Recording>,
     /// A talktrack being played back.
     playback: Option<Playback>,
-    /// The countdown timer, while shown.
-    timer: Option<Timer>,
+    /// What the board's countdown showed when last drawn.
+    timer_drawn: Option<crate::ui::TimerView>,
+    /// Shortcuts that may ask something in a window of the system, done after the next
+    /// frame like the UI's buttons: asked while a key is handled, Windows leaves that window
+    /// hidden and the app waits on it for good.
+    deferred: Vec<Action>,
     /// The voting results window is open.
     show_results: bool,
     /// The camera gliding to a new place.
@@ -220,6 +257,8 @@ pub struct App {
     /// The window for making a diagram from text is open, with what was wrong with the
     /// last try.
     diagram: Option<Option<String>>,
+    /// The graph window, when open, with the last error.
+    graph: Option<Option<String>>,
     /// The export window is open.
     show_export: bool,
     /// A saved version being looked at instead of the board.
@@ -247,6 +286,16 @@ pub struct App {
     recognition: Option<PendingRecognition>,
     /// The board shared through a server, while it is.
     sharing: Option<crate::sharing::Sharing>,
+    /// The account on the sharing server.
+    accounts: crate::account::Accounts,
+    plugins: crate::plugins::Plugins,
+    plugins_window: bool,
+    /// Messages from plugins, shown for a few seconds: the plugin's name, the text, until.
+    notices: Vec<(String, String, Instant)>,
+    /// When plugins developed from their folders are looked at for changes next.
+    plugin_check_at: Option<Instant>,
+    /// The sound a plugin played last, kept until it is over.
+    plugin_sound: Option<(pb_platform::audio::Player, Instant)>,
     /// Whose view this copy follows on a shared board, the camera as following last set
     /// it (moved since: the user took over) and when.
     following: Option<pb_sync::ClientId>,
@@ -271,7 +320,12 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))]
         let file = std::env::args_os().nth(1).map(PathBuf::from);
         #[cfg(target_arch = "wasm32")]
-        let file = None;
+        let file: Option<PathBuf> = None;
+        // A plugin file (double-clicked) is offered for installing, not opened as a board.
+        let (plugin_file, file) = match file {
+            Some(f) if has_extension(&f, pb_plugin::package::EXTENSION) => (Some(f), None),
+            other => (None, other),
+        };
         #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let (mut session, document) = Session::start(file);
         // Background saves wake the app when done (the web saves right away).
@@ -282,7 +336,27 @@ impl App {
                 let _ = wake.send_event(UserEvent::Saved);
             });
         }
+        // Later starts hand their files to this copy.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let proxy = proxy.clone();
+            pb_platform::instance::listen(move |file| {
+                let _ = proxy.send_event(UserEvent::StartedAgain(file));
+            });
+        }
+        let accounts = {
+            let proxy = proxy.clone();
+            crate::account::Accounts::new(move |reply| {
+                let _ = proxy.send_event(UserEvent::Account(reply));
+            })
+        };
         let mut app = Self {
+            accounts,
+            plugins: crate::plugins::Plugins::default(),
+            plugins_window: false,
+            notices: Vec::new(),
+            plugin_check_at: None,
+            plugin_sound: None,
             proxy,
             window: None,
             gpu: None,
@@ -306,8 +380,11 @@ impl App {
             dropped: Vec::new(),
             editing: None,
             cropping: None,
+            ink_cursor: None,
             sticky_color: STICKY_COLORS[0],
             show_minimap: true,
+            panels: crate::settings::panels(),
+            autopan: None,
             filter: pb_core::Filter::default(),
             me: crate::settings::name()
                 .unwrap_or_else(pb_platform::user_name)
@@ -318,18 +395,22 @@ impl App {
             picking_link: None,
             search: None,
             focus_search: false,
+            palette: None,
             context_menu: None,
             show_shortcuts: false,
             show_templates: false,
+            show_boards: false,
             presentation: None,
             focus_saved: None,
             show_layers: false,
             recording: None,
             playback: None,
             camera_glide: None,
-            timer: None,
+            timer_drawn: None,
+            deferred: Vec::new(),
             show_results: false,
             diagram: None,
+            graph: None,
             show_export: false,
             version_view: None,
             ink_panel: true,
@@ -359,8 +440,76 @@ impl App {
         let opened = false;
         if !opened {
             app.resume_sharing();
+            // The web version starts with the boards kept in the browser.
+            app.show_boards = cfg!(target_arch = "wasm32");
+        }
+        app.with_plugins(|plugins, app| *plugins = crate::plugins::Plugins::load_all(app));
+        if let Some(path) = plugin_file {
+            app.install_plugin(vec![path]);
         }
         app
+    }
+
+    /// Lends the plugins and the app (their host) at once.
+    fn with_plugins<R>(
+        &mut self,
+        f: impl FnOnce(&mut crate::plugins::Plugins, &mut Self) -> R,
+    ) -> R {
+        let mut plugins = std::mem::take(&mut self.plugins);
+        let result = f(&mut plugins, self);
+        self.plugins = plugins;
+        self.request_redraw();
+        result
+    }
+
+    /// Reads picked plugin files and installs the plugin they make.
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+    fn install_plugin(&mut self, mut paths: Vec<PathBuf>) {
+        // On the desktop the manifest alone will do: its folder has the rest.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let [manifest] = &paths[..]
+            && !has_extension(manifest, pb_plugin::package::EXTENSION)
+            && let Some(dir) = manifest.parent()
+        {
+            paths = pb_platform::fs::list(dir);
+        }
+        let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut unpacked = Ok(());
+        for p in &paths {
+            let Some(name) = p.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            let Ok(bytes) = pb_platform::fs::read(p) else {
+                continue;
+            };
+            if has_extension(p, pb_plugin::package::EXTENSION) {
+                match pb_plugin::package::unpack(&bytes) {
+                    Ok(inside) => files.extend(inside),
+                    Err(err) => unpacked = Err(err),
+                }
+            } else if bytes.len() <= 8 << 20 {
+                files.push((name, bytes));
+            }
+        }
+        // Picked in the browser, they were kept in memory only to be read.
+        #[cfg(target_arch = "wasm32")]
+        for path in &paths {
+            let _ = pb_platform::fs::remove(path);
+        }
+        let installed =
+            unpacked.and_then(|()| self.with_plugins(|plugins, app| plugins.install(app, &files)));
+        match installed {
+            Ok(Some(name)) => {
+                self.plugins_window = true;
+                self.notices.push((
+                    name,
+                    tr("Installed").to_owned(),
+                    Instant::now() + NOTICE_FOR,
+                ));
+            }
+            Ok(None) => {}
+            Err(err) => dialog::show_error(tr("Could not install the plugin"), &err),
+        }
     }
 
     fn scale(&self) -> f64 {
@@ -387,6 +536,10 @@ impl App {
         if self.gpu.is_none() {
             return;
         }
+        self.timer_drawn = self
+            .document
+            .timer()
+            .and_then(|t| timer_view(&t, pb_platform::now_ms()));
         // A read-only board can be looked at and commented on, nothing more.
         if self.document.read_only()
             && !matches!(self.tools.active(), ToolKind::Select | ToolKind::Comment)
@@ -536,6 +689,7 @@ impl App {
                 ..Overlay::default()
             };
         }
+        let theme = self.theme.clone().on_board(board.background());
         build_scene(
             &mut self.scene,
             &View {
@@ -543,7 +697,7 @@ impl App {
                 viewport: Size::new(size.width, size.height),
                 scale,
                 grid: self.grid,
-                theme: &self.theme,
+                theme: &theme,
                 document: board,
                 assets: board.assets(),
                 overrides: &overrides,
@@ -588,7 +742,70 @@ impl App {
         }
         let (share_window, share_badge) = self.share_model();
         let (cursors, their_selections) = self.others_on_screen();
+        let plugin_commands: Vec<crate::ui::PluginCommandView> = self
+            .plugins
+            .commands()
+            .into_iter()
+            .map(|(plugin, plugin_name, c)| crate::ui::PluginCommandView {
+                plugin,
+                plugin_name,
+                id: c.id,
+                title: c.title,
+                selection: c.selection,
+            })
+            .collect();
+        let plugins_view = self.plugins_window.then(|| {
+            self.plugins
+                .list
+                .iter()
+                .map(|p| crate::ui::PluginView {
+                    id: p.manifest.id.clone(),
+                    name: p.manifest.name.clone(),
+                    version: p.manifest.version.clone(),
+                    author: p.manifest.author.clone(),
+                    description: p.manifest.description.clone(),
+                    permissions: p
+                        .manifest
+                        .permissions
+                        .iter()
+                        .map(crate::plugins::describe)
+                        .collect(),
+                    enabled: p.enabled,
+                    running: p.running(),
+                    dev: p.dev,
+                    error: p.error.clone(),
+                    log: p.log.iter().cloned().collect(),
+                })
+                .collect()
+        });
+        let plugin_panels: Vec<(String, String, serde_json::Value)> = self
+            .plugins
+            .list
+            .iter()
+            .filter_map(|p| {
+                Some((
+                    p.manifest.id.clone(),
+                    p.manifest.name.clone(),
+                    p.panel.clone()?,
+                ))
+            })
+            .collect();
+        let notices: Vec<(String, String)> = self
+            .notices
+            .iter()
+            .map(|(name, text, _)| (name.clone(), text.clone()))
+            .collect();
         let model = Model {
+            plugin_commands,
+            plugins: plugins_view,
+            plugin_panels,
+            notices,
+            background: self.document.background(),
+            panels: self.panels,
+            fullscreen: self
+                .window
+                .as_ref()
+                .is_some_and(|w| w.fullscreen().is_some()),
             follow_banner: self.follow_banner(),
             share_window,
             share_badge,
@@ -625,6 +842,7 @@ impl App {
             show_shortcuts: self.show_shortcuts,
             hidden: (self.document.hidden_count(), self.document.shows_hidden()),
             read_only: self.document.read_only(),
+            view_only: self.document.view_only(),
             layers: self.layers_view(),
             recording: self
                 .recording
@@ -643,6 +861,7 @@ impl App {
                 .map(|t| (t.id.clone(), t.title.to_string(), t.duration))
                 .collect(),
             diagram: self.diagram.clone(),
+            graph: self.graph.clone(),
             versions: {
                 let now = pb_platform::now_ms();
                 self.document
@@ -673,6 +892,7 @@ impl App {
                 has_selection: !self.tools.selection().is_empty(),
             }),
             show_templates: self.show_templates,
+            show_boards: self.show_boards,
             focus: self.focus_saved.is_some(),
             laser: self.presentation.as_ref().is_some_and(|p| p.laser),
             presentation: self.presentation.as_ref().map(|p| {
@@ -686,7 +906,7 @@ impl App {
                     .unwrap_or_default();
                 (p.index, p.frames.len(), title)
             }),
-            timer: self.timer.as_ref().map(|t| t.view(Instant::now())),
+            timer: self.timer_drawn.clone(),
             voting: self.document.voting().map(|v| VotingView {
                 open: v.open,
                 limit: v.limit,
@@ -701,6 +921,7 @@ impl App {
             thread: self.thread_view(),
             threads: self.thread_list(),
             show_resolved: self.show_resolved,
+            palette: self.palette.clone(),
             search: self.search.as_ref().map(|s| SearchInfo {
                 count: s.hits.len(),
                 current: s.current,
@@ -709,13 +930,18 @@ impl App {
             }),
         };
         self.focus_search = false;
-        let actions = match &mut self.ui {
-            Some(ui) => ui.run(&window, &model),
-            None => Vec::new(),
-        };
+        let mut actions = std::mem::take(&mut self.deferred);
+        if let Some(ui) = &mut self.ui {
+            actions.extend(ui.run(&window, &model));
+        }
         if let Some(gpu) = &mut self.gpu {
             let ui = &mut self.ui;
-            gpu.render(&self.scene, self.theme.background, |target| {
+            let background = self
+                .theme
+                .clone()
+                .on_board(self.document.background())
+                .background;
+            gpu.render(&self.scene, background, |target| {
                 if let Some(ui) = ui {
                     ui.paint(target);
                 }
@@ -1142,10 +1368,12 @@ impl App {
                 )
             ),
             book: match ids {
-                [id] => books::book_of(&self.document, *id).map(|(book, _)| {
-                    let page = self.books.page(&self.document, *id).unwrap_or(book.page);
-                    (page, book.pages)
-                }),
+                [id] => books::book_of(&self.document, *id)
+                    .filter(|(book, _)| book.pages > 1)
+                    .map(|(book, _)| {
+                        let page = self.books.page(&self.document, *id).unwrap_or(book.page);
+                        (page, book.pages)
+                    }),
                 _ => None,
             },
             can_crop: matches!(ids, [id] if Crop::new(&self.document, *id).is_some()),
@@ -1199,6 +1427,124 @@ impl App {
             Action::ToggleShare => {
                 self.share_window = !self.share_window;
                 self.share_error = None;
+                if self.share_window {
+                    self.refresh_account();
+                }
+            }
+            Action::SignIn(server, email) => {
+                self.accounts.use_server(&server);
+                self.accounts.start(&server, &email);
+            }
+            Action::CancelSignIn => self.accounts.cancel(),
+            Action::TogglePlugins => self.plugins_window = !self.plugins_window,
+            Action::InstallPlugin => {
+                let proxy = self.proxy.clone();
+                pb_platform::dialog::pick_files(
+                    tr("PaintBoard plugin (.pbplugin, or manifest.json and scripts)"),
+                    &["pbplugin", "json", "js"],
+                    true,
+                    move |paths| {
+                        let _ = proxy.send_event(UserEvent::PluginFiles(paths));
+                    },
+                );
+            }
+            Action::InstallPluginFiles(paths) => self.install_plugin(paths),
+            Action::LoadDevPlugin => {
+                let proxy = self.proxy.clone();
+                pb_platform::dialog::pick_files(
+                    tr("The plugin's manifest.json"),
+                    &["json"],
+                    false,
+                    move |paths| {
+                        if let Some(path) = paths.into_iter().next() {
+                            let _ = proxy.send_event(UserEvent::DevPluginPicked(path));
+                        }
+                    },
+                );
+            }
+            Action::SetPluginEnabled(id, on) => {
+                self.with_plugins(|plugins, app| plugins.set_enabled(app, &id, on));
+            }
+            Action::RemovePlugin(id) => {
+                let name = self
+                    .plugins
+                    .list
+                    .iter()
+                    .find(|p| p.manifest.id == id)
+                    .map(|p| p.manifest.name.clone())
+                    .unwrap_or_default();
+                if dialog::confirm(
+                    tr("Remove plugin"),
+                    &trf("Remove the plugin \"{}\" and what it keeps?", &[&name]),
+                ) {
+                    self.plugins.remove(&id);
+                }
+            }
+            Action::RunPluginCommand(plugin, command) => {
+                self.finish_editing();
+                self.with_plugins(|plugins, app| plugins.run_command(app, &plugin, &command));
+            }
+            Action::PluginPanel(plugin, data) => {
+                self.with_plugins(|plugins, app| plugins.panel_event(app, &plugin, data));
+            }
+            Action::ClosePluginPanel(plugin) => self.plugins.close_panel(&plugin),
+            Action::PackPlugin(id) => match self.plugins.package(&id) {
+                Ok((name, bytes)) => {
+                    let file_type = pb_platform::dialog::FileType {
+                        name: tr("PaintBoard plugin"),
+                        extension: pb_plugin::package::EXTENSION,
+                    };
+                    if let Some(path) =
+                        pb_platform::dialog::pick_save(&file_type, std::path::Path::new(&name))
+                        && let Err(err) = pb_platform::fs::write_atomic(&path, &bytes)
+                    {
+                        dialog::show_error(tr("Could not save the plugin"), &err.to_string());
+                    }
+                }
+                Err(err) => dialog::show_error(tr("Could not save the plugin"), &err),
+            },
+            Action::SignOut => self.accounts.sign_out(),
+            Action::RefreshBoards => self.accounts.refresh_boards(),
+            Action::OpenMyBoard(board) => {
+                if let Some(account) = &self.accounts.account {
+                    let link = format!("{}/board/{board}", account.server);
+                    self.join_shared(&link);
+                }
+            }
+            Action::SetMember(email, role) => {
+                if let Some(sharing) = &self.sharing {
+                    let board = sharing.link.board.clone();
+                    self.accounts.set_member(&board, &email, &role);
+                }
+            }
+            Action::RenewLink(role) => {
+                if let Some(sharing) = &self.sharing {
+                    self.accounts.renew_link(&sharing.link.board, role);
+                }
+            }
+            Action::DeleteSharedBoard => {
+                let question = tr(
+                    "Delete this board from the server? Everyone loses it; your copy here stays.",
+                );
+                if let Some(sharing) = &self.sharing
+                    && dialog::confirm(tr("Delete from the server"), question)
+                {
+                    self.accounts.delete_board(&sharing.link.board);
+                }
+            }
+            Action::DeleteAccount => {
+                let owned = self
+                    .accounts
+                    .boards
+                    .as_ref()
+                    .map_or(0, |b| b.iter().filter(|b| b.role == "owner").count());
+                let question = trf(
+                    "Delete your account? The boards it owns ({}) are deleted from the server for everyone. Copies of boards opened on this computer stay here: open the others from My boards first to keep them.",
+                    &[&owned],
+                );
+                if dialog::confirm(tr("Delete account"), &question) {
+                    self.accounts.delete_account();
+                }
             }
             Action::CreateShared(server) => self.create_shared(&server),
             Action::SetName(name) => {
@@ -1239,6 +1585,7 @@ impl App {
             }
             Action::CopyText(text) => clipboard::set_text(&text),
             Action::OpenFile(path) => self.open_file(path),
+            Action::RenameStored(path, name) => self.rename_stored(&path, &name),
             Action::DeleteStored(path) => {
                 let name = path
                     .file_stem()
@@ -1283,6 +1630,20 @@ impl App {
             Action::NextGrid => self.grid = self.grid.next(),
             Action::ToggleSnap => self.tools.set_snap_to_grid(!self.tools.snap_to_grid()),
             Action::ToggleMinimap => self.show_minimap = !self.show_minimap,
+            Action::TogglePanel(panel) => {
+                self.panels.toggle(panel);
+                crate::settings::save_panels(self.panels);
+            }
+            Action::ToggleClean => {
+                self.panels.clean = !self.panels.clean;
+                crate::settings::save_panels(self.panels);
+            }
+            Action::ToggleFullscreen => self.toggle_fullscreen(),
+            Action::SetBackground(color) => {
+                if self.document.background() != color {
+                    self.apply(Command::SetBackground(color));
+                }
+            }
             Action::AddTableLine { rows, after } => {
                 if let Some(command) = self.tools.add_table_line(&self.document, rows, after) {
                     self.apply(command);
@@ -1323,20 +1684,23 @@ impl App {
             }
             Action::CloseContextMenu => self.context_menu = None,
             Action::ToggleShortcuts => self.show_shortcuts = !self.show_shortcuts,
-            Action::StartTimer(minutes) => {
-                self.timer = Some(Timer::new(pb_platform::Duration::from_secs(minutes * 60)));
+            Action::StartTimer(ms) => {
+                let timer = pb_core::Timer::new(ms, pb_platform::now_ms());
+                self.apply(Command::SetTimer(Some(timer)));
             }
             Action::PauseTimer => {
-                if let Some(timer) = &mut self.timer {
-                    timer.toggle(Instant::now());
+                if let Some(timer) = self.document.timer() {
+                    let timer = timer.toggled(pb_platform::now_ms());
+                    self.apply(Command::SetTimer(Some(timer)));
                 }
             }
             Action::ResetTimer => {
-                if let Some(timer) = &mut self.timer {
-                    *timer = Timer::new(timer.duration);
+                if let Some(timer) = self.document.timer() {
+                    let timer = pb_core::Timer::new(timer.duration, pb_platform::now_ms());
+                    self.apply(Command::SetTimer(Some(timer)));
                 }
             }
-            Action::CloseTimer => self.timer = None,
+            Action::CloseTimer => self.apply(Command::SetTimer(None)),
             Action::StartVoting(limit) => {
                 self.finish_editing();
                 self.tools.clear_selection();
@@ -1358,6 +1722,11 @@ impl App {
             Action::ToggleFocus => self.toggle_focus(),
             Action::ToggleLaser => self.toggle_laser(),
             Action::ToggleTemplates => self.show_templates = !self.show_templates,
+            Action::ToggleBoards => self.show_boards = !self.show_boards,
+            #[cfg(target_arch = "wasm32")]
+            Action::DownloadStored(path) => self.session.download_stored(&path, &self.document),
+            #[cfg(not(target_arch = "wasm32"))]
+            Action::DownloadStored(_) => {}
             Action::InsertTemplate(i) => {
                 self.show_templates = false;
                 self.insert_template(i);
@@ -1367,6 +1736,17 @@ impl App {
                 self.diagram = Some(None);
             }
             Action::CloseDiagram => self.diagram = None,
+            Action::OpenGraph => {
+                self.finish_editing();
+                self.graph = Some(None);
+            }
+            Action::CloseGraph => self.graph = None,
+            Action::InsertGraph { formulas, from, to } => {
+                self.graph = match self.insert_graph(&formulas, &from, &to) {
+                    Ok(()) => None,
+                    Err(err) => Some(Some(err)),
+                };
+            }
             Action::SaveVersion(name) => {
                 let name = name.trim();
                 let name = if name.is_empty() {
@@ -1441,6 +1821,15 @@ impl App {
             Action::Search(query) => self.search_for(query),
             Action::SearchStep(forward) => self.search_step(forward),
             Action::CloseSearch => self.search = None,
+            Action::TogglePalette => self.toggle_palette(),
+            Action::ClosePalette => self.palette = None,
+            Action::PaletteQuery(query) => {
+                if self.palette.is_some() {
+                    self.palette = Some(self.palette_objects(&query));
+                }
+            }
+            Action::ShowArea(area) => self.show_area(area),
+            Action::ZoomToFit => self.zoom_to_fit(),
             Action::PostComment(text) => self.post_comment(text),
             Action::DeleteComment(comment) => {
                 if let Some(thread) = self.thread_panel.as_ref().and_then(|p| p.thread.clone()) {
@@ -1733,6 +2122,8 @@ impl App {
             Action::ToggleMark(mark) => {
                 if let Some(edit) = &mut self.editing {
                     edit.toggle_mark(self.text.engine(), mark);
+                } else if self.tools.table_cells(&self.document).is_some() {
+                    self.mark_cells(mark);
                 }
             }
             Action::MarkColor(color) => {
@@ -1809,6 +2200,14 @@ impl App {
     /// Places image files at `at` (world), or in the middle of the view. Other files are
     /// skipped; unreadable images are reported.
     fn insert_files(&mut self, paths: &[PathBuf], at: Option<Point>) {
+        let (plugins, paths): (Vec<PathBuf>, Vec<PathBuf>) = paths
+            .iter()
+            .cloned()
+            .partition(|p| has_extension(p, pb_plugin::package::EXTENSION));
+        if !plugins.is_empty() {
+            self.install_plugin(plugins);
+        }
+        let paths = &paths[..];
         let mut errors = Vec::new();
         let documents: Vec<(String, String)> = paths
             .iter()
@@ -1865,7 +2264,7 @@ impl App {
     }
 
     /// Adds the PDF file at `path` as a book: its first page, with buttons to turn the
-    /// pages in place. A single page becomes a plain picture.
+    /// pages in place (none for a single page).
     fn insert_pdf(&mut self, path: &std::path::Path, at: Option<Point>) -> Result<(), String> {
         let bytes = pb_platform::fs::read(path).map_err(|e| e.to_string())?;
         let reader = pb_io::pdf::Reader::open(&bytes)?;
@@ -1878,10 +2277,6 @@ impl App {
             width: (first.width / 2).max(1),
             height: (first.height / 2).max(1),
         };
-        if pages < 2 {
-            self.insert_pictures(vec![picture], at);
-            return Ok(());
-        }
         let pdf = self.document.add_asset(bytes);
         self.insert_book(picture, pdf, pages, at);
         Ok(())
@@ -1916,7 +2311,9 @@ impl App {
         }
         self.apply(Command::Create(vec![data.into()]));
         // The second page is likely next.
-        if let Ok(turn) = self.books.render(&self.document, pdf, 1) {
+        if pages > 1
+            && let Ok(turn) = self.books.render(&self.document, pdf, 1)
+        {
             self.run_turn(turn);
         }
         self.request_redraw();
@@ -2180,8 +2577,30 @@ impl App {
                 });
             });
         }
+        // The browser may not read other sites: the server fetches the page's head.
         #[cfg(target_arch = "wasm32")]
-        let _ = (url, replace_title);
+        {
+            let server = self
+                .sharing
+                .as_ref()
+                .map(|s| s.link.server.clone())
+                .or_else(|| Some(crate::settings::server()).filter(|s| !s.is_empty()))
+                .or_else(page_server);
+            let Some(server) = server else {
+                return;
+            };
+            let proxy = self.proxy.clone();
+            let ask = format!("{server}/preview?url={}", crate::sharing::query_value(&url));
+            pb_platform::net::get(&ask, move |answer| {
+                let result = answer.map(|html| pb_io::preview::parse(&html));
+                let _ = proxy.send_event(UserEvent::Previewed {
+                    id,
+                    url,
+                    replace_title,
+                    result,
+                });
+            });
+        }
     }
 
     /// Fills in a web page card from its fetched page, if the card is still there and
@@ -2508,6 +2927,7 @@ impl App {
         self.context_menu = None;
         self.thread_panel = None;
         self.search = None;
+        self.palette = None;
         let doc = match self.document.version_view(&id) {
             Ok(doc) => doc,
             Err(err) => {
@@ -2581,7 +3001,7 @@ impl App {
             return;
         };
         // Pictures are always light, like paper.
-        let light = Theme::light();
+        let light = Theme::light().on_board(self.document.background());
         #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))]
         let mut painters = export::Painters {
             gpu,
@@ -2609,7 +3029,7 @@ impl App {
         let (Some((job, _)), Some(gpu)) = (self.making.as_mut(), self.gpu.as_mut()) else {
             return false;
         };
-        let light = Theme::light();
+        let light = Theme::light().on_board(self.document.background());
         let mut painters = export::Painters {
             gpu,
             text: &mut self.text,
@@ -2986,6 +3406,7 @@ impl App {
         self.context_menu = None;
         self.thread_panel = None;
         self.search = None;
+        self.palette = None;
         self.show_templates = false;
         self.show_shortcuts = false;
         // The presentation shows whole frames, and ends where focus mode began.
@@ -3064,6 +3485,7 @@ impl App {
         self.tools.cancel();
         self.context_menu = None;
         self.search = None;
+        self.palette = None;
         // A hair larger, so what was picked keeps its center inside however it rounds.
         let area = area.inflate(1.0, 1.0);
         self.document.set_focus(Some(area));
@@ -3080,7 +3502,7 @@ impl App {
         };
         let id: Arc<str> = self.document.new_line_id().into();
         let title = trf("Talktrack {}", &[&(self.document.talktracks().len() + 1)]);
-        let track = recording.finish(Instant::now(), &mut self.document, id, title);
+        let track = recording.finish(Instant::now(), &mut self.document, id, title, &self.me);
         self.apply(Command::SaveTalktrack(track));
     }
 
@@ -3437,6 +3859,115 @@ impl App {
         }
     }
 
+    /// Opens the command palette, or closes it.
+    fn toggle_palette(&mut self) {
+        if self.palette.take().is_none() {
+            self.finish_editing();
+            self.context_menu = None;
+            self.palette = Some(Vec::new());
+        }
+    }
+
+    /// The objects whose text has `query` (two letters or more), for the command palette:
+    /// a line of the text found and where it is. Frames are offered by title already.
+    fn palette_objects(&self, query: &str) -> Vec<(String, Rect)> {
+        /// How many objects the palette offers.
+        const MAX: usize = 5;
+        let query = query.trim().to_lowercase();
+        if query.chars().count() < 2 {
+            return Vec::new();
+        }
+        let mut found: Vec<(String, Rect)> = Vec::new();
+        let mut seen = Vec::new();
+        for hit in pb_core::search::search(&self.document, &query) {
+            let Some(object) = self.document.get(hit.id) else {
+                continue;
+            };
+            if object.data.kind.is_frame() || seen.contains(&hit.id) {
+                continue;
+            }
+            seen.push(hit.id);
+            found.push((self.found_text(&object.data, &query), hit.area.aabb()));
+            if found.len() == MAX {
+                break;
+            }
+        }
+        found
+    }
+
+    /// The line of `data`'s text (or the tag) where `query` (lowercase) is, cut short.
+    fn found_text(&self, data: &ObjectData, query: &str) -> String {
+        let mut texts: Vec<&str> = Vec::new();
+        match &data.kind {
+            ObjectKind::Connector(c) => texts.push(&c.label.text),
+            ObjectKind::Table(table) => {
+                for row in 0..table.rows.len() {
+                    for col in 0..table.cols.len() {
+                        texts.push(table.text(row, col).0);
+                    }
+                }
+            }
+            ObjectKind::Kanban(kanban) => {
+                texts.extend(kanban.columns.iter().map(|c| &*c.title));
+                texts.extend(kanban.cards.iter().map(|c| &*c.text));
+            }
+            ObjectKind::MindMap(map) => texts.extend(map.nodes.iter().map(|n| &*n.text)),
+            kind => texts.extend(kind.text()),
+        }
+        let line = texts
+            .iter()
+            .flat_map(|t| t.lines())
+            .find(|l| l.to_lowercase().contains(query));
+        let text = match line {
+            Some(line) => line.trim().to_owned(),
+            None => {
+                let tag =
+                    self.document.tags().iter().find(|t| {
+                        data.tags.contains(&t.id) && t.name.to_lowercase().contains(query)
+                    });
+                match tag {
+                    Some(tag) => trf("Tagged {}", &[&tag.name]),
+                    // Found across lines: its first line.
+                    None => texts
+                        .iter()
+                        .flat_map(|t| t.lines())
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or_default()
+                        .trim()
+                        .to_owned(),
+                }
+            }
+        };
+        const LONGEST: usize = 60;
+        if text.chars().count() > LONGEST {
+            let cut: String = text.chars().take(LONGEST - 1).collect();
+            cut + "…"
+        } else {
+            text
+        }
+    }
+
+    /// Shows everything on the board, at most at 100%; the start when it is empty.
+    fn zoom_to_fit(&mut self) {
+        let viewport = self.viewport();
+        let content = self
+            .document
+            .objects()
+            .iter()
+            .filter(|o| self.document.is_shown(o.id))
+            .map(|o| o.data.frame().aabb())
+            .reduce(|a, b| a.union(b));
+        match content {
+            Some(area) => {
+                self.camera.fit(area, viewport, FRAME_MARGIN);
+                if self.camera.zoom() > 1.0 {
+                    self.camera.look_at(area.center(), 1.0, viewport);
+                }
+            }
+            None => self.camera.look_at(Point::ZERO, 1.0, viewport),
+        }
+    }
+
     /// Opens the search bar, or gives its field the keyboard again.
     fn open_search(&mut self) {
         self.finish_editing();
@@ -3486,17 +4017,20 @@ impl App {
         search.revision = revision;
     }
 
-    /// Brings the current result into view: pans to it, zooming out only if it does not
-    /// fit.
+    /// Brings the current result into view.
     fn show_search_result(&mut self) {
-        let Some(area) = self
+        if let Some(area) = self
             .search
             .as_ref()
             .and_then(|s| s.hits.get(s.current))
             .map(|h| h.area.aabb())
-        else {
-            return;
-        };
+        {
+            self.show_area(area);
+        }
+    }
+
+    /// Brings `area` (world) into view: pans to it, zooming out only if it does not fit.
+    fn show_area(&mut self, area: Rect) {
         let viewport = self.viewport();
         let zoom = self.camera.zoom();
         let margin = FRAME_MARGIN / zoom;
@@ -3759,6 +4293,19 @@ impl App {
     /// Empties the selected table cells as one undo step.
     fn clear_cells(&mut self) {
         let commands = self.tools.clear_cells_text(&self.document);
+        self.apply_group(commands);
+    }
+
+    /// Turns `mark` on for all text of the selected cells, or off if all of it has it.
+    fn mark_cells(&mut self, mark: pb_text::Mark) {
+        let commands =
+            self.tools
+                .mark_cells(&self.document, |m| mark.get(m), |m, on| mark.set(m, on));
+        self.apply_group(commands);
+    }
+
+    /// Applies `commands` as one undo step.
+    fn apply_group(&mut self, commands: Vec<Command>) {
         if commands.is_empty() {
             return;
         }
@@ -4048,10 +4595,14 @@ impl App {
         });
     }
 
-    fn finish_recognition(&mut self, request: u64, result: Result<String, String>) {
+    fn finish_recognition(&mut self, request: u64, result: Result<handwriting::Reading, String>) {
         let Some(pending) = self.recognition.take_if(|p| p.request == request) else {
             return;
         };
+        let result = result.map(|reading| match pending.purpose {
+            Recognition::ToText => handwriting::best_guess(&reading),
+            Recognition::Calculate => math::best_reading(&reading),
+        });
         let text = match result {
             Ok(text) if !text.trim().is_empty() => text.trim().to_owned(),
             Ok(_) => {
@@ -4111,6 +4662,158 @@ impl App {
         self.request_redraw();
     }
 
+    /// Draws graphs of `formulas` (separated by `;`) for x from `from` to `to` in the
+    /// middle of the view, as one group: a white box, grid lines with labels, axes,
+    /// curves and the formulas above.
+    fn insert_graph(&mut self, formulas: &str, from: &str, to: &str) -> Result<(), String> {
+        use pb_core::{Content, Ink, Shape, ShapeKind};
+        use pb_tools::plot;
+        let number = |s: &str| s.trim().replace(',', ".").replace('−', "-").parse::<f64>();
+        let (Ok(x0), Ok(x1)) = (number(from), number(to)) else {
+            return Err(tr("The range of x is not a pair of numbers.").to_owned());
+        };
+        let sources: Vec<&str> = formulas
+            .split(';')
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+            .collect();
+        let functions = sources
+            .iter()
+            .map(|f| plot::parse(f).map_err(|e| format!("{f}: {e}")))
+            .collect::<Result<Vec<_>, _>>()?;
+        if functions.is_empty() {
+            return Err(plot::PlotError::Empty.to_string());
+        }
+        let graph = plot::graph(&functions, x0, x1).map_err(|e| e.to_string())?;
+        let zoom = self.camera.zoom();
+        let center = self.camera.visible_world_rect(self.viewport()).center();
+        let (w, h) = (480.0 / zoom, 300.0 / zoom);
+        let area = pb_geom::kurbo::Rect::new(
+            center.x - w / 2.0,
+            center.y - h / 2.0,
+            center.x + w / 2.0,
+            center.y + h / 2.0,
+        );
+        let ((gx0, gx1), (gy0, gy1)) = (graph.x, graph.y);
+        let to_world = |x: f64, y: f64| {
+            Point::new(
+                area.x0 + (x - gx0) / (gx1 - gx0) * w,
+                area.y1 - (y - gy0) / (gy1 - gy0) * h,
+            )
+        };
+        let line = |points: &[Point], color: Rgba, width: f64| -> Option<ObjectData> {
+            let points: Vec<_> = points.iter().map(|&p| (p, 1.0)).collect();
+            let (ink, bounds) = Ink::from_world(&points)?;
+            Some(ObjectData {
+                kind: ObjectKind::Ink(ink),
+                bounds,
+                rotation: 0.0,
+                style: Style {
+                    fill: Rgba(0),
+                    stroke: color,
+                    stroke_width: width / zoom,
+                    opacity: 1.0,
+                    ..Style::default()
+                },
+                tags: Default::default(),
+                link: None,
+            })
+        };
+        let gray = Rgba::rgb(0x6B, 0x72, 0x80);
+        let mut items = vec![ObjectData {
+            kind: ObjectKind::Shape(Shape {
+                kind: ShapeKind::Rectangle,
+                text: "".into(),
+                spans: Default::default(),
+            }),
+            bounds: area,
+            rotation: 0.0,
+            style: Style {
+                fill: Rgba::rgb(0xFF, 0xFF, 0xFF),
+                stroke: Rgba::rgb(0xC8, 0xCB, 0xD0),
+                stroke_width: 1.0 / zoom,
+                opacity: 1.0,
+                ..Style::default()
+            },
+            tags: Default::default(),
+            link: None,
+        }];
+        // Grid lines with their values, then the axes where 0 is (else along the edges).
+        let label_size = 11.0 / zoom;
+        let x_axis = if gy0 <= 0.0 && 0.0 <= gy1 { 0.0 } else { gy0 };
+        let y_axis = if gx0 <= 0.0 && 0.0 <= gx1 { 0.0 } else { gx0 };
+        for x in plot::ticks(gx0, gx1, 8) {
+            let (top, bottom) = (to_world(x, gy1), to_world(x, gy0));
+            items.extend(line(&[top, bottom], Rgba::rgb(0xEC, 0xED, 0xF0), 1.0));
+            let at = to_world(x, x_axis);
+            let label = self.text_object(&plot::tick_label(x), label_size, gray, |tw, th| {
+                Point::new(
+                    at.x - tw / 2.0,
+                    (at.y + 3.0 / zoom + th / 2.0).min(area.y1 - th / 2.0),
+                )
+            });
+            items.push(label);
+        }
+        for y in plot::ticks(gy0, gy1, 6) {
+            let (left, right) = (to_world(gx0, y), to_world(gx1, y));
+            items.extend(line(&[left, right], Rgba::rgb(0xEC, 0xED, 0xF0), 1.0));
+            if y == 0.0 && y_axis == 0.0 && x_axis == 0.0 {
+                continue;
+            }
+            let at = to_world(y_axis, y);
+            let label = self.text_object(&plot::tick_label(y), label_size, gray, |tw, _| {
+                Point::new((at.x - 4.0 / zoom - tw).max(area.x0), at.y)
+            });
+            items.push(label);
+        }
+        items.extend(line(
+            &[to_world(gx0, x_axis), to_world(gx1, x_axis)],
+            gray,
+            1.5,
+        ));
+        items.extend(line(
+            &[to_world(y_axis, gy0), to_world(y_axis, gy1)],
+            gray,
+            1.5,
+        ));
+        const COLORS: [Rgba; 5] = [
+            Rgba::rgb(0x25, 0x63, 0xEB),
+            Rgba::rgb(0xDC, 0x26, 0x26),
+            Rgba::rgb(0x16, 0xA3, 0x4A),
+            Rgba::rgb(0x93, 0x33, 0xEA),
+            Rgba::rgb(0xEA, 0x8A, 0x0C),
+        ];
+        for (i, pieces) in graph.curves.iter().enumerate() {
+            let color = COLORS[i % COLORS.len()];
+            for piece in pieces {
+                let points: Vec<_> = piece.iter().map(|&(x, y)| to_world(x, y)).collect();
+                items.extend(line(&points, color, 2.5));
+            }
+        }
+        // The formulas above the box, each in its curve's color.
+        let title_size = 15.0 / zoom;
+        let mut left = area.x0;
+        for (i, source) in sources.iter().enumerate() {
+            let text = if source.contains('=') {
+                (*source).to_owned()
+            } else {
+                format!("y = {source}")
+            };
+            let color = COLORS[i % COLORS.len()];
+            let title = self.text_object(&text, title_size, color, |_, th| {
+                Point::new(left, area.y0 - 6.0 / zoom - th / 2.0)
+            });
+            left = title.bounds.x1 + 16.0 / zoom;
+            items.push(title);
+        }
+        self.finish_editing();
+        self.tools.set_active(ToolKind::Select);
+        let group = Content::Group(items.into_iter().map(Content::Object).collect());
+        self.apply(Command::Create(vec![group]));
+        self.request_redraw();
+        Ok(())
+    }
+
     /// A text object sized to fit `text`. `place` gets the text's width and height and
     /// returns its left edge and vertical center.
     fn text_object(
@@ -4166,7 +4869,15 @@ impl App {
         self.share_error = None;
         let proxy = self.proxy.clone();
         let url = format!("{server}/boards");
-        pb_platform::net::post(&url, None, move |answer| {
+        // Made while signed in, the board is the account's.
+        self.accounts.use_server(&server);
+        let auth = self
+            .accounts
+            .session_for(&server)
+            .map(|s| format!("Bearer {s}"));
+        let headers: Vec<(&str, &str)> =
+            auth.iter().map(|a| ("authorization", a.as_str())).collect();
+        pb_platform::net::fetch("POST", &url, &headers, None, move |answer| {
             let _ = proxy.send_event(UserEvent::BoardMade(server, answer));
         });
     }
@@ -4178,13 +4889,13 @@ impl App {
                 .ok_or_else(|| tr("The server's answer is not understood.").to_owned())
         });
         match links {
-            Ok((edit, view)) => {
+            Ok(made) => {
                 // The others see the board under the name of its file here.
                 if self.document.title().is_none() && self.session.path().is_some() {
                     let name = self.session.name();
                     self.apply(Command::SetTitle(name.into()));
                 }
-                self.start_sharing(edit, Some(view));
+                self.start_sharing(made.edit, Some(made.view), made.comment);
             }
             Err(err) => {
                 self.share_error = Some(trf("Could not share the board: {}", &[&err]));
@@ -4206,36 +4917,101 @@ impl App {
         };
         self.replace_document(document);
         crate::settings::save_server(&link.server);
-        self.start_sharing(link, None);
+        self.start_sharing(link, None, None);
     }
 
     fn start_sharing(
         &mut self,
         link: crate::sharing::Link,
         view_link: Option<crate::sharing::Link>,
+        comment_link: Option<crate::sharing::Link>,
     ) {
-        let view = view_link.as_ref().map(ToString::to_string);
         crate::settings::save_shared_link(
             &self.board_key(),
-            Some((&link.to_string(), view.as_deref())),
+            Some(&crate::settings::SharedLinks {
+                link: link.to_string(),
+                view: view_link.as_ref().map(ToString::to_string),
+                comment: comment_link.as_ref().map(ToString::to_string),
+            }),
         );
         let proxy = self.proxy.clone();
         self.share_error = None;
+        self.accounts.use_server(&link.server);
+        let session = self.accounts.session_for(&link.server).map(str::to_owned);
         self.sharing = Some(crate::sharing::Sharing::start(
             link,
             view_link,
+            comment_link,
             &self.me,
+            session.as_deref(),
             move || {
                 let _ = proxy.send_event(UserEvent::Network);
             },
         ));
     }
 
+    /// Asks the server about the account again: its boards, and the open board's members
+    /// if it owns it.
+    fn refresh_account(&mut self) {
+        let server = match &self.sharing {
+            Some(sharing) => sharing.link.server.clone(),
+            None => Some(crate::settings::server())
+                .filter(|s| !s.is_empty())
+                .or_else(page_server)
+                .unwrap_or_default(),
+        };
+        self.accounts.use_server(&server);
+        self.accounts.members = None;
+        if self.accounts.account.is_some() {
+            self.accounts.refresh_boards();
+            if let Some(sharing) = &self.sharing {
+                self.accounts.load_members(&sharing.link.board);
+            }
+        }
+    }
+
+    /// Acts on what the server said about the account.
+    fn account_outcome(&mut self, outcome: crate::account::Outcome) {
+        use crate::account::Outcome;
+        match outcome {
+            Outcome::NewLink(board, role, token) => {
+                let Some(sharing) = &mut self.sharing else {
+                    return;
+                };
+                if sharing.link.board != board {
+                    return;
+                }
+                let link = crate::sharing::Link {
+                    token,
+                    ..sharing.link.clone()
+                };
+                match role {
+                    // Joined with the old link to edit, or by the account: this copy
+                    // keeps the new one (it joins with it next time).
+                    pb_core::Role::Edit => sharing.link = link,
+                    pb_core::Role::Comment => sharing.comment_link = Some(link),
+                    pb_core::Role::View => sharing.view_link = Some(link),
+                }
+                let links = crate::settings::SharedLinks {
+                    link: sharing.link.to_string(),
+                    view: sharing.view_link.as_ref().map(ToString::to_string),
+                    comment: sharing.comment_link.as_ref().map(ToString::to_string),
+                };
+                crate::settings::save_shared_link(&self.board_key(), Some(&links));
+            }
+            Outcome::BoardGone(board) => {
+                if self.sharing.as_ref().is_some_and(|s| s.link.board == board) {
+                    self.stop_sharing();
+                }
+            }
+        }
+    }
+
     fn stop_sharing(&mut self) {
         crate::settings::save_shared_link(&self.board_key(), None);
         self.sharing = None;
         self.document.stop_sharing();
-        self.document.set_view_only(false);
+        self.document.set_role(pb_core::Role::Edit);
         self.tools.sync(&self.document);
     }
 
@@ -4262,46 +5038,15 @@ impl App {
             self.request_redraw();
         }
         if ticked.changed {
-            // Someone may have changed the text being edited here.
-            if let Some(theirs) = self.edited_text_on_board()
-                && let Some(edit) = &mut self.editing
-            {
-                edit.take_in(self.text.engine(), &theirs);
+            // Someone may have changed what is being edited here.
+            if let Some(edit) = &mut self.editing {
+                edit.follow(self.text.engine(), &self.document);
             }
+            #[cfg(target_arch = "wasm32")]
+            self.name_shared_board();
             self.tools.sync(&self.document);
             self.request_redraw();
         }
-    }
-
-    /// The text on the board of what is being edited: an object's, a table cell's, a kanban
-    /// card's or a mind map node's.
-    fn edited_text_on_board(&self) -> Option<String> {
-        let edit = self.editing.as_ref()?;
-        let kind = |id| self.document.get(id).map(|o| &o.data.kind);
-        if let Some((id, (row, col))) = edit.edited_cell() {
-            let Some(ObjectKind::Table(table)) = kind(id) else {
-                return None;
-            };
-            return Some(table.text(row, col).0.to_owned());
-        }
-        if let Some((id, card)) = edit.edited_card() {
-            let Some(ObjectKind::Kanban(kanban)) = kind(id) else {
-                return None;
-            };
-            let i = kanban.card_index(&card)?;
-            return Some(kanban.cards[i].text.to_string());
-        }
-        if let Some((id, node)) = edit.edited_node() {
-            let Some(ObjectKind::MindMap(map)) = kind(id) else {
-                return None;
-            };
-            let i = map.index(&node)?;
-            return Some(map.nodes[i].text.to_string());
-        }
-        let crate::editing::Target::Existing(id) = edit.target else {
-            return None;
-        };
-        kind(id)?.text().map(str::to_owned)
     }
 
     /// The board's name to show: a shared board's own name, else its file's.
@@ -4401,9 +5146,14 @@ impl App {
         use crate::sharing::Status;
 
         let shared = self.sharing.as_ref().map(|sharing| {
-            let (status, online, offline, can_edit) = match &sharing.status {
-                Status::Connecting => (tr("Connecting…").to_owned(), false, false, true),
-                Status::Online { can_edit } => (
+            let (status, online, offline, role) = match &sharing.status {
+                Status::Connecting => (
+                    tr("Connecting…").to_owned(),
+                    false,
+                    false,
+                    pb_core::Role::Edit,
+                ),
+                Status::Online { role } => (
                     if sharing.people.is_empty() {
                         tr("Online: only you here").to_owned()
                     } else {
@@ -4411,7 +5161,7 @@ impl App {
                     },
                     true,
                     false,
-                    *can_edit,
+                    *role,
                 ),
                 Status::Offline(reason) => (
                     trf(
@@ -4420,9 +5170,10 @@ impl App {
                     ),
                     false,
                     true,
-                    true,
+                    pb_core::Role::Edit,
                 ),
             };
+            let can_edit = role == pb_core::Role::Edit;
             let people = sharing
                 .people
                 .iter()
@@ -4434,21 +5185,41 @@ impl App {
                     leading: p.leading,
                 })
                 .collect();
-            let edit_link =
-                (sharing.view_link.is_some() || can_edit).then(|| sharing.link.to_string());
+            // A link without a key opens the board only for those let in by account.
+            let edit_link = (!sharing.link.token.is_empty()
+                && (sharing.view_link.is_some() || can_edit))
+                .then(|| sharing.link.to_string());
+            let members = self
+                .accounts
+                .members
+                .as_ref()
+                .filter(|(board, _)| *board == sharing.link.board)
+                .map(|(_, members)| {
+                    members
+                        .iter()
+                        .map(|m| (m.email.clone(), m.role.clone()))
+                        .collect()
+                });
             let view_link = sharing
                 .view_link
                 .as_ref()
                 .map(ToString::to_string)
-                .or_else(|| (!can_edit).then(|| sharing.link.to_string()));
+                .or_else(|| (role == pb_core::Role::View).then(|| sharing.link.to_string()));
+            let comment_link = sharing
+                .comment_link
+                .as_ref()
+                .map(ToString::to_string)
+                .or_else(|| (role == pb_core::Role::Comment).then(|| sharing.link.to_string()));
             crate::ui::SharedView {
                 leading: sharing.leading(),
                 status,
                 online,
                 offline,
-                can_edit,
+                role,
                 edit_link: edit_link.filter(|_| can_edit),
+                comment_link,
                 view_link,
+                members,
                 people,
             }
         });
@@ -4460,8 +5231,30 @@ impl App {
             };
             (text, s.online)
         });
+        let accounts = &self.accounts;
+        let account = crate::ui::AccountView {
+            server: accounts
+                .account
+                .as_ref()
+                .map(|a| a.server.clone())
+                .or_else(|| self.sharing.as_ref().map(|s| s.link.server.clone()))
+                .unwrap_or_default(),
+            email: accounts.account.as_ref().map(|a| a.email.clone()),
+            signing_in: accounts
+                .signing_in
+                .as_ref()
+                .map(|s| (s.email.clone(), s.code.clone())),
+            boards: accounts.boards.as_ref().map(|boards| {
+                boards
+                    .iter()
+                    .map(|b| (b.board.clone(), b.title.clone(), b.role.clone()))
+                    .collect()
+            }),
+            error: accounts.error.clone(),
+        };
         let window = self.share_window.then(|| crate::ui::ShareView {
             name: self.me.to_string(),
+            account,
             shared,
             server: Some(crate::settings::server())
                 .filter(|s| !s.is_empty())
@@ -4522,6 +5315,23 @@ impl App {
         }
     }
 
+    /// PaintBoard was started again with `file`: shows the window, then opens the board
+    /// or offers to install the plugin, as when this copy was started with it. That may
+    /// ask something in a window of the system, so it is done after the next frame.
+    fn started_again(&mut self, file: Option<PathBuf>) {
+        if let Some(window) = &self.window {
+            window.set_minimized(false);
+            window.focus_window();
+        }
+        match file {
+            Some(f) if has_extension(&f, pb_plugin::package::EXTENSION) => {
+                self.defer(Action::InstallPluginFiles(vec![f]));
+            }
+            Some(f) => self.defer(Action::OpenFile(f)),
+            None => self.request_redraw(),
+        }
+    }
+
     fn new_board(&mut self) {
         self.finish_editing();
         self.end_style_drag();
@@ -4539,16 +5349,52 @@ impl App {
             .map_or_else(String::new, |p| p.to_string_lossy().into_owned())
     }
 
+    /// Renames the board kept in the browser at `from`; its links go with it.
+    fn rename_stored(&mut self, from: &std::path::Path, name: &str) {
+        match self.session.rename_stored(from, name, &self.document) {
+            Ok(to) => {
+                crate::settings::move_shared_link(&from.to_string_lossy(), &to.to_string_lossy());
+            }
+            Err(err) => dialog::show_error(tr("Could not rename the board"), &err.to_string()),
+        }
+        self.request_redraw();
+    }
+
+    /// A shared board opened from its link is kept under the board's id: once its name
+    /// arrives, it is kept under that instead.
+    #[cfg(target_arch = "wasm32")]
+    fn name_shared_board(&mut self) {
+        let (Some(sharing), Some(title), Some(path)) = (
+            &self.sharing,
+            self.document.title(),
+            self.session.path().map(std::path::Path::to_path_buf),
+        ) else {
+            return;
+        };
+        if path.file_stem().and_then(|s| s.to_str()) != Some(&*sharing.link.board) {
+            return;
+        }
+        // Another board may have the name already.
+        for n in 1..10 {
+            let name = match n {
+                1 => title.clone(),
+                n => format!("{title} ({n})"),
+            };
+            let to = path.with_file_name(format!("{name}.{}", pb_storage::EXTENSION));
+            if !pb_platform::fs::exists(&to) {
+                self.rename_stored(&path, &name);
+                return;
+            }
+        }
+    }
+
     /// The board was saved under another name: its links go with it.
     fn board_renamed(&mut self, before: &str) {
         let after = self.board_key();
         if after == before {
             return;
         }
-        if let Some((link, view)) = crate::settings::shared_link(before) {
-            crate::settings::save_shared_link(before, None);
-            crate::settings::save_shared_link(&after, Some((&link, view.as_deref())));
-        }
+        crate::settings::move_shared_link(before, &after);
     }
 
     /// Opens the shared board the page's address is a link to, kept in the browser under
@@ -4564,37 +5410,33 @@ impl App {
         let Ok(dir) = pb_platform::fs::boards_dir() else {
             return false;
         };
-        let path = dir.join(format!("{}.{}", link.board, pb_storage::EXTENSION));
+        // Kept under the board's id at first, under its own name once known or renamed.
+        let path = crate::settings::board_with_link(&link.to_string())
+            .map(std::path::PathBuf::from)
+            .filter(|p| pb_platform::fs::exists(p))
+            .unwrap_or_else(|| dir.join(format!("{}.{}", link.board, pb_storage::EXTENSION)));
         let document = self.session.open_or_new(path, &self.document);
         self.replace_document(document);
-        // This copy may know the link to look too, from when it made the board.
+        // This copy may know the other links too, from when it made the board.
         match crate::settings::shared_link(&self.board_key()) {
-            Some((known, view)) if known == link.to_string() => {
-                self.resume_sharing_with(known, view)
-            }
-            _ => self.start_sharing(link, None),
+            Some(known) if known.link == link.to_string() => self.resume_sharing_with(&known),
+            _ => self.start_sharing(link, None, None),
         }
         true
     }
 
-    #[cfg(target_arch = "wasm32")]
-    fn resume_sharing_with(&mut self, link: String, view: Option<String>) {
-        if let Some(link) = crate::sharing::Link::parse(&link) {
-            let view = view.as_deref().and_then(crate::sharing::Link::parse);
-            self.start_sharing(link, view);
+    fn resume_sharing_with(&mut self, links: &crate::settings::SharedLinks) {
+        let parse = |l: &Option<String>| l.as_deref().and_then(crate::sharing::Link::parse);
+        if let Some(link) = crate::sharing::Link::parse(&links.link) {
+            self.start_sharing(link, parse(&links.view), parse(&links.comment));
         }
     }
 
     /// Shares the open board again if it was shared when last open.
     fn resume_sharing(&mut self) {
-        let Some((link, view)) = crate::settings::shared_link(&self.board_key()) else {
-            return;
-        };
-        let Some(link) = crate::sharing::Link::parse(&link) else {
-            return;
-        };
-        let view = view.as_deref().and_then(crate::sharing::Link::parse);
-        self.start_sharing(link, view);
+        if let Some(links) = crate::settings::shared_link(&self.board_key()) {
+            self.resume_sharing_with(&links);
+        }
     }
 
     /// The pointer for tools, if it is over the canvas.
@@ -4752,6 +5594,42 @@ impl App {
         }
     }
 
+    /// The pen's and marker's cursor: a dot of the ink's color and width on screen.
+    fn ink_cursor(&mut self, event_loop: &ActiveEventLoop) -> Option<Cursor> {
+        let marker = match self.tools.active() {
+            ToolKind::Pen => false,
+            ToolKind::Marker => true,
+            _ => return None,
+        };
+        let style = self.tools.ink_style(marker);
+        let diameter = (style.width * self.scale()).round().clamp(4.0, 48.0) as u32;
+        let key = (style.color, diameter);
+        if self
+            .ink_cursor
+            .as_ref()
+            .is_none_or(|(made, _)| *made != key)
+        {
+            let (rgba, side) = dot_cursor(style.color, diameter);
+            let hot = (side / 2) as u16;
+            let source = CustomCursor::from_rgba(rgba, side as u16, side as u16, hot, hot).ok()?;
+            self.ink_cursor = Some((key, event_loop.create_custom_cursor(source)));
+        }
+        self.ink_cursor
+            .as_ref()
+            .map(|(_, cursor)| cursor.clone().into())
+    }
+
+    fn cursor(&mut self, event_loop: &ActiveEventLoop) -> Cursor {
+        let icon = self.cursor_icon();
+        if icon == CursorIcon::Crosshair
+            && self.cropping.is_none()
+            && let Some(dot) = self.ink_cursor(event_loop)
+        {
+            return dot;
+        }
+        icon.into()
+    }
+
     fn cursor_icon(&mut self) -> CursorIcon {
         let over_text = match (&mut self.editing, self.navigation.cursor()) {
             (Some(edit), Some(cursor)) => {
@@ -4901,6 +5779,63 @@ impl App {
         self.request_redraw();
     }
 
+    /// Like Miro, dragging something near the window's edge (or past it) moves the view
+    /// that way, faster the closer it gets, and what is dragged comes along. Returns when
+    /// to move it next.
+    fn autopan(&mut self, now: Instant) -> Option<Instant> {
+        /// How close to the edge it starts, in logical pixels.
+        const EDGE: f64 = 36.0;
+        /// Logical pixels per second at the edge; up to twice that beyond it.
+        const SPEED: f64 = 900.0;
+        let cursor = self.navigation.cursor().filter(|_| self.tools.autopans());
+        let size = self.viewport();
+        let push = |at: f64, length: f64| {
+            if at < EDGE {
+                ((EDGE - at) / EDGE).min(2.0)
+            } else if at > length - EDGE {
+                -((at - (length - EDGE)) / EDGE).min(2.0)
+            } else {
+                0.0
+            }
+        };
+        let speed = cursor.map_or(Vec2::ZERO, |c| {
+            Vec2::new(push(c.x, size.width), push(c.y, size.height))
+        });
+        if speed == Vec2::ZERO || size.width < 4.0 * EDGE || size.height < 4.0 * EDGE {
+            self.autopan = None;
+            return None;
+        }
+        let step = pb_platform::Duration::from_millis(16);
+        let dt = self
+            .autopan
+            .map_or(step, |last| now.saturating_duration_since(last))
+            .min(pb_platform::Duration::from_millis(50));
+        if self.autopan.is_some_and(|last| now < last + step) {
+            return self.autopan.map(|last| last + step);
+        }
+        self.autopan = Some(now);
+        self.camera.pan(speed * SPEED * dt.as_secs_f64());
+        if let Some(pointer) = self.pointer() {
+            self.tools.pointer_move(&self.document, pointer);
+        }
+        self.request_redraw();
+        Some(now + step)
+    }
+
+    /// The window fills the screen, or goes back to how it was.
+    fn toggle_fullscreen(&mut self) {
+        if let Some(window) = &self.window {
+            let full = window.fullscreen().is_some();
+            window.set_fullscreen((!full).then_some(winit::window::Fullscreen::Borderless(None)));
+        }
+    }
+
+    /// Does `action` after the next frame (see [`App::deferred`]).
+    fn defer(&mut self, action: Action) {
+        self.deferred.push(action);
+        self.request_redraw();
+    }
+
     fn handle_key(&mut self, event: &KeyEvent) -> bool {
         let PhysicalKey::Code(code) = event.physical_key else {
             return false;
@@ -4926,13 +5861,13 @@ impl App {
         let viewport = self.viewport();
         // Physical keys, so shortcuts work the same on any keyboard layout.
         match code {
-            KeyCode::KeyS if ctrl && modifiers.shift_key() => {
-                self.session.save_as(&self.document);
-            }
-            KeyCode::KeyS if ctrl => self.session.save(&self.document),
-            KeyCode::KeyO if ctrl => self.open_board(),
-            KeyCode::KeyE if ctrl && modifiers.shift_key() => self.open_export(),
-            KeyCode::KeyP if ctrl => self.print(),
+            KeyCode::KeyS if ctrl && modifiers.shift_key() => self.defer(Action::SaveAs),
+            KeyCode::KeyS if ctrl => self.defer(Action::Save),
+            KeyCode::KeyO if ctrl => self.defer(Action::Open),
+            KeyCode::KeyE if ctrl && modifiers.shift_key() => self.defer(Action::OpenExport),
+            KeyCode::KeyP if ctrl && modifiers.shift_key() => self.toggle_palette(),
+            KeyCode::KeyP if ctrl => self.defer(Action::Print),
+            KeyCode::KeyK if ctrl => self.toggle_palette(),
             // The UI's size: Ctrl+Alt+= / - / 0 (Ctrl+= and friends zoom the board).
             KeyCode::Equal if ctrl && modifiers.alt_key() => {
                 self.perform(Action::SetUiScale(self.ui_scale + 0.25));
@@ -4943,7 +5878,7 @@ impl App {
             KeyCode::Digit0 if ctrl && modifiers.alt_key() => {
                 self.perform(Action::SetUiScale(1.0));
             }
-            KeyCode::KeyN if ctrl => self.new_board(),
+            KeyCode::KeyN if ctrl => self.defer(Action::NewBoard),
             KeyCode::KeyZ if ctrl && modifiers.shift_key() => self.redo(),
             KeyCode::KeyZ if ctrl => self.undo(),
             KeyCode::KeyY if ctrl => self.redo(),
@@ -4961,6 +5896,7 @@ impl App {
             KeyCode::KeyF if ctrl => self.open_search(),
             KeyCode::F1 => self.show_shortcuts = !self.show_shortcuts,
             KeyCode::F5 => self.start_presentation(),
+            KeyCode::Backslash if ctrl => self.perform(Action::ToggleClean),
             KeyCode::Slash if modifiers.shift_key() && !ctrl => {
                 self.show_shortcuts = !self.show_shortcuts;
             }
@@ -4977,7 +5913,7 @@ impl App {
             KeyCode::KeyC if ctrl => {
                 self.copy_selection();
             }
-            KeyCode::KeyX if ctrl => {
+            KeyCode::KeyX if ctrl && !modifiers.shift_key() => {
                 if self.copy_selection()
                     && let Some(command) = self.tools.delete_selected(&self.document)
                 {
@@ -5038,7 +5974,20 @@ impl App {
             {
                 self.clear_cells();
             }
-            KeyCode::Delete | KeyCode::Backspace => self.delete_selected(),
+            KeyCode::KeyB | KeyCode::KeyI | KeyCode::KeyU | KeyCode::KeyX
+                if ctrl && self.tools.table_cells(&self.document).is_some() =>
+            {
+                use pb_text::Mark;
+                let mark = match code {
+                    KeyCode::KeyB => Mark::Bold,
+                    KeyCode::KeyI => Mark::Italic,
+                    KeyCode::KeyU => Mark::Underline,
+                    _ if modifiers.shift_key() => Mark::Strike,
+                    _ => return false,
+                };
+                self.mark_cells(mark);
+            }
+            KeyCode::Delete | KeyCode::Backspace => self.defer(Action::Delete),
             KeyCode::ArrowLeft => self.nudge(-1.0, 0.0),
             KeyCode::ArrowRight => self.nudge(1.0, 0.0),
             KeyCode::ArrowUp => self.nudge(0.0, -1.0),
@@ -5049,6 +5998,7 @@ impl App {
                     || self.thread_panel.take().is_some()
                     || self.diagram.take().is_some()
                     || std::mem::replace(&mut self.show_templates, false)
+                    || std::mem::replace(&mut self.show_boards, false)
                     || std::mem::replace(&mut self.show_export, false)
                     || std::mem::replace(&mut self.show_shortcuts, false);
                 if !closed
@@ -5096,6 +6046,13 @@ impl ApplicationHandler<UserEvent> for App {
         let attributes = {
             use winit::platform::web::WindowAttributesExtWebSys;
             attributes.with_append(true)
+        };
+        // The app id (Wayland) and window class (X11), which desktops match with
+        // paintboard.desktop for the icon and the taskbar.
+        #[cfg(target_os = "linux")]
+        let attributes = {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            attributes.with_name("paintboard", "paintboard")
         };
         let window = Arc::new(
             event_loop
@@ -5160,11 +6117,40 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let now = Instant::now();
         self.tick_sharing(now);
+        self.accounts.tick(now);
+        if !self.plugins.list.is_empty() {
+            self.with_plugins(|plugins, app| plugins.tell_changes(app));
+        }
+        if self.plugins.watching() {
+            if self.plugin_check_at.is_none_or(|at| at <= now) {
+                self.with_plugins(|plugins, app| plugins.reload_changed(app));
+                self.plugin_check_at = Some(now + std::time::Duration::from_secs(1));
+            }
+        } else {
+            self.plugin_check_at = None;
+        }
+        if self.plugins.deadline().is_some_and(|at| at <= now) {
+            self.with_plugins(|plugins, app| plugins.tick(app, now));
+        }
+        if self
+            .plugin_sound
+            .as_ref()
+            .is_some_and(|(_, end)| *end <= now)
+        {
+            self.plugin_sound = None;
+        }
+        let shown = self.notices.len();
+        self.notices.retain(|(_, _, until)| *until > now);
+        if self.notices.len() != shown {
+            self.request_redraw();
+        }
+        let notice_end = self.notices.iter().map(|(_, _, until)| *until).min();
         self.session.tick(&self.document, now);
         // The GPU reports back between frames: keep them coming until the file is made.
         if self.step_making() {
             self.request_redraw();
         }
+        let autopan = self.autopan(now);
         let ui_repaint = self.ui.as_ref().and_then(Ui::repaint_at);
         if ui_repaint.is_some_and(|at| at <= now) {
             self.request_redraw();
@@ -5176,7 +6162,12 @@ impl ApplicationHandler<UserEvent> for App {
             edit.next_blink(now)
         });
         // A running timer shows each second; a finished one blinks.
-        let timer = self.timer.as_ref().and_then(|t| t.next_tick(now));
+        let timer = self.document.timer();
+        let now_ms = pb_platform::now_ms();
+        if timer.and_then(|t| timer_view(&t, now_ms)) != self.timer_drawn {
+            self.request_redraw();
+        }
+        let timer = timer.and_then(|t| timer_tick(&t, now_ms)).map(|d| now + d);
         // Recording samples the view, and shows each second.
         let viewport = self.viewport();
         let center = self.camera.visible_world_rect(viewport).center();
@@ -5194,16 +6185,18 @@ impl ApplicationHandler<UserEvent> for App {
         if redraw {
             self.request_redraw();
         }
-        if timer.is_some_and(|at| at <= now) {
-            self.request_redraw();
-        }
         let wake = [
+            autopan,
             self.session.deadline(),
             ui_repaint.filter(|&at| at > now),
             blink,
-            timer.filter(|&at| at > now),
+            timer,
             sampling,
             self.sharing.as_ref().and_then(|s| s.deadline()),
+            self.accounts.deadline(),
+            self.plugin_check_at,
+            self.plugins.deadline(),
+            notice_end,
         ]
         .into_iter()
         .flatten()
@@ -5234,7 +6227,38 @@ impl ApplicationHandler<UserEvent> for App {
             // Waking up is all it takes: `about_to_wait` ticks the sharing.
             UserEvent::Network => {}
             UserEvent::BoardMade(server, answer) => self.board_made(&server, answer),
+            UserEvent::PluginPosted => {
+                self.with_plugins(|plugins, app| plugins.poll(app));
+            }
+            UserEvent::PluginFetched {
+                plugin,
+                call,
+                result,
+            } => {
+                self.with_plugins(|plugins, app| plugins.fetched(app, &plugin, call, result));
+            }
+            UserEvent::PluginFiles(paths) => self.install_plugin(paths),
+            UserEvent::DevPluginPicked(path) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(dir) = path.parent() {
+                    let dir = dir.to_owned();
+                    let loaded = self.with_plugins(|plugins, app| plugins.load_dev(app, &dir));
+                    match loaded {
+                        Ok(_) => self.plugins_window = true,
+                        Err(err) => dialog::show_error(tr("Could not load the plugin"), &err),
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                let _ = path;
+            }
+            UserEvent::Account(reply) => {
+                if let Some(outcome) = self.accounts.receive(reply) {
+                    self.account_outcome(outcome);
+                }
+                self.request_redraw();
+            }
             UserEvent::BoardPicked(path) => self.open_file(path),
+            UserEvent::StartedAgain(file) => self.started_again(file),
             UserEvent::FilesDropped(paths, at) => {
                 let at = self.camera.screen_to_world(at);
                 self.insert_files(&paths, Some(at));
@@ -5381,7 +6405,14 @@ impl App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let typing = self.ui.as_ref().is_some_and(Ui::wants_keyboard);
-                if typing {
+                if event.state == ElementState::Pressed
+                    && event.physical_key == PhysicalKey::Code(KeyCode::F11)
+                {
+                    if !event.repeat {
+                        self.toggle_fullscreen();
+                    }
+                    true
+                } else if typing {
                     // The browser gives text fields no clipboard: read it for them.
                     let paste = cfg!(target_arch = "wasm32")
                         && event.state == ElementState::Pressed
@@ -5562,9 +6593,9 @@ impl App {
         // Over the UI, egui sets the cursor. Only input changes it: on the web, winit sends
         // some events (Resized) while it holds the canvas the cursor is set on.
         if pointer_or_keys && !over_ui {
-            let icon = self.cursor_icon();
+            let cursor = self.cursor(event_loop);
             if let Some(window) = &self.window {
-                window.set_cursor(icon);
+                window.set_cursor(cursor);
             }
         }
         if changed {
@@ -5573,70 +6604,45 @@ impl App {
     }
 }
 
-/// A countdown.
-struct Timer {
-    duration: pb_platform::Duration,
-    /// When it last started running; `None` while paused.
-    started: Option<Instant>,
-    /// Time run before the last start.
-    run: pb_platform::Duration,
+/// A board's countdown that ran out this long ago (milliseconds) is no longer shown, so
+/// a board opened the next day does not blink at once.
+const TIMER_SHOWN_FOR: u64 = 10 * 60_000;
+
+/// What the board's countdown shows at `now` (wall-clock milliseconds); `None` once it ran
+/// out long ago.
+fn timer_view(timer: &pb_core::Timer, now: i64) -> Option<crate::ui::TimerView> {
+    let elapsed = timer.elapsed(now);
+    let over = elapsed.saturating_sub(timer.duration);
+    if over > TIMER_SHOWN_FOR {
+        return None;
+    }
+    let left = timer.left(now);
+    // Rounded up, so it reads 0:00 only when time is up.
+    let secs = left.div_ceil(1000);
+    let done = left == 0;
+    Some(crate::ui::TimerView {
+        text: if secs >= 3600 {
+            format!("{}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+        } else {
+            format!("{}:{:02}", secs / 60, secs % 60)
+        },
+        running: timer.running(),
+        done,
+        // Blinks twice a second once time is up.
+        flash: done && over % 1000 < 500,
+    })
 }
 
-impl Timer {
-    /// A countdown of `duration`, running from now.
-    fn new(duration: pb_platform::Duration) -> Self {
-        Self {
-            duration,
-            started: Some(Instant::now()),
-            run: pb_platform::Duration::ZERO,
-        }
+/// How long until the countdown next looks different: the next whole second while
+/// running, the next half second once time is up; `None` while paused or no longer shown.
+fn timer_tick(timer: &pb_core::Timer, now: i64) -> Option<pb_platform::Duration> {
+    timer.started?;
+    let elapsed = timer.elapsed(now);
+    if elapsed.saturating_sub(timer.duration) > TIMER_SHOWN_FOR {
+        return None;
     }
-
-    fn elapsed(&self, now: Instant) -> pb_platform::Duration {
-        self.run
-            + self
-                .started
-                .map_or(pb_platform::Duration::ZERO, |s| now.duration_since(s))
-    }
-
-    /// Pauses it, or runs it on.
-    fn toggle(&mut self, now: Instant) {
-        match self.started.take() {
-            Some(start) => self.run += now.duration_since(start),
-            None => self.started = Some(now),
-        }
-    }
-
-    /// What it shows at `now`.
-    fn view(&self, now: Instant) -> crate::ui::TimerView {
-        let elapsed = self.elapsed(now);
-        let left = self.duration.saturating_sub(elapsed);
-        // Rounded up, so it reads 0:00 only when time is up.
-        let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
-        let done = left.is_zero();
-        let over = elapsed.saturating_sub(self.duration);
-        crate::ui::TimerView {
-            text: format!("{}:{:02}", secs / 60, secs % 60),
-            running: self.started.is_some(),
-            done,
-            // Blinks twice a second once time is up.
-            flash: done && over.subsec_millis() < 500,
-        }
-    }
-
-    /// When it next needs drawing: at the next whole second while running, every half
-    /// second once time is up; `None` while paused.
-    fn next_tick(&self, now: Instant) -> Option<Instant> {
-        self.started?;
-        let elapsed = self.elapsed(now);
-        let step = if elapsed >= self.duration {
-            pb_platform::Duration::from_millis(500)
-        } else {
-            pb_platform::Duration::from_secs(1)
-        };
-        let into = pb_platform::Duration::from_nanos((elapsed.as_nanos() % step.as_nanos()) as u64);
-        Some(now + (step - into))
-    }
+    let step = if elapsed >= timer.duration { 500 } else { 1000 };
+    Some(pb_platform::Duration::from_millis(step - elapsed % step))
 }
 
 /// Margin around a presented frame, in logical pixels.
@@ -5723,6 +6729,39 @@ Write **Markdown** here: *italic*, `code`, [links](https://example.com).
 ";
 
 /// Whether `path` is a PDF file, which is added as a book.
+/// A round cursor picture of `diameter` pixels filled with `color`, ringed in white or dark
+/// gray (whichever stands out from the color) so it shows on any background; returns the
+/// pixels and the side of the square picture.
+fn dot_cursor(color: Rgba, diameter: u32) -> (Vec<u8>, u32) {
+    let side = diameter + 4;
+    let [r, g, b, a] = color.to_bytes();
+    let light = u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114 > 128_000;
+    let ring: [u8; 3] = if light { [0x40; 3] } else { [0xFF; 3] };
+    let center = f64::from(side) / 2.0;
+    let radius = f64::from(diameter) / 2.0;
+    let mut rgba = Vec::with_capacity((side * side * 4) as usize);
+    for y in 0..side {
+        for x in 0..side {
+            let d = (f64::from(x) + 0.5 - center).hypot(f64::from(y) + 0.5 - center);
+            // Smooth edges: coverage of the ring (1.5 px) and the fill inside it.
+            let outer = (radius + 1.5 - d).clamp(0.0, 1.0);
+            let inner = (radius - d).clamp(0.0, 1.0) * (f64::from(a.max(0x80)) / 255.0);
+            let mix = |c: u8, k: u8| (f64::from(c) * inner + f64::from(k) * (1.0 - inner)) as u8;
+            if outer <= 0.0 {
+                rgba.extend([0, 0, 0, 0]);
+            } else {
+                rgba.extend([
+                    mix(r, ring[0]),
+                    mix(g, ring[1]),
+                    mix(b, ring[2]),
+                    (outer * 255.0) as u8,
+                ]);
+            }
+        }
+    }
+    (rgba, side)
+}
+
 fn is_pdf_file(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -5766,13 +6805,13 @@ fn is_table_file(path: &std::path::Path) -> bool {
 }
 
 /// Most rows and columns a table made from a file or paste gets; the rest is cut.
-const MAX_TABLE_ROWS: usize = 500;
-const MAX_TABLE_COLS: usize = 50;
+pub(crate) const MAX_TABLE_ROWS: usize = 500;
+pub(crate) const MAX_TABLE_COLS: usize = 50;
 
 /// Space around cell text, and the widest a column of a pasted table starts out, in world
 /// units at 100%.
-const TABLE_CELL_PAD: f64 = 8.0;
-const TABLE_MAX_COLUMN: f64 = 280.0;
+pub(crate) const TABLE_CELL_PAD: f64 = 8.0;
+pub(crate) const TABLE_MAX_COLUMN: f64 = 280.0;
 
 /// Whether `path` is a Markdown or plain text file, added as a document.
 fn is_document_file(path: &std::path::Path) -> bool {
@@ -5856,7 +6895,7 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
             .filter(|_| show_handles && tools.can_rotate(document))
             .map(|f| rotation_knob(f, zoom)),
         hover,
-        cells: tools.cells_frame(document),
+        cells: tools.cells_frames(document),
         marquee: tools.marquee(),
         guides: tools.guides(document),
         eraser: tools.eraser(),
@@ -5884,38 +6923,182 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
     }
 }
 
+impl crate::plugins::Host for App {
+    fn document(&self) -> &Document {
+        &self.document
+    }
+
+    fn apply(&mut self, commands: Vec<Command>) -> Result<Vec<ObjectId>, String> {
+        let mut created = Vec::new();
+        let mut result = Ok(());
+        for command in commands {
+            match self.document.apply(command) {
+                Ok(applied) => created.extend(applied.created),
+                Err(err) => {
+                    result = Err(err.to_string());
+                    break;
+                }
+            }
+        }
+        self.tools.sync(&self.document);
+        self.request_redraw();
+        result.map(|()| created)
+    }
+
+    fn selection(&self) -> Vec<ObjectId> {
+        self.tools.selection().ids().to_vec()
+    }
+
+    fn select(&mut self, ids: Vec<ObjectId>) {
+        self.tools.select_only(ids);
+        self.tools.sync(&self.document);
+    }
+
+    fn view(&self) -> (pb_geom::kurbo::Rect, f64) {
+        (
+            self.camera.visible_world_rect(self.viewport()),
+            self.camera.zoom(),
+        )
+    }
+
+    fn zoom_to(&mut self, ids: &[ObjectId]) {
+        let area = ids
+            .iter()
+            .filter_map(|&id| self.document.get(id))
+            .map(|o| o.data.frame().aabb())
+            .reduce(|a, b| a.union(b));
+        if let Some(area) = area {
+            let viewport = self.viewport();
+            self.camera.fit(area, viewport, FRAME_MARGIN);
+        }
+    }
+
+    fn measured(&mut self) -> (&Document, Box<crate::plugin_api::Measure<'_>>) {
+        let text = &mut self.text;
+        (
+            &self.document,
+            Box::new(move |t: &str, size: f64, wrap: Option<f64>| {
+                let layout = text.engine().layout(t, size, wrap);
+                (layout.width, layout.height)
+            }),
+        )
+    }
+
+    fn copy_text(&mut self, text: &str) {
+        clipboard::set_text(text);
+    }
+
+    fn notify(&mut self, name: &str, text: &str) {
+        self.notices.push((
+            name.to_owned(),
+            text.chars().take(300).collect(),
+            Instant::now() + NOTICE_FOR,
+        ));
+        if self.notices.len() > 4 {
+            self.notices.remove(0);
+        }
+    }
+
+    fn fetch(&mut self, plugin: &str, id: u64, url: &str, options: &serde_json::Value) {
+        let method = match options.get("method").and_then(serde_json::Value::as_str) {
+            Some("POST") | Some("post") => "POST",
+            Some("PUT") | Some("put") => "PUT",
+            Some("DELETE") | Some("delete") => "DELETE",
+            _ => "GET",
+        };
+        let body = options
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let proxy = self.proxy.clone();
+        let plugin = plugin.to_owned();
+        pb_platform::net::fetch(method, url, &[], body.as_deref(), move |result| {
+            let _ = proxy.send_event(UserEvent::PluginFetched {
+                plugin,
+                call: id,
+                result,
+            });
+        });
+    }
+
+    fn group(&mut self, on: bool) {
+        if on {
+            self.document.begin_undo_group();
+        } else {
+            self.document.end_undo_group();
+        }
+    }
+
+    fn play_sound(&mut self, name: &str) {
+        let Some(samples) = crate::sounds::sound(name) else {
+            return;
+        };
+        let length = std::time::Duration::from_secs_f64(
+            samples.len() as f64 / f64::from(crate::sounds::RATE),
+        );
+        match pb_platform::audio::Player::start(samples.into(), crate::sounds::RATE, 0.0) {
+            // A little longer than the sound, so the speakers play it to the end.
+            Ok(player) => {
+                let end = Instant::now() + length + std::time::Duration::from_millis(500);
+                self.plugin_sound = Some((player, end));
+            }
+            Err(err) => log::warn!("plugin sound: {err}"),
+        }
+    }
+
+    fn waker(&self) -> Box<dyn Fn()> {
+        let proxy = self.proxy.clone();
+        Box::new(move || {
+            let _ = proxy.send_event(UserEvent::PluginPosted);
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn the_pen_cursor_is_a_ringed_dot() {
+        let (rgba, side) = dot_cursor(Rgba::rgb(0x10, 0x20, 0x30), 10);
+        assert_eq!(side, 14);
+        let px = |x: u32, y: u32| &rgba[((y * side + x) * 4) as usize..][..4];
+        assert_eq!(px(7, 7), [0x10, 0x20, 0x30, 0xFF]);
+        assert_eq!(px(0, 0)[3], 0);
+        // A white ring around a dark dot.
+        assert_eq!(px(7, 1)[..3], [0xFF, 0xFF, 0xFF]);
+        assert!(px(7, 1)[3] > 0xF0);
+    }
+
+    #[test]
     fn timers_count_down_pause_and_run_out() {
-        use pb_platform::Duration;
-        let t0 = Instant::now();
-        let secs = |s: u64| t0 + Duration::from_secs(s);
-        let mut timer = Timer {
-            duration: Duration::from_secs(90),
-            started: Some(t0),
-            run: Duration::ZERO,
-        };
-        assert_eq!(timer.view(t0).text, "1:30");
-        assert_eq!(timer.view(t0 + Duration::from_millis(500)).text, "1:30");
-        assert_eq!(timer.view(secs(31)).text, "0:59");
+        let t0 = 1_760_000_000_000;
+        let secs = |s: i64| t0 + s * 1000;
+        let text = |timer: &pb_core::Timer, now| timer_view(timer, now).unwrap().text;
+        let timer = pb_core::Timer::new(90_000, t0);
+        assert_eq!(text(&timer, t0), "1:30");
+        assert_eq!(text(&timer, t0 + 500), "1:30");
+        assert_eq!(text(&timer, secs(31)), "0:59");
         // Paused for a minute, it does not move.
-        timer.toggle(secs(31));
-        assert!(!timer.view(secs(91)).running);
-        assert_eq!(timer.view(secs(91)).text, "0:59");
-        assert_eq!(timer.next_tick(secs(91)), None);
-        timer.toggle(secs(91));
-        assert_eq!(timer.view(secs(100)).text, "0:50");
+        let timer = timer.toggled(secs(31));
+        assert!(!timer_view(&timer, secs(91)).unwrap().running);
+        assert_eq!(text(&timer, secs(91)), "0:59");
+        assert_eq!(timer_tick(&timer, secs(91)), None);
+        let timer = timer.toggled(secs(91));
+        assert_eq!(text(&timer, secs(100)), "0:50");
         // Next tick on the next whole second of running time.
         assert_eq!(
-            timer.next_tick(secs(100) + Duration::from_millis(300)),
-            Some(secs(101))
+            timer_tick(&timer, secs(100) + 300),
+            Some(pb_platform::Duration::from_millis(700))
         );
-        let up = timer.view(secs(150) + Duration::from_millis(100));
+        let up = timer_view(&timer, secs(150) + 100).unwrap();
         assert!(up.done && up.flash);
-        assert!(!timer.view(secs(150) + Duration::from_millis(600)).flash);
+        assert!(!timer_view(&timer, secs(150) + 600).unwrap().flash);
+        let long = pb_core::Timer::new(2 * 3_600_000, t0);
+        assert_eq!(text(&long, t0), "2:00:00");
+        // Long after, it is gone.
+        assert_eq!(timer_view(&timer, secs(150 + 11 * 60)), None);
+        assert_eq!(timer_tick(&timer, secs(150 + 11 * 60)), None);
     }
 
     #[test]

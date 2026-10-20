@@ -416,10 +416,24 @@ pub(crate) fn draw_object(
                 scene.pop_layer();
             }
         }
-        ObjectKind::Image(image) => match images.get(assets, image.asset) {
+        ObjectKind::Image(image) => match images.get(assets, image.asset, {
+            if scene.full_pictures() {
+                f64::INFINITY
+            } else {
+                // The whole picture's longer side on screen, in physical pixels.
+                let scale = transform.determinant().abs().sqrt();
+                let (crop, b) = (image.crop, data.bounds);
+                (b.width() / crop.width()).max(b.height() / crop.height()) * scale
+            }
+        }) {
             Some(brush) => {
                 let file = assets.get(image.asset).map(|f| &f[..]);
                 draw_image(scene, transform, data.bounds, image, brush, file);
+                // A PDF page is often white to its edges: a thin line shows where it ends.
+                if image.book.is_some() {
+                    let edge = Stroke::new(1.0 / zoom);
+                    scene.stroke(&edge, transform, frame_edge, &data.bounds);
+                }
             }
             None => draw_placeholder(scene, transform, data.bounds),
         },
@@ -867,6 +881,13 @@ fn paint_padding(data: &ObjectData) -> f64 {
         ObjectKind::Image(_) => 0.0,
         _ => data.style.stroke_width / 2.0,
     }
+}
+
+/// Whether an object too small on screen for any detail is drawn as [`draw_box`]. Not
+/// pictures, which would turn into gray boxes (drawn from their smallest copy, they cost
+/// little), nor pen strokes: handwriting would turn into rows of black squares.
+pub(crate) fn boxed_when_tiny(data: &ObjectData) -> bool {
+    !matches!(data.kind, ObjectKind::Image(_) | ObjectKind::Ink(_))
 }
 
 /// An object too small on screen for any detail: a box in its main color.

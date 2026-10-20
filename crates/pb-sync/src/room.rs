@@ -5,11 +5,11 @@
 //! also checks they are well formed), keeps pictures and files by hash, and passes
 //! everything on to the others.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use loro::{ExportMode, LoroDoc, VersionVector};
-use pb_core::AssetId;
+use pb_core::{AssetId, Role};
 
 use crate::message::{ClientId, Message, Presence};
 
@@ -19,11 +19,16 @@ pub const MAX_ASSET: usize = 64 << 20;
 /// The most all of a board's pictures and files may take together.
 pub const MAX_ASSETS_TOTAL: usize = 512 << 20;
 
+/// The most one message of remarks may take: comments are short.
+pub const MAX_REMARKS: usize = 1 << 20;
+
 /// Messages to send: to whom, and what.
 pub type Outgoing = Vec<(ClientId, Message)>;
 
 struct Member {
-    can_edit: bool,
+    role: Role,
+    /// Peers whose changes came from this member as remarks: only they may add more.
+    peers: HashSet<u64>,
     presence: Option<Presence>,
 }
 
@@ -72,6 +77,11 @@ impl Room {
             .expect("a snapshot of a loaded document")
     }
 
+    /// The board's name, if it has one.
+    pub fn title(&self) -> Option<String> {
+        pb_core::board_title(&self.doc)
+    }
+
     pub fn asset(&self, id: AssetId) -> Option<&Arc<[u8]>> {
         self.assets.get(&id)
     }
@@ -93,12 +103,12 @@ impl Room {
         self.members.len()
     }
 
-    /// Lets `client` in. `version` and `assets` say what it has; it is sent the rest and
+    /// Lets `client` in with `role`. `version` and `assets` say what it has; it is sent the rest and
     /// where the others are.
     pub fn join(
         &mut self,
         client: ClientId,
-        can_edit: bool,
+        role: Role,
         version: &[u8],
         assets: &[AssetId],
     ) -> Result<Outgoing, String> {
@@ -115,7 +125,7 @@ impl Room {
             client,
             Message::Welcome {
                 client,
-                can_edit,
+                role,
                 updates,
                 version: self.doc.oplog_vv().encode(),
                 assets: self.assets.keys().copied().collect(),
@@ -134,7 +144,8 @@ impl Room {
         self.members.insert(
             client,
             Member {
-                can_edit,
+                role,
+                peers: HashSet::new(),
                 presence: None,
             },
         );
@@ -147,7 +158,7 @@ impl Room {
         let member = self.members.get_mut(&client).ok_or("not in the room")?;
         match message {
             Message::Updates(bytes) => {
-                if !member.can_edit {
+                if member.role != Role::Edit {
                     return Err("this board is read-only for you".into());
                 }
                 let before = self.doc.oplog_vv();
@@ -158,8 +169,33 @@ impl Room {
                 self.changed = true;
                 Ok(self.to_others(client, &Message::Updates(bytes)))
             }
+            Message::Remarks(json) => {
+                if member.role == Role::View {
+                    return Err("this board is read-only for you".into());
+                }
+                if json.len() > MAX_REMARKS {
+                    return Err("too much at once".into());
+                }
+                let schema = loro::JsonSchema::try_from(json.as_str())
+                    .map_err(|e| format!("unreadable remarks: {e}"))?;
+                let before = self.doc.oplog_vv();
+                let peers = check_remarks(&schema, &member.peers, &before)?;
+                self.doc
+                    .import_json_updates(schema)
+                    .map_err(|e| e.to_string())?;
+                member.peers.extend(peers);
+                if self.doc.oplog_vv() == before {
+                    return Ok(Vec::new());
+                }
+                self.changed = true;
+                let updates = self
+                    .doc
+                    .export(ExportMode::updates(&before))
+                    .map_err(|e| e.to_string())?;
+                Ok(self.to_others(client, &Message::Updates(updates)))
+            }
             Message::Asset(bytes) => {
-                if !member.can_edit {
+                if member.role != Role::Edit {
                     return Err("this board is read-only for you".into());
                 }
                 if bytes.len() > MAX_ASSET {
@@ -202,4 +238,49 @@ impl Room {
             .map(|&id| (id, message.clone()))
             .collect()
     }
+}
+
+/// Checks that remarks only write what someone who may only comment may
+/// ([`pb_core::commenting_writes`]), as plain values, and only as peers that are new to the
+/// board or this member's own (`owned`), so they cannot pass for someone else's edits.
+/// Returns the peers they use.
+fn check_remarks(
+    schema: &loro::JsonSchema,
+    owned: &HashSet<u64>,
+    have: &VersionVector,
+) -> Result<HashSet<u64>, String> {
+    if schema.peers.is_some() {
+        return Err("remarks must name their peers in full".into());
+    }
+    let mut peers = HashSet::new();
+    for change in &schema.changes {
+        let peer = change.id.peer;
+        if !owned.contains(&peer) && have.get(&peer).is_some_and(|&n| n > 0) {
+            return Err("remarks may not continue someone else's changes".into());
+        }
+        peers.insert(peer);
+        for op in &change.ops {
+            let loro::ContainerID::Root {
+                name,
+                container_type: loro::ContainerType::Map,
+            } = &op.container
+            else {
+                return Err("you may only comment on this board".into());
+            };
+            let allowed = match &op.content {
+                loro::JsonOpContent::Map(loro::JsonMapOp::Insert { key, value }) => {
+                    !matches!(value, loro::LoroValue::Container(_))
+                        && pb_core::commenting_writes(name, key)
+                }
+                loro::JsonOpContent::Map(loro::JsonMapOp::Delete { key }) => {
+                    pb_core::commenting_writes(name, key)
+                }
+                _ => false,
+            };
+            if !allowed {
+                return Err("you may only comment on this board".into());
+            }
+        }
+    }
+    Ok(peers)
 }

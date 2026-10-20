@@ -56,14 +56,47 @@ pub enum Action {
     StopSharing,
     /// Connects to the server again now.
     RetrySharing,
+    /// Signs in on the server (as typed) with this email.
+    SignIn(String, String),
+    CancelSignIn,
+    SignOut,
+    RefreshBoards,
+    /// Opens a board of the account, by id.
+    OpenMyBoard(String),
+    /// Lets someone in to the shared board by email: `edit`, `comment`, `view` or `none`.
+    SetMember(String, String),
+    /// A new link for this role on the shared board; the old one stops working.
+    RenewLink(pb_core::Role),
+    /// Deletes the shared board from the server, after asking.
+    DeleteSharedBoard,
+    /// Deletes the account and the boards it owns from the server, after asking.
+    DeleteAccount,
+    /// Opens or closes the plugins window.
+    TogglePlugins,
+    InstallPlugin,
+    /// Offers to install the plugin in these files.
+    InstallPluginFiles(Vec<std::path::PathBuf>),
+    /// Runs a plugin from its own folder, reloading it as it changes (desktop).
+    LoadDevPlugin,
+    SetPluginEnabled(String, bool),
+    RemovePlugin(String),
+    /// Runs this command of this plugin.
+    RunPluginCommand(String, String),
+    /// Something happened in this plugin's panel.
+    PluginPanel(String, serde_json::Value),
+    ClosePluginPanel(String),
+    /// Saves a plugin being developed as one `.pbplugin` file, to give to others.
+    PackPlugin(String),
     /// Puts text on the clipboard (a link to share).
     CopyText(String),
-    /// Opens this board (one kept in the browser).
+    /// Opens this board (one kept in the browser, or a file PaintBoard was started with).
     OpenFile(std::path::PathBuf),
     /// Lets the browser download the board as a file (web only).
     DownloadBoard,
     /// Deletes a board kept in the browser, after asking.
     DeleteStored(std::path::PathBuf),
+    /// Gives a board kept in the browser a new name.
+    RenameStored(std::path::PathBuf, String),
     Save,
     SaveAs,
     ZoomIn,
@@ -127,6 +160,14 @@ pub enum Action {
     MarkColor(Option<Rgba>),
     /// Shows or hides the minimap.
     ToggleMinimap,
+    /// Hides or shows one of the panels around the board.
+    TogglePanel(Panel),
+    /// Hides all panels but a button to bring them back, or shows them again (Ctrl+\).
+    ToggleClean,
+    /// The window takes the whole screen or goes back (F11).
+    ToggleFullscreen,
+    /// Colors the board's background; `None` is the usual color.
+    SetBackground(Option<Rgba>),
     /// Puts the selected connector back on its automatic path.
     ResetBends,
     /// Adds a row (`rows`) or column to the selected table: after the selected cells
@@ -160,7 +201,7 @@ pub enum Action {
     ClearVotes,
     /// Opens or closes the voting results.
     ToggleResults,
-    /// Starts a countdown of this many minutes.
+    /// Starts a countdown of this many milliseconds.
     StartTimer(u64),
     /// Pauses the countdown, or runs it on.
     PauseTimer,
@@ -178,6 +219,10 @@ pub enum Action {
     ToggleLaser,
     /// Opens or closes the template gallery.
     ToggleTemplates,
+    /// Shows or hides the boards kept in the browser.
+    ToggleBoards,
+    /// Lets the browser download a board kept in it.
+    DownloadStored(std::path::PathBuf),
     /// Adds template `i` of `templates::TEMPLATES` in the middle of the view.
     InsertTemplate(usize),
     /// Opens the window for making a diagram from text.
@@ -208,6 +253,15 @@ pub enum Action {
     /// Makes a diagram from this Mermaid text.
     InsertDiagram(String),
     CloseDiagram,
+    /// Opens the window that draws graphs of functions.
+    OpenGraph,
+    /// Draws graphs of the formulas (separated by `;`) for x from `from` to `to`.
+    InsertGraph {
+        formulas: String,
+        from: String,
+        to: String,
+    },
+    CloseGraph,
     /// Adds this comment to the thread shown, starting it if new.
     PostComment(String),
     DeleteComment(std::sync::Arc<str>),
@@ -226,6 +280,15 @@ pub enum Action {
     /// Shows the next search result, or the previous one.
     SearchStep(bool),
     CloseSearch,
+    /// Opens the command palette, or closes it (Ctrl+K).
+    TogglePalette,
+    ClosePalette,
+    /// Looks on the board for objects with this text, to offer in the palette.
+    PaletteQuery(String),
+    /// Brings this area of the board (world) into view, like a search result.
+    ShowArea(kurbo::Rect),
+    /// Shows everything on the board, at most at 100%.
+    ZoomToFit,
     /// Links the selected object to a typed or pasted address or anchor.
     SetLink(String),
     /// Links the selected object to another object.
@@ -281,7 +344,133 @@ pub enum Action {
 }
 
 /// What the UI shows.
+/// The panels around the board that can be put away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Panel {
+    /// The board menu at the top.
+    Menu,
+    /// The tools on the left.
+    Tools,
+    /// The view controls (and the minimap) at the bottom.
+    View,
+}
+
+/// Which panels show. Clean, the board shows alone with one button to bring them back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Panels {
+    pub menu: bool,
+    pub tools: bool,
+    pub view: bool,
+    pub clean: bool,
+}
+
+impl Default for Panels {
+    fn default() -> Self {
+        Self {
+            menu: true,
+            tools: true,
+            view: true,
+            clean: false,
+        }
+    }
+}
+
+impl Panels {
+    pub fn shows(&self, panel: Panel) -> bool {
+        !self.clean
+            && match panel {
+                Panel::Menu => self.menu,
+                Panel::Tools => self.tools,
+                Panel::View => self.view,
+            }
+    }
+
+    /// Hides or shows `panel`; out of clean mode, that panel alone comes back.
+    pub fn toggle(&mut self, panel: Panel) {
+        if self.clean {
+            *self = Self {
+                menu: false,
+                tools: false,
+                view: false,
+                clean: false,
+            };
+        }
+        let shown = match panel {
+            Panel::Menu => &mut self.menu,
+            Panel::Tools => &mut self.tools,
+            Panel::View => &mut self.view,
+        };
+        *shown = !*shown;
+    }
+
+    /// As words for the settings file: the hidden panels and `clean`.
+    pub fn to_words(self) -> String {
+        [
+            (!self.menu, "no-menu"),
+            (!self.tools, "no-tools"),
+            (!self.view, "no-view"),
+            (self.clean, "clean"),
+        ]
+        .iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, word)| *word)
+        .collect::<Vec<_>>()
+        .join(" ")
+    }
+
+    pub fn from_words(text: &str) -> Self {
+        let has = |word| text.split_whitespace().any(|w| w == word);
+        Self {
+            menu: !has("no-menu"),
+            tools: !has("no-tools"),
+            view: !has("no-view"),
+            clean: has("clean"),
+        }
+    }
+}
+
+/// A command a plugin offers.
+pub struct PluginCommandView {
+    pub plugin: String,
+    pub plugin_name: String,
+    pub id: String,
+    pub title: String,
+    /// Offered for the selection in the right-click menu too.
+    pub selection: bool,
+}
+
+/// An installed plugin, for the plugins window.
+pub struct PluginView {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub author: String,
+    pub description: String,
+    /// What it may do, in words.
+    pub permissions: Vec<String>,
+    pub enabled: bool,
+    pub running: bool,
+    /// Run from its own folder for development.
+    pub dev: bool,
+    pub error: Option<String>,
+    /// (level, text), oldest first.
+    pub log: Vec<(String, String)>,
+}
+
 pub struct Model<'a> {
+    pub plugin_commands: Vec<PluginCommandView>,
+    /// The plugins window, when open.
+    pub plugins: Option<Vec<PluginView>>,
+    /// Panels plugins show: plugin id, plugin name, the panel as described.
+    pub plugin_panels: Vec<(String, String, serde_json::Value)>,
+    /// Messages from plugins: the plugin's name, the text.
+    pub notices: Vec<(String, String)>,
+    /// Which panels show.
+    pub panels: Panels,
+    /// The window fills the screen.
+    pub fullscreen: bool,
+    /// The board's own background color, if it has one.
+    pub background: Option<Rgba>,
     pub board: &'a str,
     /// Running in the browser.
     pub web: bool,
@@ -319,6 +508,9 @@ pub struct Model<'a> {
     pub filter: &'a pb_core::Filter,
     /// The search bar, when it is open.
     pub search: Option<SearchInfo>,
+    /// The command palette, when it is open: objects whose text fits what is typed, each
+    /// with a line of its text and its area on the board.
+    pub palette: Option<Vec<(String, kurbo::Rect)>>,
     /// The right-click menu, when it is open.
     pub context_menu: Option<ContextMenuInfo>,
     pub show_shortcuts: bool,
@@ -336,6 +528,8 @@ pub struct Model<'a> {
     pub hidden: (usize, bool),
     /// The board is read-only: only looking and commenting.
     pub read_only: bool,
+    /// Opened with a link for viewing: nothing can be changed, not even the timer.
+    pub view_only: bool,
     /// The layers panel, while open.
     pub layers: Option<LayersView>,
     /// Recording a talktrack: seconds so far, and whether there is sound.
@@ -346,8 +540,12 @@ pub struct Model<'a> {
     pub talktracks: Vec<(Arc<str>, String, u32)>,
     /// The diagram-from-text window, when it is open, with the last error.
     pub diagram: Option<Option<String>>,
+    /// The graph window, when it is open, with the last error.
+    pub graph: Option<Option<String>>,
     /// The template gallery is open.
     pub show_templates: bool,
+    /// The window of the boards kept in the browser (the web version's start screen).
+    pub show_boards: bool,
     /// The dark theme is on.
     pub dark: bool,
     /// The UI's size relative to normal, and whether high contrast is on.
@@ -457,7 +655,7 @@ pub struct VotingView {
 }
 
 /// What the countdown shows.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TimerView {
     /// Time left, like `4:32`.
     pub text: String,
@@ -643,6 +841,18 @@ const PALETTE: [Rgba; 16] = [
 ];
 
 /// Sticky note colors, light enough for dark text. The first is the default.
+/// Background colors a board can have, besides the usual one.
+const BOARD_COLORS: [Rgba; 8] = [
+    Rgba::rgb(0xFF, 0xFF, 0xFF),
+    Rgba::rgb(0xFB, 0xF6, 0xE9),
+    Rgba::rgb(0xE9, 0xEC, 0xEF),
+    Rgba::rgb(0xE3, 0xF0, 0xFB),
+    Rgba::rgb(0xE6, 0xF4, 0xE4),
+    Rgba::rgb(0xFF, 0xF6, 0xCC),
+    Rgba::rgb(0xFC, 0xE8, 0xEC),
+    Rgba::rgb(0xEE, 0xE8, 0xF8),
+];
+
 pub const STICKY_COLORS: [Rgba; 8] = [
     Rgba::rgb(0xFF, 0xF1, 0x76),
     Rgba::rgb(0xFF, 0xD0, 0x80),
@@ -705,8 +915,12 @@ pub struct Ui {
     link_text: String,
     /// Text typed into the search bar.
     search_text: String,
+    /// What is typed in the command palette, and what it remembers.
+    palette: PaletteState,
     /// Mermaid text in the diagram window, kept between openings.
     diagram_text: String,
+    /// The graph window's formulas and x range.
+    graph_text: (String, String, String),
     /// A comment being written.
     comment_text: String,
     /// The layer being renamed, with the name typed so far.
@@ -717,11 +931,14 @@ pub struct Ui {
     export_shown: bool,
     /// Name typed for a version to save.
     version_name: String,
-    /// Server address and shared link typed in the sharing window.
-    server_text: String,
-    share_link_text: String,
-    /// The name being typed in the sharing window, while it is.
-    share_name: Option<String>,
+    /// Time typed for the countdown, like `7` or `2:30`.
+    timer_text: String,
+    /// The board kept in the browser being renamed, and the name typed.
+    renaming_board: Option<(std::path::PathBuf, String)>,
+    /// What is typed in the sharing window.
+    share_texts: ShareTexts,
+    /// What is typed in plugins' panels, by plugin and field.
+    panel_values: std::collections::HashMap<(String, String), String>,
     repaint_at: Option<Instant>,
 }
 
@@ -751,15 +968,22 @@ impl Ui {
             new_tag: String::new(),
             link_text: String::new(),
             search_text: String::new(),
+            palette: PaletteState::default(),
             diagram_text: DIAGRAM_EXAMPLE.to_owned(),
+            graph_text: (
+                "sin(x); x^2/4 - 1".to_owned(),
+                "-5".to_owned(),
+                "5".to_owned(),
+            ),
             comment_text: String::new(),
             layer_name: None,
             export: crate::export::Settings::default(),
             export_shown: false,
             version_name: String::new(),
-            server_text: String::new(),
-            share_link_text: String::new(),
-            share_name: None,
+            timer_text: String::new(),
+            renaming_board: None,
+            share_texts: ShareTexts::default(),
+            panel_values: std::collections::HashMap::new(),
             repaint_at: None,
         }
     }
@@ -864,22 +1088,25 @@ impl Ui {
         let new_tag = &mut self.new_tag;
         let link_text = &mut self.link_text;
         let search_text = &mut self.search_text;
+        let palette = &mut self.palette;
         let diagram_text = &mut self.diagram_text;
+        let graph_text = &mut self.graph_text;
         let comment_text = &mut self.comment_text;
         let layer_name = &mut self.layer_name;
         let export = &mut self.export;
         let export_shown = &mut self.export_shown;
         let version_name = &mut self.version_name;
-        let server_text = &mut self.server_text;
-        let share_link_text = &mut self.share_link_text;
-        let share_name = &mut self.share_name;
+        let timer_text = &mut self.timer_text;
+        let renaming_board = &mut self.renaming_board;
+        let share_texts = &mut self.share_texts;
+        let panel_values = &mut self.panel_values;
         let output = self.ctx.run_pass(input, |ctx| {
             others(ctx, model);
             if let Some(banner) = &model.follow_banner {
                 follow_banner(ctx, banner, &mut actions);
             }
             if let Some(timer) = &model.timer {
-                timer_pill(ctx, timer, &mut actions);
+                timer_pill(ctx, timer, !model.view_only, &mut actions);
             }
             if let Some(voting) = model.voting.filter(|v| v.open) {
                 voting_banner(ctx, voting, &mut actions);
@@ -908,21 +1135,31 @@ impl Ui {
                 version_bar(ctx, version, model.read_only, &mut actions);
                 return;
             }
+            let panels = model.panels;
             if model.focus {
                 focus_bar(ctx, &mut actions);
-            } else {
-                board_menu(ctx, model, version_name, &mut actions);
+            } else if panels.shows(Panel::Menu) {
+                let typed = Typed {
+                    version_name,
+                    timer_text,
+                };
+                board_menu(ctx, model, typed, &mut actions);
             }
-            if model.read_only {
-                read_only_toolbar(ctx, model, &mut actions);
-            } else {
-                toolbar(ctx, model, &mut actions);
+            if panels.shows(Panel::Tools) {
+                if model.read_only {
+                    read_only_toolbar(ctx, model, &mut actions);
+                } else {
+                    toolbar(ctx, model, &mut actions);
+                }
             }
-            let view = view_controls(ctx, model, &mut actions);
-            if let Some(map) = model.minimap.as_ref().filter(|_| !model.focus) {
-                minimap(ctx, map, view, &mut actions);
+            if panels.shows(Panel::View) {
+                let view = view_controls(ctx, model, &mut actions);
+                if let Some(map) = model.minimap.as_ref().filter(|_| !model.focus) {
+                    minimap(ctx, map, view, &mut actions);
+                }
             }
-            match &model.layers {
+            panel_handles(ctx, panels, model.focus, &mut actions);
+            match model.layers.as_ref().filter(|_| !panels.clean) {
                 Some(layers) => layers_panel(ctx, layers, layer_name, &mut actions),
                 None => *layer_name = None,
             }
@@ -940,13 +1177,23 @@ impl Ui {
                 None => search_text.clear(),
             }
             if let Some(info) = model.context_menu {
-                context_menu(ctx, info, &mut actions);
+                context_menu(ctx, info, &model.plugin_commands, &mut actions);
             }
             if model.show_shortcuts {
                 shortcuts_window(ctx, &mut actions);
             }
+            match &model.palette {
+                Some(objects) => command_palette(ctx, model, objects, palette, &mut actions),
+                None => {
+                    palette.text.clear();
+                    palette.picked = 0;
+                }
+            }
             if let Some(error) = &model.diagram {
                 diagram_window(ctx, error.as_deref(), diagram_text, &mut actions);
+            }
+            if let Some(error) = &model.graph {
+                graph_window(ctx, error.as_deref(), graph_text, &mut actions);
             }
             match model.export {
                 Some(info) => {
@@ -966,15 +1213,20 @@ impl Ui {
             if model.show_templates {
                 templates_window(ctx, &mut actions);
             }
+            if model.show_boards {
+                boards_window(ctx, model, renaming_board, &mut actions);
+            }
             if let Some(view) = &model.share_window {
-                share_window(
-                    ctx,
-                    view,
-                    server_text,
-                    share_link_text,
-                    share_name,
-                    &mut actions,
-                );
+                share_window(ctx, view, share_texts, &mut actions);
+            }
+            if let Some(plugins) = &model.plugins {
+                plugins_window(ctx, plugins, model.web, &mut actions);
+            }
+            for (plugin, name, panel) in &model.plugin_panels {
+                plugin_panel(ctx, plugin, name, panel, panel_values, &mut actions);
+            }
+            if !model.notices.is_empty() {
+                notices(ctx, &model.notices);
             }
             match &model.thread {
                 Some(thread) => thread_panel(ctx, thread, comment_text, &mut actions),
@@ -1088,9 +1340,9 @@ fn panel() -> Frame {
         })
 }
 
-/// The browser keeps boards inside itself: they are opened from this list, and
+/// The browser keeps boards inside itself: they are listed in the boards window, and
 /// downloaded to have them as files.
-fn stored_boards_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
+fn stored_boards_menu(ui: &mut egui::Ui, actions: &mut Vec<Action>) {
     ui.separator();
     if ui
         .button(tr("Download board"))
@@ -1100,34 +1352,169 @@ fn stored_boards_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action
         actions.push(Action::DownloadBoard);
         ui.close();
     }
-    if model.stored_boards.is_empty() {
-        return;
+    if ui
+        .button(tr("Boards in this browser"))
+        .on_hover_text(tr("Open, rename, download or delete them"))
+        .clicked()
+    {
+        actions.push(Action::ToggleBoards);
+        ui.close();
     }
-    ui.menu_button(tr("Boards in this browser"), |ui| {
-        for path in &model.stored_boards {
-            let name = path
-                .file_stem()
-                .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+}
+
+/// The start screen of the web version: the boards kept in the browser, to open, rename,
+/// download or delete, and a new board or one from a file. `renaming` is the board being
+/// renamed, with the name typed.
+fn boards_window(
+    ctx: &Context,
+    model: &Model,
+    renaming: &mut Option<(std::path::PathBuf, String)>,
+    actions: &mut Vec<Action>,
+) {
+    let mut open = true;
+    egui::Window::new(tr("Boards in this browser"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .order(Order::Foreground)
+        .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                let open = model.open_board.as_deref() == Some(path.as_path());
-                if ui.add_enabled(!open, Button::new(&name)).clicked() {
-                    actions.push(Action::OpenFile(path.clone()));
-                    ui.close();
+                if ui.button(tr("+ New board")).clicked() {
+                    actions.push(Action::NewBoard);
+                    actions.push(Action::ToggleBoards);
                 }
-                let delete = ui
-                    .add_enabled(!open, Button::new("✕").small())
-                    .on_hover_text(tr("Delete this board from the browser"))
-                    .on_disabled_hover_text(tr("It is open: open another board first"));
-                if delete.clicked() {
-                    actions.push(Action::DeleteStored(path.clone()));
-                    ui.close();
+                if ui
+                    .button(tr("Open a file…"))
+                    .on_hover_text(tr("A .pboard file from this computer"))
+                    .clicked()
+                {
+                    actions.push(Action::Open);
+                    actions.push(Action::ToggleBoards);
                 }
             });
+            ui.separator();
+            if model.stored_boards.is_empty() {
+                ui.weak(tr("No boards here yet"));
+                return;
+            }
+            egui::ScrollArea::vertical()
+                .max_height(ctx.content_rect().height() * 0.6)
+                .show(ui, |ui| {
+                    egui::Grid::new("boards")
+                        .spacing([8.0, 6.0])
+                        .show(ui, |ui| {
+                            for path in &model.stored_boards {
+                                board_row(ui, model, path, renaming, actions);
+                                ui.end_row();
+                            }
+                        });
+                });
+        });
+    if !open {
+        *renaming = None;
+        actions.push(Action::ToggleBoards);
+    }
+}
+
+/// The name field of board `path` being renamed.
+fn rename_field_id(path: &std::path::Path) -> Id {
+    Id::unique(("rename board", path))
+}
+
+/// One board of the boards window.
+fn board_row(
+    ui: &mut egui::Ui,
+    model: &Model,
+    path: &std::path::Path,
+    renaming: &mut Option<(std::path::PathBuf, String)>,
+    actions: &mut Vec<Action>,
+) {
+    let name = path
+        .file_stem()
+        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    let open = model.open_board.as_deref() == Some(path);
+    if let Some((_, typed)) = renaming.as_mut().filter(|(p, _)| p == path) {
+        let field = egui::TextEdit::singleline(typed)
+            .id(rename_field_id(path))
+            .desired_width(220.0);
+        ui.add(field);
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if ui.button(tr("OK")).clicked() || enter {
+            actions.push(Action::RenameStored(path.to_owned(), typed.clone()));
+            *renaming = None;
+        } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            *renaming = None;
+        }
+        return;
+    }
+    let label = if open {
+        RichText::new(&name).strong()
+    } else {
+        RichText::new(&name)
+    };
+    let title = ui
+        .allocate_ui_with_layout(
+            egui::vec2(220.0, 22.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_width(220.0);
+                ui.add(egui::Label::new(label).sense(egui::Sense::click()))
+            },
+        )
+        .inner;
+    if open {
+        title.on_hover_text(tr("Open now"));
+    } else if title.on_hover_text(tr("Open")).clicked() {
+        actions.push(Action::OpenFile(path.to_owned()));
+        actions.push(Action::ToggleBoards);
+    }
+    ui.horizontal(|ui| {
+        // Inter has no pencil or arrow signs: words instead.
+        if ui.add(Button::new(tr("Rename")).small()).clicked() {
+            // The field takes the keys at once, with the old name selected to type over.
+            let id = rename_field_id(path);
+            let mut state = egui::text_edit::TextEditState::default();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(0),
+                    egui::text::CCursor::new(name.chars().count()),
+                )));
+            state.store(ui.ctx(), id);
+            ui.memory_mut(|m| m.request_focus(id));
+            ui.ctx().request_repaint();
+            *renaming = Some((path.to_owned(), name.clone()));
+        }
+        if ui
+            .add(Button::new(tr("Download")).small())
+            .on_hover_text(tr("Save the board as a .pboard file on this computer"))
+            .clicked()
+        {
+            actions.push(Action::DownloadStored(path.to_owned()));
+        }
+        let delete = ui
+            .add_enabled(!open, Button::new(tr("Delete")).small())
+            .on_hover_text(tr("Delete this board from the browser"))
+            .on_disabled_hover_text(tr("It is open: open another board first"));
+        if delete.clicked() {
+            actions.push(Action::DeleteStored(path.to_owned()));
         }
     });
 }
 
-fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: &mut Vec<Action>) {
+/// What is typed in the menus of the board menu.
+struct Typed<'a> {
+    version_name: &'a mut String,
+    timer_text: &'a mut String,
+}
+
+/// The menu bar at the top left.
+fn board_menu(ctx: &Context, model: &Model, typed: Typed, actions: &mut Vec<Action>) {
+    let Typed {
+        version_name,
+        timer_text,
+    } = typed;
     Area::new(Id::unique("board"))
         .fixed_pos(Pos2::new(MARGIN, MARGIN))
         .order(Order::Foreground)
@@ -1150,13 +1537,17 @@ fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: 
                             ("Save as…", "Ctrl+Shift+S", Action::SaveAs),
                             ("Insert file…", "", Action::InsertImage),
                             ("Diagram from text…", "", Action::OpenDiagram),
+                            ("Graph of a function…", "", Action::OpenGraph),
                             ("Export…", "Ctrl+Shift+E", Action::OpenExport),
                             ("Print…", "Ctrl+P", Action::Print),
                         ];
                         for (label, shortcut, action) in items {
                             // Inserting changes the board.
                             let on = !model.read_only
-                                || !matches!(action, Action::InsertImage | Action::OpenDiagram);
+                                || !matches!(
+                                    action,
+                                    Action::InsertImage | Action::OpenDiagram | Action::OpenGraph
+                                );
                             let button = Button::new(tr(label)).shortcut_text(shortcut);
                             if ui.add_enabled(on, button).clicked() {
                                 actions.push(action);
@@ -1164,7 +1555,7 @@ fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: 
                             }
                         }
                         if model.web {
-                            stored_boards_menu(ui, model, actions);
+                            stored_boards_menu(ui, actions);
                         }
                         ui.separator();
                         if ui
@@ -1207,20 +1598,16 @@ fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: 
                     {
                         actions.push(Action::Present);
                     }
+                    ui.menu_button(tr("Plugins"), |ui| plugins_menu(ui, model, actions));
                     ui.menu_button(tr("Talktracks"), |ui| talktracks_menu(ui, model, actions));
-                    ui.menu_button(tr("History"), |ui| {
+                    menu_with_fields(ui, tr("History"), |ui| {
                         history_menu(ui, model, version_name, actions)
                     });
                     ui.menu_button(tr("Vote"), |ui| {
                         voting_menu(ui, model.voting, &mut *actions)
                     });
-                    ui.menu_button(tr("Timer"), |ui| {
-                        for minutes in [1, 3, 5, 10, 15, 30] {
-                            if ui.button(trf("{} min", &[&minutes])).clicked() {
-                                actions.push(Action::StartTimer(minutes));
-                                ui.close();
-                            }
-                        }
+                    menu_with_fields(ui, tr("Timer"), |ui| {
+                        timer_menu(ui, model.view_only, timer_text, actions)
                     });
                     if ui
                         .add_enabled(!model.read_only, Button::new(tr("Templates")))
@@ -1242,6 +1629,13 @@ fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: 
                         .clicked()
                     {
                         actions.push(Action::OpenSearch);
+                    }
+                    if ui
+                        .button(tr("Commands"))
+                        .on_hover_text(tr("Command palette: any command, frame or text (Ctrl+K)"))
+                        .clicked()
+                    {
+                        actions.push(Action::TogglePalette);
                     }
                     if ui
                         .button("?")
@@ -1269,15 +1663,30 @@ fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: 
                     {
                         actions.push(Action::ToggleShare);
                     }
+                    hide_button(ui, "«", "Hide the menu", Panel::Menu, actions);
                 });
             });
         });
 }
 
 /// What the sharing window shows.
+/// What is typed in the sharing window.
+#[derive(Default)]
+struct ShareTexts {
+    server: String,
+    link: String,
+    /// The name being typed, while it is.
+    name: Option<String>,
+    email: String,
+    /// Someone to let in to the board, and as what.
+    member: String,
+    member_role: String,
+}
+
 pub struct ShareView {
     /// The name the user goes by.
     pub name: String,
+    pub account: AccountView,
     /// Shared: how it is going, the links and who is there.
     pub shared: Option<SharedView>,
     /// The server address last used.
@@ -1288,15 +1697,31 @@ pub struct ShareView {
     pub error: Option<String>,
 }
 
+/// The account on the server in use.
+pub struct AccountView {
+    /// The server; empty if none is known yet.
+    pub server: String,
+    /// Signed in with this email.
+    pub email: Option<String>,
+    /// Waiting for the link in the email to this address, which shows this code.
+    pub signing_in: Option<(String, Option<String>)>,
+    /// The account's boards: id, title, role.
+    pub boards: Option<Vec<(String, String, String)>>,
+    pub error: Option<String>,
+}
+
 pub struct SharedView {
     /// Everyone is asked to follow this view.
     pub leading: bool,
     pub status: String,
     pub online: bool,
     pub offline: bool,
-    pub can_edit: bool,
+    pub role: pb_core::Role,
     pub edit_link: Option<String>,
+    pub comment_link: Option<String>,
     pub view_link: Option<String>,
+    /// People let in by email, when this account owns the board.
+    pub members: Option<Vec<(String, String)>>,
     /// The others on the board.
     pub people: Vec<PersonView>,
 }
@@ -1315,12 +1740,183 @@ fn rgb(color: u32) -> Color32 {
     Color32::from_rgb((color >> 16) as u8, (color >> 8) as u8, color as u8)
 }
 
+/// How a role reads in the sharing window.
+fn role_label(role: &str) -> &'static str {
+    match role {
+        "owner" => tr("owner"),
+        "edit" => tr("can edit"),
+        "comment" => tr("can comment"),
+        _ => tr("can look"),
+    }
+}
+
+/// Signing in, the account's boards, signing out.
+fn account_section(
+    ui: &mut egui::Ui,
+    account: &AccountView,
+    texts: &mut ShareTexts,
+    actions: &mut Vec<Action>,
+) {
+    let server = if account.server.is_empty() {
+        texts.server.trim().to_owned()
+    } else {
+        account.server.clone()
+    };
+    if server.is_empty() {
+        return;
+    }
+    if let Some(email) = &account.email {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(trf("Signed in as {}", &[email]));
+            if ui.small_button(tr("Sign out")).clicked() {
+                actions.push(Action::SignOut);
+            }
+            if ui
+                .small_button(tr("Delete account…"))
+                .on_hover_text(tr(
+                    "Deletes the account and the boards it owns from the server",
+                ))
+                .clicked()
+            {
+                actions.push(Action::DeleteAccount);
+            }
+        });
+        if let Some(boards) = &account.boards {
+            egui::CollapsingHeader::new(trf("My boards ({})", &[&boards.len()]))
+                .id_salt("my boards")
+                .show(ui, |ui| {
+                    if boards.is_empty() {
+                        ui.weak(tr("None yet: boards you share while signed in, and those you are let in to, show here."));
+                    }
+                    egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                        for (board, title, role) in boards {
+                            ui.horizontal(|ui| {
+                                let title = if title.is_empty() { board } else { title };
+                                if ui.link(title).on_hover_text(tr("Open this board")).clicked() {
+                                    actions.push(Action::OpenMyBoard(board.clone()));
+                                }
+                                ui.weak(role_label(role));
+                            });
+                        }
+                    });
+                    if ui.small_button(tr("Refresh")).clicked() {
+                        actions.push(Action::RefreshBoards);
+                    }
+                });
+        }
+    } else if let Some((email, code)) = &account.signing_in {
+        ui.label(trf(
+            "A link to sign in was sent to {}. Open it in the email.",
+            &[email],
+        ));
+        match code {
+            Some(code) => {
+                ui.horizontal(|ui| {
+                    ui.label(tr("The page it opens must show the code"));
+                    ui.strong(code);
+                });
+            }
+            None => {
+                ui.weak(tr("Sending the email…"));
+            }
+        }
+        if ui.button(tr("Cancel")).clicked() {
+            actions.push(Action::CancelSignIn);
+        }
+    } else {
+        ui.label(tr(
+            "Sign in to see your boards in one list and let people in by email.",
+        ));
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut texts.email)
+                    .hint_text("name@example.com")
+                    .desired_width(240.0),
+            );
+            let typed = texts.email.contains('@');
+            if ui.add_enabled(typed, Button::new(tr("Sign in"))).clicked() {
+                actions.push(Action::SignIn(
+                    server.clone(),
+                    texts.email.trim().to_owned(),
+                ));
+            }
+        });
+    }
+    if let Some(error) = &account.error {
+        ui.colored_label(Color32::from_rgb(0xDC, 0x26, 0x26), error);
+    }
+    ui.separator();
+}
+
+/// The owner's list of people let in by email, and a row to let someone in.
+fn members_section(
+    ui: &mut egui::Ui,
+    members: &[(String, String)],
+    texts: &mut ShareTexts,
+    actions: &mut Vec<Action>,
+) {
+    const ROLES: [&str; 3] = ["edit", "comment", "view"];
+    ui.add_space(6.0);
+    ui.label(tr("People let in by email")).on_hover_text(tr(
+        "They open the board from My boards after signing in with that address",
+    ));
+    for (email, role) in members {
+        ui.horizontal(|ui| {
+            ui.label(email);
+            if role == "owner" {
+                ui.weak(role_label(role));
+                return;
+            }
+            let mut chosen = role.clone();
+            egui::ComboBox::from_id_salt(("member role", email))
+                .selected_text(role_label(&chosen))
+                .show_ui(ui, |ui| {
+                    for r in ROLES {
+                        ui.selectable_value(&mut chosen, r.to_owned(), role_label(r));
+                    }
+                });
+            if chosen != *role {
+                actions.push(Action::SetMember(email.clone(), chosen));
+            }
+            if ui.small_button("×").on_hover_text(tr("Remove")).clicked() {
+                actions.push(Action::SetMember(email.clone(), "none".into()));
+            }
+        });
+    }
+    ui.horizontal(|ui| {
+        if texts.member_role.is_empty() {
+            texts.member_role = "edit".into();
+        }
+        ui.add(
+            egui::TextEdit::singleline(&mut texts.member)
+                .hint_text("name@example.com")
+                .desired_width(200.0),
+        );
+        egui::ComboBox::from_id_salt("new member role")
+            .selected_text(role_label(&texts.member_role))
+            .show_ui(ui, |ui| {
+                for r in ROLES {
+                    ui.selectable_value(&mut texts.member_role, r.to_owned(), role_label(r));
+                }
+            });
+        let typed = texts.member.contains('@');
+        if ui
+            .add_enabled(typed, Button::new(tr("Let in")))
+            .on_hover_text(tr("They get an email about it"))
+            .clicked()
+        {
+            actions.push(Action::SetMember(
+                std::mem::take(&mut texts.member).trim().to_owned(),
+                texts.member_role.clone(),
+            ));
+        }
+    });
+}
+
 fn share_window(
     ctx: &Context,
     view: &ShareView,
-    server_text: &mut String,
-    link_text: &mut String,
-    name_text: &mut Option<String>,
+    texts: &mut ShareTexts,
     actions: &mut Vec<Action>,
 ) {
     let mut open = true;
@@ -1334,15 +1930,16 @@ fn share_window(
             ui.set_max_width(460.0);
             ui.horizontal(|ui| {
                 ui.label(tr("Your name"));
-                let name = name_text.get_or_insert_with(|| view.name.clone());
+                let name = texts.name.get_or_insert_with(|| view.name.clone());
                 let field = ui.add(egui::TextEdit::singleline(name).desired_width(200.0))
                     .on_hover_text(tr("Shown to others next to your pointer, comments and votes"));
                 if field.lost_focus() {
                     actions.push(Action::SetName(name.clone()));
-                    *name_text = None;
+                    texts.name = None;
                 }
             });
             ui.separator();
+            account_section(ui, &view.account, texts, actions);
             if let Some(shared) = &view.shared {
                 ui.horizontal(|ui| {
                     let color = if shared.online {
@@ -1356,8 +1953,16 @@ fn share_window(
                         actions.push(Action::RetrySharing);
                     }
                 });
-                if !shared.can_edit && shared.online {
-                    ui.weak(tr("You can look at this board but not change it."));
+                if shared.online {
+                    match shared.role {
+                        pb_core::Role::View => {
+                            ui.weak(tr("You can look at this board but not change it."));
+                        }
+                        pb_core::Role::Comment => {
+                            ui.weak(tr("You can comment, react and vote here, but not change the board."));
+                        }
+                        pb_core::Role::Edit => {}
+                    }
                 }
                 if !shared.people.is_empty() {
                     ui.horizontal_wrapped(|ui| {
@@ -1400,21 +2005,36 @@ fn share_window(
                     }
                 }
                 ui.add_space(6.0);
-                let link_row = |ui: &mut egui::Ui, label: &str, hint: &str, link: &str, actions: &mut Vec<Action>| {
+                let owner = shared.members.is_some();
+                // The owner sees every link, and can replace each: the old one stops working.
+                let link_row = |ui: &mut egui::Ui, label: &str, hint: &str, link: Option<&String>, role: pb_core::Role, actions: &mut Vec<Action>| {
+                    if link.is_none() && !owner {
+                        return;
+                    }
                     ui.label(label).on_hover_text(hint);
                     ui.horizontal(|ui| {
-                        let mut shown = link.to_owned();
-                        ui.add(egui::TextEdit::singleline(&mut shown).desired_width(340.0));
-                        if ui.button(tr("Copy")).clicked() {
-                            actions.push(Action::CopyText(link.to_owned()));
+                        let mut shown = link.cloned().unwrap_or_default();
+                        ui.add(egui::TextEdit::singleline(&mut shown).desired_width(300.0));
+                        if ui.add_enabled(link.is_some(), Button::new(tr("Copy"))).clicked()
+                            && let Some(link) = link
+                        {
+                            actions.push(Action::CopyText(link.clone()));
+                        }
+                        if owner
+                            && ui
+                                .button(tr("New link"))
+                                .on_hover_text(tr("Makes a new link: the old one stops working"))
+                                .clicked()
+                        {
+                            actions.push(Action::RenewLink(role));
                         }
                     });
                 };
-                if let Some(link) = &shared.edit_link {
-                    link_row(ui, tr("Link to edit"), tr("Whoever has it can change the board"), link, actions);
-                }
-                if let Some(link) = &shared.view_link {
-                    link_row(ui, tr("Link to look"), tr("Whoever has it can only look"), link, actions);
+                link_row(ui, tr("Link to edit"), tr("Whoever has it can change the board"), shared.edit_link.as_ref(), pb_core::Role::Edit, actions);
+                link_row(ui, tr("Link to comment"), tr("Whoever has it can comment, react and vote, but not change the board"), shared.comment_link.as_ref(), pb_core::Role::Comment, actions);
+                link_row(ui, tr("Link to look"), tr("Whoever has it can only look"), shared.view_link.as_ref(), pb_core::Role::View, actions);
+                if let Some(members) = &shared.members {
+                    members_section(ui, members, texts, actions);
                 }
                 ui.add_space(6.0);
                 if ui
@@ -1424,38 +2044,46 @@ fn share_window(
                 {
                     actions.push(Action::StopSharing);
                 }
+                if shared.members.is_some()
+                    && ui
+                        .button(tr("Delete from the server…"))
+                        .on_hover_text(tr("Everyone loses the board; your copy here stays"))
+                        .clicked()
+                {
+                    actions.push(Action::DeleteSharedBoard);
+                }
             } else {
                 ui.label(tr("Put this board on a server to work on it together: everyone with the link sees changes as they are made."));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.label(tr("Server"));
-                    if server_text.is_empty() {
-                        server_text.clone_from(&view.server);
+                    if texts.server.is_empty() {
+                        texts.server.clone_from(&view.server);
                     }
                     ui.add(
-                        egui::TextEdit::singleline(server_text)
+                        egui::TextEdit::singleline(&mut texts.server)
                             .hint_text("boards.example.com")
                             .desired_width(260.0),
                     );
                 });
-                let can_make = !view.making && !server_text.trim().is_empty();
+                let can_make = !view.making && !texts.server.trim().is_empty();
                 let label = if view.making { tr("Making the board…") } else { tr("Share this board") };
                 if ui.add_enabled(can_make, Button::new(label)).clicked() {
-                    actions.push(Action::CreateShared(server_text.trim().to_owned()));
+                    actions.push(Action::CreateShared(texts.server.trim().to_owned()));
                 }
                 ui.separator();
                 ui.label(tr("Or open a board someone shared with you:"));
                 ui.horizontal(|ui| {
                     ui.add(
-                        egui::TextEdit::singleline(link_text)
+                        egui::TextEdit::singleline(&mut texts.link)
                             .hint_text("https://…/board/…?key=…")
                             .desired_width(300.0),
                     );
                     if ui
-                        .add_enabled(!link_text.trim().is_empty(), Button::new(tr("Open")))
+                        .add_enabled(!texts.link.trim().is_empty(), Button::new(tr("Open")))
                         .clicked()
                     {
-                        actions.push(Action::JoinShared(link_text.trim().to_owned()));
+                        actions.push(Action::JoinShared(texts.link.trim().to_owned()));
                     }
                 });
             }
@@ -1710,6 +2338,10 @@ fn toolbar(ctx: &Context, model: &Model, actions: &mut Vec<Action>) {
                             if redo.inner.clicked() {
                                 actions.push(Action::Redo);
                             }
+                            ui.separator();
+                            ui.vertical_centered(|ui| {
+                                hide_button(ui, "«", "Hide the tools", Panel::Tools, actions);
+                            });
                             (shapes.rect, ink_button, structures.rect)
                         })
                         .inner
@@ -2048,6 +2680,49 @@ fn view_controls(ctx: &Context, model: &Model, actions: &mut Vec<Action>) -> Rec
                         {
                             actions.push(Action::ToggleHighContrast);
                         }
+                        ui.separator();
+                        let fullscreen = Button::selectable(model.fullscreen, tr("Full screen"))
+                            .shortcut_text("F11");
+                        if ui.add(fullscreen).clicked() {
+                            actions.push(Action::ToggleFullscreen);
+                            ui.close();
+                        }
+                        let clean = Button::new(tr("Clean board")).shortcut_text("Ctrl+\\");
+                        if ui
+                            .add(clean)
+                            .on_hover_text(tr(
+                                "Hide all panels; a button in the corner brings them back",
+                            ))
+                            .clicked()
+                        {
+                            actions.push(Action::ToggleClean);
+                            ui.close();
+                        }
+                        ui.separator();
+                        ui.label(tr("Board color"));
+                        if ui
+                            .add(Button::selectable(model.background.is_none(), tr("Usual")))
+                            .clicked()
+                        {
+                            actions.push(Action::SetBackground(None));
+                        }
+                        let current = model.background.unwrap_or(Rgba(0));
+                        if let Some(color) = color_grid(ui, &BOARD_COLORS, current, 4) {
+                            actions.push(Action::SetBackground(Some(color)));
+                        }
+                        ui.separator();
+                        ui.label(tr("Panels"));
+                        let panels = [
+                            (Panel::Menu, "Menu", model.panels.menu),
+                            (Panel::Tools, "Tools", model.panels.tools),
+                            (Panel::View, "These controls", model.panels.view),
+                        ];
+                        for (panel, label, shown) in panels {
+                            if ui.add(Button::selectable(shown, tr(label))).clicked() {
+                                actions.push(Action::TogglePanel(panel));
+                                ui.close();
+                            }
+                        }
                     });
                     let lang = crate::i18n::lang().code().to_uppercase();
                     if ui
@@ -2110,11 +2785,86 @@ fn view_controls(ctx: &Context, model: &Model, actions: &mut Vec<Action>) -> Rec
                     {
                         actions.push(Action::ZoomIn);
                     }
+                    hide_button(ui, "»", "Hide these controls", Panel::View, actions);
                 });
             });
         })
         .response
         .rect
+}
+
+/// A small button that puts a panel away.
+fn hide_button(
+    ui: &mut egui::Ui,
+    arrow: &str,
+    tooltip: &'static str,
+    panel: Panel,
+    actions: &mut Vec<Action>,
+) {
+    let button = Button::new(RichText::new(arrow).weak()).frame(false);
+    if ui.add(button).on_hover_text(tr(tooltip)).clicked() {
+        actions.push(Action::TogglePanel(panel));
+    }
+}
+
+/// Where panels are put away, small buttons that bring them back; in clean mode, one
+/// button in the corner brings all of them.
+fn panel_handles(ctx: &Context, panels: Panels, focus: bool, actions: &mut Vec<Action>) {
+    let screen = ctx.content_rect();
+    let corner = screen.max - Vec2::splat(MARGIN);
+    let left = Pos2::new(MARGIN, screen.center().y);
+    let top = Pos2::new(MARGIN, MARGIN);
+    let shows_menu = panels.menu || focus;
+    let handles = [
+        (
+            panels.clean,
+            corner,
+            Align2::RIGHT_BOTTOM,
+            "«",
+            format!("{} (Ctrl+\\)", tr("Show the panels")),
+            Action::ToggleClean,
+        ),
+        (
+            !panels.clean && !shows_menu,
+            top,
+            Align2::LEFT_TOP,
+            "»",
+            tr("Show the menu").to_owned(),
+            Action::TogglePanel(Panel::Menu),
+        ),
+        (
+            !panels.clean && !panels.tools,
+            left,
+            Align2::LEFT_CENTER,
+            "»",
+            tr("Show the tools").to_owned(),
+            Action::TogglePanel(Panel::Tools),
+        ),
+        (
+            !panels.clean && !panels.view,
+            corner,
+            Align2::RIGHT_BOTTOM,
+            "«",
+            tr("Show the view controls").to_owned(),
+            Action::TogglePanel(Panel::View),
+        ),
+    ];
+    for (i, (shown, pos, pivot, arrow, tooltip, action)) in handles.into_iter().enumerate() {
+        if !shown {
+            continue;
+        }
+        Area::new(Id::unique(("panel handle", i)))
+            .fixed_pos(pos)
+            .pivot(pivot)
+            .order(Order::Foreground)
+            .show(ctx, |ui| {
+                panel().show(ui, |ui| {
+                    if ui.button(arrow).on_hover_text(tooltip).clicked() {
+                        actions.push(action);
+                    }
+                });
+            });
+    }
 }
 
 /// The board in small above the view controls (at `below`); a press or drag on it moves
@@ -2713,7 +3463,12 @@ fn selection_toolbar(
 }
 
 /// The right-click menu: what can be done with the selection, or on empty board.
-fn context_menu(ctx: &Context, info: ContextMenuInfo, actions: &mut Vec<Action>) {
+fn context_menu(
+    ctx: &Context,
+    info: ContextMenuInfo,
+    plugin_commands: &[PluginCommandView],
+    actions: &mut Vec<Action>,
+) {
     let area = Area::new(Id::unique("context menu"))
         .fixed_pos(Pos2::new(info.pos.0, info.pos.1) / ui_scale())
         .order(Order::Foreground)
@@ -2721,6 +3476,22 @@ fn context_menu(ctx: &Context, info: ContextMenuInfo, actions: &mut Vec<Action>)
         .show(ctx, |ui| {
             panel().show(ui, |ui| {
                 ui.set_min_width(180.0);
+                // Plugins' commands for the selection come first.
+                let mut offered = false;
+                for c in plugin_commands
+                    .iter()
+                    .filter(|c| c.selection && info.selection && !info.read_only)
+                {
+                    let button = Button::new(&c.title).frame(false);
+                    if ui.add(button).on_hover_text(&c.plugin_name).clicked() {
+                        actions.push(Action::RunPluginCommand(c.plugin.clone(), c.id.clone()));
+                        actions.push(Action::CloseContextMenu);
+                    }
+                    offered = true;
+                }
+                if offered {
+                    ui.separator();
+                }
                 let mut item = |ui: &mut egui::Ui,
                                 label: &'static str,
                                 keys: &str,
@@ -3067,8 +3838,84 @@ fn results_window(ctx: &Context, results: &[(ObjectId, u32, String)], actions: &
     }
 }
 
-/// The countdown at the top middle, with its controls.
-fn timer_pill(ctx: &Context, timer: &TimerView, actions: &mut Vec<Action>) {
+/// The longest countdown that can be set, in milliseconds: a day.
+const TIMER_MAX: u64 = 24 * 3_600_000;
+
+/// A countdown's length typed by someone: minutes (`7`, `1.5`), or minutes and seconds
+/// (`2:30`), or hours, minutes and seconds (`1:00:00`). In milliseconds.
+pub fn parse_timer(text: &str) -> Option<u64> {
+    let text = text.trim().replace(',', ".");
+    let ms = if text.contains(':') {
+        let parts: Vec<u64> = text
+            .split(':')
+            .map(|p| p.trim().parse().ok())
+            .collect::<Option<_>>()?;
+        let (h, m, s) = match parts[..] {
+            [m, s] if s < 60 => (0, m, s),
+            [h, m, s] if m < 60 && s < 60 => (h, m, s),
+            _ => return None,
+        };
+        ((h * 60 + m) * 60 + s).checked_mul(1000)?
+    } else {
+        let minutes: f64 = text.parse().ok()?;
+        if !minutes.is_finite() || minutes < 0.0 {
+            return None;
+        }
+        (minutes * 60_000.0).round().min(u64::MAX as f64) as u64
+    };
+    (1000..=TIMER_MAX).contains(&ms).then_some(ms)
+}
+
+/// A menu with fields to type in: clicking inside it (into a field, say) keeps it open, so
+/// its buttons close it themselves.
+fn menu_with_fields(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
+    let config = egui::containers::menu::MenuConfig::new()
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    egui::containers::menu::MenuButton::new(label)
+        .config(config)
+        .ui(ui, add);
+}
+
+/// Countdowns of a few usual lengths, and one of the length typed in `text`.
+fn timer_menu(ui: &mut egui::Ui, view_only: bool, text: &mut String, actions: &mut Vec<Action>) {
+    ui.weak(tr("Everyone on the board sees it"));
+    for minutes in [1, 3, 5, 10, 15, 30] {
+        let button = Button::new(trf("{} min", &[&minutes]));
+        if ui.add_enabled(!view_only, button).clicked() {
+            actions.push(Action::StartTimer(minutes * 60_000));
+            ui.close();
+        }
+    }
+    ui.separator();
+    ui.weak(tr("Your own time, like 7 or 2:30:"));
+    ui.horizontal(|ui| {
+        let field = ui.add_enabled(
+            !view_only,
+            egui::TextEdit::singleline(text)
+                .desired_width(70.0)
+                .hint_text(tr("min")),
+        );
+        let ms = parse_timer(text);
+        let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let start = ui
+            .add_enabled(!view_only && ms.is_some(), Button::new(tr("Start")))
+            .clicked();
+        if let Some(ms) = ms.filter(|_| start || enter) {
+            actions.push(Action::StartTimer(ms));
+            ui.close();
+        }
+    });
+    if !text.trim().is_empty() && parse_timer(text).is_none() {
+        ui.colored_label(
+            Color32::from_rgb(0xDC, 0x26, 0x26),
+            tr("From 1 second to 24 hours"),
+        );
+    }
+}
+
+/// The countdown at the top middle, under the board menu, with its buttons if it can be
+/// `changed` here.
+fn timer_pill(ctx: &Context, timer: &TimerView, changed: bool, actions: &mut Vec<Action>) {
     let screen = ctx.content_rect();
     let alert = Color32::from_rgb(0xDC, 0x26, 0x26);
     // Under the board menu, which can reach the middle of narrow windows.
@@ -3091,6 +3938,9 @@ fn timer_pill(ctx: &Context, timer: &TimerView, actions: &mut Vec<Action>) {
                         (timer.text.clone(), ui.visuals().strong_text_color())
                     };
                     ui.label(RichText::new(text).size(20.0).color(color).strong());
+                    if !changed {
+                        return;
+                    }
                     if !timer.done {
                         let label = if timer.running {
                             tr("Pause")
@@ -3783,6 +4633,61 @@ fn diagram_window(
     }
 }
 
+/// The window that draws graphs of functions: formulas and the range of x.
+fn graph_window(
+    ctx: &Context,
+    error: Option<&str>,
+    (formulas, from, to): &mut (String, String, String),
+    actions: &mut Vec<Action>,
+) {
+    let mut open = true;
+    let mut insert = false;
+    let shown = egui::Window::new(tr("Graph of a function"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .order(Order::Foreground)
+        .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.label(tr("y = … of x, several separated by ;. For example: sin(x); x^2 - 3x + 1; 1/x; sqrt(x); |x|; 2^x; ln(x)"));
+            let field = ui.add(egui::TextEdit::singleline(formulas).desired_width(420.0));
+            insert |= field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.horizontal(|ui| {
+                ui.label(tr("x from"));
+                ui.add(egui::TextEdit::singleline(from).desired_width(60.0));
+                ui.label(tr("to"));
+                ui.add(egui::TextEdit::singleline(to).desired_width(60.0));
+            });
+            if let Some(error) = error {
+                ui.colored_label(Color32::from_rgb(0xD0, 0x30, 0x30), error);
+            }
+            ui.horizontal(|ui| {
+                insert |= ui.button(tr("Insert")).clicked();
+                if ui.button(tr("Cancel")).clicked() {
+                    actions.push(Action::CloseGraph);
+                }
+            });
+        });
+    if insert {
+        actions.push(Action::InsertGraph {
+            formulas: formulas.clone(),
+            from: from.clone(),
+            to: to.clone(),
+        });
+    }
+    if let Some(shown) = shown {
+        let layer = shown.response.layer_id;
+        let on_top = ctx.memory(|m| m.areas().top_layer_id(Order::Foreground)) == Some(layer);
+        if !on_top {
+            ctx.move_to_top(layer);
+            ctx.request_repaint();
+        }
+    }
+    if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        actions.push(Action::CloseGraph);
+    }
+}
+
 /// Keyboard shortcuts, by topic.
 const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
     (
@@ -3800,6 +4705,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Tab / Enter", "Mind map: add a subtopic / topic"),
             ("F2", "Edit the selected topic"),
             ("P / M / E", "Pen / marker / eraser"),
+            ("Shift (drawing)", "Straight line with the pen or marker"),
         ],
     ),
     (
@@ -3841,6 +4747,10 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         "Board",
         &[
             ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+            (
+                "Ctrl+K, Ctrl+Shift+P",
+                "Command palette: any command, frame or text",
+            ),
             ("Ctrl+F", "Find"),
             ("Ctrl+N / O / S", "New / open / save"),
             ("Ctrl+Shift+S", "Save as"),
@@ -3863,6 +4773,8 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("F1, ?", "This list"),
             ("Shift+F", "Focus on the selection or the view"),
             ("F5", "Present the frames"),
+            ("F11", "Full screen"),
+            ("Ctrl+\\", "Clean board: hide the panels"),
             ("L (presenting)", "Laser pointer"),
         ],
     ),
@@ -3991,6 +4903,381 @@ fn search_bar(ctx: &Context, info: SearchInfo, text: &mut String, actions: &mut 
                 });
             });
         });
+}
+
+/// What the command palette keeps between frames.
+#[derive(Default)]
+struct PaletteState {
+    /// What is typed.
+    text: String,
+    /// The entry picked with the arrow keys, in the list shown.
+    picked: usize,
+    /// Entries run lately, last first.
+    recent: Vec<Action>,
+}
+
+/// What the board allows now, for the commands the palette offers.
+#[derive(Clone, Copy, Debug, Default)]
+struct PaletteCan {
+    read_only: bool,
+    view_only: bool,
+    undo: bool,
+    redo: bool,
+    present: bool,
+    /// Something is selected; and several things, a group, something locked.
+    selection: bool,
+    several: bool,
+    group: bool,
+    locked: bool,
+    voting: Option<VotingView>,
+    timer: bool,
+    recording: bool,
+}
+
+/// What the menus and the tools offer, for the command palette: the English label, the
+/// keys, the action, and whether it can be done now.
+fn palette_commands(can: PaletteCan) -> Vec<(&'static str, &'static str, Action, bool)> {
+    let edit = !can.read_only;
+    let selected = can.selection;
+    let free = selected && edit && !can.locked;
+    let voting = can.voting.is_some_and(|v| v.open);
+    let voted = can.voting.is_some_and(|v| !v.open);
+    let timer = !can.view_only;
+    let tool = |kind| Action::Tool(kind);
+    vec![
+        ("New board", "Ctrl+N", Action::NewBoard, true),
+        ("Open…", "Ctrl+O", Action::Open, true),
+        ("Save", "Ctrl+S", Action::Save, true),
+        ("Save as…", "Ctrl+Shift+S", Action::SaveAs, true),
+        ("Insert file…", "", Action::InsertImage, edit),
+        ("Diagram from text…", "", Action::OpenDiagram, edit),
+        ("Graph of a function…", "", Action::OpenGraph, edit),
+        ("Export…", "Ctrl+Shift+E", Action::OpenExport, true),
+        ("Print…", "Ctrl+P", Action::Print, true),
+        ("Read-only", "", Action::ToggleReadOnly, true),
+        ("Undo", "Ctrl+Z", Action::Undo, can.undo),
+        ("Redo", "Ctrl+Y", Action::Redo, can.redo),
+        ("Select all", "Ctrl+A", Action::SelectAll, true),
+        ("Copy", "Ctrl+C", Action::Copy, selected),
+        ("Cut", "Ctrl+X", Action::Cut, free),
+        ("Duplicate", "Ctrl+D", Action::Duplicate, selected && edit),
+        ("Delete", "Delete", Action::Delete, free),
+        (
+            "Bring to front",
+            "Ctrl+Shift+]",
+            Action::Reorder(ZOrder::Front),
+            free,
+        ),
+        (
+            "Send to back",
+            "Ctrl+Shift+[",
+            Action::Reorder(ZOrder::Back),
+            free,
+        ),
+        ("Group", "Ctrl+G", Action::Group, free && can.several),
+        (
+            "Ungroup",
+            "Ctrl+Shift+G",
+            Action::Ungroup,
+            free && can.group,
+        ),
+        (
+            "Lock / unlock",
+            "Ctrl+Shift+L",
+            Action::ToggleLock,
+            selected && edit,
+        ),
+        (
+            "Hide / show",
+            "Ctrl+Shift+H",
+            Action::ToggleHidden,
+            selected && edit,
+        ),
+        (
+            "Focus on the selection or the view",
+            "Shift+F",
+            Action::ToggleFocus,
+            true,
+        ),
+        ("Find", "Ctrl+F", Action::OpenSearch, true),
+        ("Present", "F5", Action::Present, can.present),
+        ("Templates", "", Action::ToggleTemplates, edit),
+        ("Share", "", Action::ToggleShare, true),
+        ("Manage plugins…", "", Action::TogglePlugins, true),
+        ("Keyboard shortcuts", "F1", Action::ToggleShortcuts, true),
+        (
+            "Record talktrack",
+            "",
+            Action::StartRecording,
+            !can.recording,
+        ),
+        ("Save version", "", Action::SaveVersion(String::new()), true),
+        ("Start voting", "", Action::StartVoting(5), !voting),
+        ("End voting", "", Action::EndVoting, voting),
+        ("Voting results", "", Action::ToggleResults, voted),
+        ("Clear votes", "", Action::ClearVotes, voted),
+        (
+            "Timer: 5 minutes",
+            "",
+            Action::StartTimer(5 * 60_000),
+            timer,
+        ),
+        (
+            "Timer: 10 minutes",
+            "",
+            Action::StartTimer(10 * 60_000),
+            timer,
+        ),
+        (
+            "Pause or resume the timer",
+            "",
+            Action::PauseTimer,
+            timer && can.timer,
+        ),
+        (
+            "Close the timer",
+            "",
+            Action::CloseTimer,
+            timer && can.timer,
+        ),
+        ("Zoom in", "Ctrl+=", Action::ZoomIn, true),
+        ("Zoom out", "Ctrl+−", Action::ZoomOut, true),
+        ("Zoom to 100%", "Ctrl+0", Action::ZoomReset, true),
+        ("Zoom to fit", "", Action::ZoomToFit, true),
+        ("Grid style", "G", Action::NextGrid, true),
+        ("Snap to grid", "Shift+G", Action::ToggleSnap, true),
+        ("Minimap", "", Action::ToggleMinimap, true),
+        ("Layers", "", Action::ToggleLayers, true),
+        ("Dark theme", "", Action::ToggleTheme, true),
+        (
+            "Language: English / Russian",
+            "",
+            Action::ToggleLanguage,
+            true,
+        ),
+        ("High contrast", "", Action::ToggleHighContrast, true),
+        ("Full screen", "F11", Action::ToggleFullscreen, true),
+        ("Clean board", "Ctrl+\\", Action::ToggleClean, true),
+        ("Select", "V", tool(ToolKind::Select), true),
+        (
+            "Rectangle",
+            "R",
+            tool(ToolKind::Shape(ShapeKind::Rectangle)),
+            edit,
+        ),
+        (
+            "Ellipse",
+            "O",
+            tool(ToolKind::Shape(ShapeKind::Ellipse)),
+            edit,
+        ),
+        ("Text", "T", tool(ToolKind::Text), edit),
+        ("Sticky note", "N", tool(ToolKind::Sticky), edit),
+        ("Connector", "L", tool(ToolKind::Connector), edit),
+        ("Pen", "P", tool(ToolKind::Pen), edit),
+        ("Marker", "M", tool(ToolKind::Marker), edit),
+        ("Eraser", "E", tool(ToolKind::Eraser), edit),
+        ("Comment", "C", tool(ToolKind::Comment), true),
+        ("Frame", "F", tool(ToolKind::Frame), edit),
+        ("Table", "", tool(ToolKind::Table), edit),
+        ("Kanban board", "K", tool(ToolKind::Kanban), edit),
+        ("Mind map", "", tool(ToolKind::MindMap), edit),
+        ("Markdown document", "D", tool(ToolKind::Doc), edit),
+    ]
+}
+
+/// An entry of the command palette.
+struct PaletteEntry {
+    /// As shown, and in English.
+    label: String,
+    english: String,
+    /// Keys or a word about it, shown at the right.
+    hint: String,
+    action: Action,
+}
+
+/// Everything the command palette offers now, but objects on the board: commands, frames
+/// and plugins' commands.
+fn palette_entries(model: &Model) -> Vec<PaletteEntry> {
+    let selection = model.selection.as_ref();
+    let can = PaletteCan {
+        read_only: model.read_only,
+        view_only: model.view_only,
+        undo: model.can_undo,
+        redo: model.can_redo,
+        present: model.can_present,
+        selection: selection.is_some(),
+        several: selection.is_some_and(|s| s.several),
+        group: selection.is_some_and(|s| s.has_group),
+        locked: selection.is_some_and(|s| s.locked),
+        voting: model.voting,
+        timer: model.timer.is_some(),
+        recording: model.recording.is_some(),
+    };
+    let mut entries: Vec<PaletteEntry> = palette_commands(can)
+        .into_iter()
+        .filter(|(.., on)| *on)
+        .map(|(label, keys, action, _)| PaletteEntry {
+            label: tr(label).to_owned(),
+            english: label.to_owned(),
+            hint: keys.to_owned(),
+            action,
+        })
+        .collect();
+    for (id, title) in &model.frames {
+        let title = if title.trim().is_empty() {
+            tr("Untitled frame")
+        } else {
+            title
+        };
+        entries.push(PaletteEntry {
+            label: trf("Go to frame: {}", &[&title]),
+            english: format!("Go to frame: {title}"),
+            hint: String::new(),
+            action: Action::GoToFrame(*id),
+        });
+    }
+    if !model.read_only {
+        for c in &model.plugin_commands {
+            let label = format!("{}: {}", c.plugin_name, c.title);
+            entries.push(PaletteEntry {
+                english: label.clone(),
+                label,
+                hint: tr("Plugin").to_owned(),
+                action: Action::RunPluginCommand(c.plugin.clone(), c.id.clone()),
+            });
+        }
+    }
+    entries
+}
+
+/// The command palette at the top middle (Ctrl+K): a field to type in and the commands,
+/// frames and objects that fit, to run with Enter or a click.
+fn command_palette(
+    ctx: &Context,
+    model: &Model,
+    objects: &[(String, kurbo::Rect)],
+    state: &mut PaletteState,
+    actions: &mut Vec<Action>,
+) {
+    let entries = palette_entries(model);
+    let labels: Vec<(&str, &str)> = entries
+        .iter()
+        .map(|e| (e.label.as_str(), e.english.as_str()))
+        .collect();
+    let recent: Vec<usize> = state
+        .recent
+        .iter()
+        .filter_map(|a| entries.iter().position(|e| e.action == *a))
+        .collect();
+    let found: Vec<PaletteEntry> = objects
+        .iter()
+        .map(|(text, area)| PaletteEntry {
+            label: text.clone(),
+            english: text.clone(),
+            hint: tr("On the board").to_owned(),
+            action: Action::ShowArea(*area),
+        })
+        .collect();
+    let shown: Vec<&PaletteEntry> = crate::palette::rank(&state.text, &labels, &recent)
+        .into_iter()
+        .map(|i| &entries[i])
+        .chain(&found)
+        .collect();
+
+    // The field keeps the keyboard: these keys move through the list and run or close.
+    use egui::{Key, Modifiers};
+    let (up, down, enter, escape, toggle) = ctx.input_mut(|i| {
+        let up = i.consume_key(Modifiers::SHIFT, Key::Tab)
+            | i.consume_key(Modifiers::NONE, Key::ArrowUp);
+        let down = i.consume_key(Modifiers::NONE, Key::Tab)
+            | i.consume_key(Modifiers::NONE, Key::ArrowDown);
+        let enter = i.consume_key(Modifiers::NONE, Key::Enter);
+        let escape = i.consume_key(Modifiers::NONE, Key::Escape);
+        let toggle = i.consume_key(Modifiers::COMMAND, Key::K)
+            | i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::P);
+        (up, down, enter, escape, toggle)
+    });
+    let count = shown.len();
+    if count > 0 {
+        if down {
+            state.picked = (state.picked + 1) % count;
+        }
+        if up {
+            state.picked = (state.picked + count - 1) % count;
+        }
+    }
+    state.picked = state.picked.min(count.saturating_sub(1));
+    let mut run = enter.then_some(state.picked).filter(|_| count > 0);
+
+    let screen = ctx.content_rect();
+    let width = (screen.width() - 2.0 * MARGIN - 16.0).clamp(160.0, 480.0);
+    let area = Area::new(Id::unique("command palette"))
+        .fixed_pos(Pos2::new(screen.center().x, MARGIN + 52.0))
+        .pivot(Align2::CENTER_TOP)
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            panel().show(ui, |ui| {
+                ui.set_width(width);
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut state.text)
+                        .id(Id::unique("command palette field"))
+                        .hint_text(tr("Type a command, a frame or text on the board"))
+                        .desired_width(f32::INFINITY)
+                        .event_filter(egui::EventFilter {
+                            tab: true,
+                            horizontal_arrows: true,
+                            vertical_arrows: true,
+                            escape: true,
+                        }),
+                );
+                field.request_focus();
+                if field.changed() {
+                    state.picked = 0;
+                    actions.push(Action::PaletteQuery(state.text.clone()));
+                }
+                ui.add_space(4.0);
+                if shown.is_empty() {
+                    ui.weak(tr("Nothing found"));
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        for (i, entry) in shown.iter().enumerate() {
+                            let picked = i == state.picked;
+                            let button = Button::selectable(picked, entry.label.as_str())
+                                .shortcut_text(entry.hint.as_str())
+                                .min_size(Vec2::new(ui.available_width(), 0.0));
+                            let row = ui.add(button);
+                            if row.clicked() {
+                                run = Some(i);
+                            }
+                            if picked && (up || down) {
+                                row.scroll_to_me(None);
+                            }
+                        }
+                    });
+            });
+        });
+    let layer = area.response.layer_id;
+    if ctx.memory(|m| m.areas().top_layer_id(Order::Foreground)) != Some(layer) {
+        ctx.move_to_top(layer);
+        ctx.request_repaint();
+    }
+    let pressed_elsewhere = ctx.input(|i| i.pointer.any_pressed())
+        && ctx
+            .pointer_interact_pos()
+            .is_some_and(|p| !area.response.rect.contains(p));
+    if let Some(entry) = run.and_then(|i| shown.get(i)) {
+        actions.push(Action::ClosePalette);
+        actions.push(entry.action.clone());
+        // Objects found are not commands to offer again.
+        if !matches!(entry.action, Action::ShowArea(_)) {
+            crate::palette::remember(&mut state.recent, entry.action.clone());
+        }
+    } else if escape || toggle || pressed_elsewhere {
+        actions.push(Action::ClosePalette);
+    }
 }
 
 /// Tags and fill colors to show only some objects, and managing the board's tags.
@@ -4594,9 +5881,297 @@ fn to_color32(color: Rgba) -> Color32 {
     Color32::from_rgba_unmultiplied(r, g, b, a)
 }
 
+/// The Plugins menu: the commands plugins offer, and managing plugins.
+fn plugins_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
+    if model.plugin_commands.is_empty() {
+        ui.weak(tr("No plugin commands yet"));
+    }
+    for c in &model.plugin_commands {
+        let button = Button::new(&c.title);
+        if ui
+            .add_enabled(!model.read_only, button)
+            .on_hover_text(&c.plugin_name)
+            .clicked()
+        {
+            actions.push(Action::RunPluginCommand(c.plugin.clone(), c.id.clone()));
+            ui.close();
+        }
+    }
+    ui.separator();
+    if ui.button(tr("Manage plugins…")).clicked() {
+        actions.push(Action::TogglePlugins);
+        ui.close();
+    }
+}
+
+/// Installed plugins: what they are and may do, on or off, their log.
+fn plugins_window(ctx: &Context, plugins: &[PluginView], web: bool, actions: &mut Vec<Action>) {
+    let mut open = true;
+    egui::Window::new(tr("Plugins"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_width(460.0)
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            if plugins.is_empty() {
+                ui.label(tr("No plugins installed. A plugin is a folder with manifest.json and a script; see the user guide."));
+            }
+            egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                for p in plugins {
+                    ui.horizontal(|ui| {
+                        let mut on = p.enabled;
+                        if ui.checkbox(&mut on, "").on_hover_text(tr("On")).changed() {
+                            actions.push(Action::SetPluginEnabled(p.id.clone(), on));
+                        }
+                        ui.strong(&p.name);
+                        ui.weak(&p.version);
+                        if !p.author.is_empty() {
+                            ui.weak(trf("by {}", &[&p.author]));
+                        }
+                        if p.dev {
+                            ui.colored_label(Color32::from_rgb(0x3B, 0x82, 0xF6), tr("development"))
+                                .on_hover_text(tr("Runs from its own folder and reloads when its files change"));
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button(tr("Remove")).clicked() {
+                                actions.push(Action::RemovePlugin(p.id.clone()));
+                            }
+                            if p.dev
+                                && ui
+                                    .small_button(tr("Pack…"))
+                                    .on_hover_text(tr("Save it as one .pbplugin file to give to others"))
+                                    .clicked()
+                            {
+                                actions.push(Action::PackPlugin(p.id.clone()));
+                            }
+                        });
+                    });
+                    if !p.description.is_empty() {
+                        ui.label(&p.description);
+                    }
+                    let may = if p.permissions.is_empty() {
+                        tr("Asks for no permissions").to_owned()
+                    } else {
+                        trf("May: {}", &[&p.permissions.join(", ")])
+                    };
+                    ui.weak(may);
+                    if let Some(error) = &p.error {
+                        ui.colored_label(Color32::from_rgb(0xDC, 0x26, 0x26), error);
+                    } else if p.enabled && !p.running {
+                        ui.weak(tr("Not running"));
+                    }
+                    egui::CollapsingHeader::new(trf("Log ({})", &[&p.log.len()]))
+                        .id_salt(("plugin log", &p.id))
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical()
+                                .id_salt(("plugin log lines", &p.id))
+                                .max_height(160.0)
+                                .stick_to_bottom(true)
+                                .show(ui, |ui| {
+                                    for (level, text) in &p.log {
+                                        let line = RichText::new(text).monospace().small();
+                                        let line = match level.as_str() {
+                                            "error" => line.color(Color32::from_rgb(0xDC, 0x26, 0x26)),
+                                            "warn" => line.color(Color32::from_rgb(0xD9, 0x77, 0x06)),
+                                            _ => line,
+                                        };
+                                        ui.label(line);
+                                    }
+                                });
+                        });
+                    ui.separator();
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui
+                    .button(tr("Install plugin…"))
+                    .on_hover_text(tr("Pick a .pbplugin file, or the plugin's manifest.json (in the browser: with its scripts)"))
+                    .clicked()
+                {
+                    actions.push(Action::InstallPlugin);
+                }
+                if !web
+                    && ui
+                        .button(tr("Develop from a folder…"))
+                        .on_hover_text(tr("Runs a plugin from its folder and reloads it when you save its files"))
+                        .clicked()
+                {
+                    actions.push(Action::LoadDevPlugin);
+                }
+            });
+            ui.weak(tr("Install plugins only from people you trust: a plugin can change your boards."));
+        });
+    if !open {
+        actions.push(Action::TogglePlugins);
+    }
+}
+
+/// A plugin's own window: text, fields, buttons and lists it described.
+fn plugin_panel(
+    ctx: &Context,
+    plugin: &str,
+    name: &str,
+    panel: &serde_json::Value,
+    values: &mut std::collections::HashMap<(String, String), String>,
+    actions: &mut Vec<Action>,
+) {
+    use serde_json::{Value, json};
+    let title = panel
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or(name)
+        .to_owned();
+    let items = panel
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let field = |item: &Value, key: &str| {
+        item.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let mut open = true;
+    egui::Window::new(&title)
+        .id(Id::unique(("plugin panel", plugin)))
+        .open(&mut open)
+        .collapsible(true)
+        .resizable(true)
+        .default_width(280.0)
+        // On the right, clear of the menus and tools.
+        .default_pos(egui::pos2(ctx.content_rect().right() - 320.0, 110.0))
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            let mut event: Option<Value> = None;
+            for item in &items {
+                let id = field(item, "id");
+                match item.get("type").and_then(Value::as_str).unwrap_or("text") {
+                    "text" => {
+                        ui.label(field(item, "text"));
+                    }
+                    "separator" => {
+                        ui.separator();
+                    }
+                    "input" => {
+                        let label = field(item, "label");
+                        if !label.is_empty() {
+                            ui.label(label);
+                        }
+                        let value = values
+                            .entry((plugin.to_owned(), id.clone()))
+                            .or_insert_with(|| field(item, "value"));
+                        let multiline = item
+                            .get("multiline")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        let edit = if multiline {
+                            egui::TextEdit::multiline(value)
+                        } else {
+                            egui::TextEdit::singleline(value)
+                        };
+                        ui.add(
+                            edit.hint_text(field(item, "placeholder"))
+                                .desired_width(f32::INFINITY),
+                        );
+                    }
+                    "button" => {
+                        if ui.button(field(item, "label")).clicked() {
+                            event = Some(json!({ "button": id }));
+                        }
+                    }
+                    "list" => {
+                        let label = field(item, "label");
+                        if !label.is_empty() {
+                            ui.label(label);
+                        }
+                        let entries = item
+                            .get("items")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default();
+                        egui::ScrollArea::vertical()
+                            .id_salt(("plugin list", plugin, &id))
+                            .max_height(200.0)
+                            .show(ui, |ui| {
+                                for (index, entry) in entries.iter().enumerate() {
+                                    let text = entry
+                                        .as_str()
+                                        .map_or_else(|| entry.to_string(), str::to_owned);
+                                    if ui.add(Button::new(text).frame(false)).clicked() {
+                                        event = Some(json!({ "list": id, "index": index }));
+                                    }
+                                }
+                            });
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(mut event) = event {
+                let fields: serde_json::Map<String, Value> = values
+                    .iter()
+                    .filter(|((p, _), _)| p == plugin)
+                    .map(|((_, k), v)| (k.clone(), Value::String(v.clone())))
+                    .collect();
+                event["values"] = Value::Object(fields);
+                actions.push(Action::PluginPanel(plugin.to_owned(), event));
+            }
+        });
+    if !open {
+        values.retain(|(p, _), _| p != plugin);
+        actions.push(Action::ClosePluginPanel(plugin.to_owned()));
+    }
+}
+
+/// Plugins' messages, at the bottom of the window.
+fn notices(ctx: &Context, notices: &[(String, String)]) {
+    Area::new(Id::unique("plugin notices"))
+        .anchor(Align2::CENTER_BOTTOM, egui::vec2(0.0, -72.0))
+        .order(Order::Foreground)
+        .interactable(false)
+        .show(ctx, |ui| {
+            for (name, text) in notices {
+                panel().show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.strong(name);
+                        ui.label(text);
+                    });
+                });
+            }
+        });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timer_lengths_are_read_as_people_type_them() {
+        assert_eq!(parse_timer("7"), Some(7 * 60_000));
+        assert_eq!(parse_timer(" 1,5 "), Some(90_000));
+        assert_eq!(parse_timer("2:30"), Some(150_000));
+        assert_eq!(parse_timer("1:00:00"), Some(3_600_000));
+        for bad in ["", "abc", "2:75", "0", "-3", "25:00:00", "1:2:3:4", "inf"] {
+            assert_eq!(parse_timer(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn panels_come_back_one_by_one_or_all_at_once() {
+        let mut panels = Panels::default();
+        panels.toggle(Panel::Tools);
+        assert!(!panels.shows(Panel::Tools) && panels.shows(Panel::Menu));
+        assert_eq!(Panels::from_words(&panels.to_words()), panels);
+        // Clean, nothing shows; one panel brought back comes alone.
+        panels.clean = true;
+        assert!(!panels.shows(Panel::Menu));
+        assert_eq!(Panels::from_words(&panels.to_words()), panels);
+        panels.toggle(Panel::View);
+        assert!(!panels.clean);
+        assert!(panels.shows(Panel::View) && !panels.shows(Panel::Menu));
+        assert_eq!(Panels::from_words(""), Panels::default());
+    }
 
     /// Texts kept in tables are translated where they are shown; all have a translation.
     #[test]
@@ -4616,6 +6191,11 @@ mod tests {
                 }
             }
         }
+        texts.extend(
+            palette_commands(PaletteCan::default())
+                .into_iter()
+                .map(|(label, ..)| label),
+        );
         for template in &crate::templates::TEMPLATES {
             texts.push(template.name);
             texts.push(template.description);

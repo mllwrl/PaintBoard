@@ -1,0 +1,10 @@
+{
+  "id": "paintboard.stickies-by-color",
+  "name": "Stickies by color",
+  "version": "1.0.0",
+  "author": "PaintBoard",
+  "description": "Lays the sticky notes out in columns, one per color, with the color's count on top.",
+  "api": 1,
+  "permissions": ["board:read", "board:write"],
+  "main": "main.js"
+}

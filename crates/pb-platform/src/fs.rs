@@ -79,6 +79,12 @@ mod imp {
         tmp.push(".tmp");
         let tmp = PathBuf::from(tmp);
         let result = (|| {
+            // The folder may not be there yet (plugins', for one).
+            if let Some(parent) = path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                fs::create_dir_all(parent)?;
+            }
             let mut file = fs::File::create(&tmp)?;
             file.write_all(bytes)?;
             file.sync_all()?;

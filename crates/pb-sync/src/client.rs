@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use pb_core::{AssetId, Document};
+use pb_core::{AssetId, Document, Role};
 
 use crate::message::{ClientId, Message, PROTOCOL, Presence};
 
@@ -13,7 +13,7 @@ pub enum Event {
     /// The server took the client in.
     Joined {
         client: ClientId,
-        can_edit: bool,
+        role: Role,
     },
     /// The board changed: redraw (and save).
     Changed,
@@ -29,7 +29,7 @@ enum State {
     /// `Hello` sent, no `Welcome` yet.
     Joining,
     Joined {
-        can_edit: bool,
+        role: Role,
     },
 }
 
@@ -37,8 +37,11 @@ enum State {
 pub struct Client {
     board: String,
     token: String,
+    session: String,
     name: String,
     state: Option<State>,
+    /// Someone who may only comment has sent their changes up to this operation.
+    remarks_from: i32,
     /// Pictures and files the server has, or was sent.
     server_assets: HashSet<AssetId>,
 }
@@ -52,8 +55,10 @@ impl Client {
         Self {
             board: board.into(),
             token: token.into(),
+            session: String::new(),
             name: name.into(),
             state: None,
+            remarks_from: 0,
             server_assets: HashSet::new(),
         }
     }
@@ -62,10 +67,15 @@ impl Client {
         &self.board
     }
 
+    /// Joins as the signed-in account with this session too (from the next `Hello`).
+    pub fn set_session(&mut self, session: impl Into<String>) {
+        self.session = session.into();
+    }
+
     /// Joined, and with what right.
-    pub fn joined(&self) -> Option<bool> {
+    pub fn joined(&self) -> Option<Role> {
         match self.state {
-            Some(State::Joined { can_edit }) => Some(can_edit),
+            Some(State::Joined { role }) => Some(role),
             _ => None,
         }
     }
@@ -78,6 +88,7 @@ impl Client {
             protocol: PROTOCOL,
             board: self.board.clone(),
             token: self.token.clone(),
+            session: self.session.clone(),
             name: self.name.clone(),
             version: doc.sync_version(),
             assets: doc.assets().ids().collect(),
@@ -89,7 +100,8 @@ impl Client {
         self.state = None;
     }
 
-    /// Takes in a message from the server; replies go to `out`.
+    /// Takes in a message from the server; replies go to `out`. `Welcome` also limits
+    /// what `doc` lets this copy do to what the server allows ([`Document::set_role`]).
     pub fn receive(
         &mut self,
         message: Message,
@@ -100,13 +112,14 @@ impl Client {
         match message {
             Message::Welcome {
                 client,
-                can_edit,
+                role,
                 updates,
                 version,
                 assets,
             } => {
-                self.state = Some(State::Joined { can_edit });
-                events.push(Event::Joined { client, can_edit });
+                self.state = Some(State::Joined { role });
+                doc.set_role(role);
+                events.push(Event::Joined { client, role });
                 match doc.import_updates(&updates) {
                     Ok(true) => events.push(Event::Changed),
                     Ok(false) => {}
@@ -116,7 +129,25 @@ impl Client {
                 // are part of it.
                 doc.take_local_updates();
                 self.server_assets = assets.into_iter().collect();
-                if can_edit {
+                if role == Role::Comment {
+                    // Remarks build on the server's board only, and come from a peer the
+                    // server has not seen edit, so it can tell they are this copy's.
+                    // Changes the server lacks are dropped: a commenter cannot send them.
+                    let kept = doc.keep_only(&version).and_then(|dropped| {
+                        doc.new_peer()?;
+                        Ok(dropped)
+                    });
+                    match kept {
+                        Ok(dropped) => {
+                            self.remarks_from = 0;
+                            if dropped {
+                                events.push(Event::Changed);
+                            }
+                        }
+                        Err(err) => events.push(Event::Error(err.to_string())),
+                    }
+                }
+                if role == Role::Edit {
                     match doc.updates_since(&version) {
                         Ok(missing) if !missing.is_empty() => out.push(Message::Updates(missing)),
                         Ok(_) => {}
@@ -138,7 +169,7 @@ impl Client {
             Message::Presence(presence) => events.push(Event::Presence(presence)),
             Message::Left(client) => events.push(Event::Left(client)),
             Message::Error(text) => events.push(Event::Error(text)),
-            Message::Hello { .. } => {
+            Message::Hello { .. } | Message::Remarks(_) => {
                 events.push(Event::Error("the server sent a client's greeting".into()));
             }
         }
@@ -149,11 +180,24 @@ impl Client {
     pub fn outgoing(&mut self, doc: &mut Document) -> Vec<Message> {
         let mut out = Vec::new();
         match self.state {
-            Some(State::Joined { can_edit: true }) => {
+            Some(State::Joined { role: Role::Edit }) => {
                 out.extend(doc.take_local_updates().into_iter().map(Message::Updates));
                 self.send_assets(doc, &mut out);
             }
-            Some(State::Joined { can_edit: false }) => {
+            Some(State::Joined {
+                role: Role::Comment,
+            }) => {
+                doc.take_local_updates();
+                match doc.own_changes_json(self.remarks_from) {
+                    Ok(Some((json, next))) => {
+                        out.push(Message::Remarks(json));
+                        self.remarks_from = next;
+                    }
+                    Ok(None) => {}
+                    Err(err) => log::warn!("cannot send remarks: {err}"),
+                }
+            }
+            Some(State::Joined { role: Role::View }) => {
                 // Looking only: local changes (none, normally) stay local.
                 doc.take_local_updates();
             }

@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=PaintBoard
+GenericName=Whiteboard
+GenericName[ru]=Доска
+Comment=Infinite board for notes, diagrams and drawing
+Comment[ru]=Бесконечная доска для заметок, схем и рисования
+Exec=paintboard %f
+Icon=paintboard
+Terminal=false
+Categories=Graphics;Office;
+MimeType=application/x-paintboard;application/x-paintboard-plugin;
+Keywords=whiteboard;board;diagram;mind map;kanban;
+StartupWMClass=paintboard

@@ -27,6 +27,7 @@ use vello::Scene;
 use vello::kurbo::{Affine, Size};
 use vello::peniko::Color;
 
+#[derive(Clone, Debug)]
 pub struct Theme {
     /// Colors picked for a light board are turned around where they would not show
     /// (see [`for_dark`]).
@@ -40,6 +41,23 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// The theme on a board with its own background `color`: as it is on a light theme;
+    /// on a dark one, a dark shade of it.
+    pub fn on_board(mut self, color: Option<pb_core::Rgba>) -> Self {
+        if let Some(color) = color {
+            let [r, g, b, _] = color.to_bytes();
+            let picked = Color::from_rgb8(r, g, b);
+            self.background = if self.dark {
+                let [r0, g0, b0, _] = self.background.to_rgba8().to_u8_array();
+                let mix = |a: u8, b: u8| ((u16::from(a) * 4 + u16::from(b)) / 5) as u8;
+                Color::from_rgb8(mix(r0, r), mix(g0, g), mix(b0, b))
+            } else {
+                picked
+            };
+        }
+        self
+    }
+
     pub fn light() -> Self {
         Self {
             dark: false,
@@ -167,12 +185,17 @@ pub struct View<'a> {
     pub frame_titles: bool,
 }
 
-/// Objects smaller than this on screen (logical pixels) are drawn as plain boxes.
+/// Objects smaller than this on screen (logical pixels) are drawn as plain boxes, except
+/// pictures and pen strokes (see [`objects::boxed_when_tiny`]).
 const LOD_BOX: f64 = 6.0;
 
 /// Objects smaller than this on screen (logical pixels) are drawn without their text,
 /// tags and badges, which could not be read anyway.
 const LOD_TEXT: f64 = 24.0;
+
+/// Text objects whose letters are smaller than this on screen (logical pixels) are drawn
+/// without them.
+const LOD_LETTERS: f64 = 4.0;
 
 /// Opacity of objects a filter hides, relative to their own.
 const FILTERED_OPACITY: f64 = 0.15;
@@ -345,11 +368,17 @@ fn draw_objects(
             continue;
         }
         let on_screen = painted.width().max(painted.height()) * zoom;
-        if lod && on_screen < LOD_BOX {
+        if lod && on_screen < LOD_BOX && objects::boxed_when_tiny(data) {
             objects::draw_box(scene, transform, data);
             continue;
         }
-        text.skip = lod && on_screen < LOD_TEXT;
+        // A text object is all text: a short word stays readable while small, as long as
+        // its letters are.
+        text.skip = lod
+            && match &data.kind {
+                ObjectKind::Text(t) => t.size * zoom < LOD_LETTERS,
+                _ => on_screen < LOD_TEXT,
+            };
         let resources = objects::Resources {
             text: &mut *text,
             images: &mut *images,

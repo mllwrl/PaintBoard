@@ -3,10 +3,10 @@
 //! Each message is one WebSocket binary frame: a tag byte, then its fields in order.
 //! Numbers are little-endian; byte strings and text carry a `u32` length first.
 
-use pb_core::AssetId;
+use pb_core::{AssetId, Role};
 
 /// Bumped when messages change incompatibly; the server refuses other versions.
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
 
 /// One copy of the board on the server, for as long as it is connected.
 pub type ClientId = u64;
@@ -17,8 +17,11 @@ pub enum Message {
     Hello {
         protocol: u32,
         board: String,
-        /// Says what the client may do (see the server's access rules).
+        /// Says what the client may do (see the server's access rules); empty when the
+        /// account in `session` gives access.
         token: String,
+        /// The signed-in account's session, empty if none.
+        session: String,
         /// Shown to the others next to the cursor.
         name: String,
         /// The client's version vector (`Document::sync_version`).
@@ -29,8 +32,8 @@ pub enum Message {
     /// Server → client, the answer to `Hello`.
     Welcome {
         client: ClientId,
-        /// Whether the client may change the board.
-        can_edit: bool,
+        /// What the client may do.
+        role: Role,
         /// Changes the client lacks.
         updates: Vec<u8>,
         /// The server's version vector: the client sends what the server lacks.
@@ -40,6 +43,10 @@ pub enum Message {
     },
     /// Changes to the board (Loro updates), either way.
     Updates(Vec<u8>),
+    /// Client → server, from someone who may only comment: their changes in Loro's JSON
+    /// form, which the server reads to check they touch only comments, reactions and
+    /// votes before taking them in. Others get them as `Updates`.
+    Remarks(String),
     /// A picture or file's bytes, either way; its id is their hash.
     Asset(Vec<u8>),
     /// Where someone is and what they have selected; never stored.
@@ -88,6 +95,7 @@ mod tag {
     pub const PRESENCE: u8 = 5;
     pub const LEFT: u8 = 6;
     pub const ERROR: u8 = 7;
+    pub const REMARKS: u8 = 8;
 }
 
 impl Message {
@@ -98,6 +106,7 @@ impl Message {
                 protocol,
                 board,
                 token,
+                session,
                 name,
                 version,
                 assets,
@@ -106,20 +115,25 @@ impl Message {
                 w.u32(*protocol);
                 w.text(board);
                 w.text(token);
+                w.text(session);
                 w.text(name);
                 w.bytes(version);
                 w.assets(assets);
             }
             Message::Welcome {
                 client,
-                can_edit,
+                role,
                 updates,
                 version,
                 assets,
             } => {
                 w.u8(tag::WELCOME);
                 w.u64(*client);
-                w.u8(u8::from(*can_edit));
+                w.u8(match role {
+                    Role::View => 0,
+                    Role::Comment => 1,
+                    Role::Edit => 2,
+                });
                 w.bytes(updates);
                 w.bytes(version);
                 w.assets(assets);
@@ -131,6 +145,10 @@ impl Message {
             Message::Asset(bytes) => {
                 w.u8(tag::ASSET);
                 w.bytes(bytes);
+            }
+            Message::Remarks(json) => {
+                w.u8(tag::REMARKS);
+                w.text(json);
             }
             Message::Presence(p) => {
                 w.u8(tag::PRESENCE);
@@ -177,19 +195,26 @@ impl Message {
                 protocol: r.u32()?,
                 board: r.text()?,
                 token: r.text()?,
+                session: r.text()?,
                 name: r.text()?,
                 version: r.bytes()?,
                 assets: r.assets()?,
             },
             tag::WELCOME => Message::Welcome {
                 client: r.u64()?,
-                can_edit: r.u8()? != 0,
+                role: match r.u8()? {
+                    0 => Role::View,
+                    1 => Role::Comment,
+                    2 => Role::Edit,
+                    _ => return Err(DecodeError("unknown role")),
+                },
                 updates: r.bytes()?,
                 version: r.bytes()?,
                 assets: r.assets()?,
             },
             tag::UPDATES => Message::Updates(r.bytes()?),
             tag::ASSET => Message::Asset(r.bytes()?),
+            tag::REMARKS => Message::Remarks(r.text()?),
             tag::PRESENCE => {
                 let client = r.u64()?;
                 let name = r.text()?;
@@ -333,19 +358,21 @@ mod tests {
             protocol: PROTOCOL,
             board: "b1".into(),
             token: "секрет".into(),
+            session: "s".into(),
             name: "Ann".into(),
             version: vec![1, 2, 3],
             assets: vec![asset],
         });
         round_trip(Message::Welcome {
             client: 7,
-            can_edit: true,
+            role: Role::Comment,
             updates: vec![9; 100],
             version: vec![],
             assets: vec![asset, asset],
         });
         round_trip(Message::Updates(vec![0, 255]));
         round_trip(Message::Asset(b"png".to_vec()));
+        round_trip(Message::Remarks("{}".into()));
         round_trip(Message::Presence(Presence {
             client: 3,
             name: "Bob".into(),

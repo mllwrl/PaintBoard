@@ -20,8 +20,8 @@ pub struct Overlay {
     pub rotate_knob: Option<Point>,
     /// Object under the pointer (world).
     pub hover: Option<Frame>,
-    /// Selected cells of a table (world).
-    pub cells: Option<Frame>,
+    /// Selected cells of a table (world), a frame per block.
+    pub cells: Vec<Frame>,
     /// Rubber-band selection rectangle (world).
     pub marquee: Option<Rect>,
     /// Smart guides showing what a dragged object lines up with (world).
@@ -77,6 +77,7 @@ pub struct TextEditOverlay {
     pub caret_width: f64,
 }
 
+#[derive(Clone, Debug)]
 pub struct OverlayColors {
     pub accent: Color,
     pub handle_fill: Color,
@@ -191,7 +192,7 @@ pub fn draw_overlay(
         scene.fill(Fill::NonZero, id, found.multiply_alpha(0.15), None, &path);
         scene.stroke(&Stroke::new(3.0 * scale), id, found, None, &path);
     }
-    if let Some(cells) = &overlay.cells {
+    for cells in &overlay.cells {
         let path = outline(cells);
         scene.fill(
             Fill::NonZero,
