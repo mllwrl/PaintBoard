@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- File types for shared-mime-info: boards and plugin packages. -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-paintboard">
+    <comment>PaintBoard board</comment>
+    <comment xml:lang="ru">Доска PaintBoard</comment>
+    <icon name="paintboard"/>
+    <glob pattern="*.pboard"/>
+  </mime-type>
+  <mime-type type="application/x-paintboard-plugin">
+    <comment>PaintBoard plugin</comment>
+    <comment xml:lang="ru">Плагин PaintBoard</comment>
+    <icon name="paintboard"/>
+    <sub-class-of type="application/zip"/>
+    <glob pattern="*.pbplugin"/>
+  </mime-type>
+</mime-info>

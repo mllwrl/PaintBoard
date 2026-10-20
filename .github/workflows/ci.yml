@@ -25,6 +25,35 @@ jobs:
       - name: Check web target
         run: cargo check --workspace --target wasm32-unknown-unknown
 
+  # Without a GPU on the runner the snapshot tests in pb-render skip themselves.
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libssl-dev libxkbcommon-dev libwayland-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets
+      - run: cargo test --workspace
+      - run: cargo build --release -p pb-app
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets
+      - run: cargo test --workspace
+      - run: cargo build --release -p pb-app
+
   deny:
     runs-on: ubuntu-latest
     steps:

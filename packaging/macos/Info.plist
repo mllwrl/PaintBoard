@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- build-dmg.sh puts the version in place of __VERSION__. -->
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>PaintBoard</string>
+    <key>CFBundleDisplayName</key>
+    <string>PaintBoard</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.paintboard.PaintBoard</string>
+    <key>CFBundleExecutable</key>
+    <string>paintboard</string>
+    <key>CFBundleIconFile</key>
+    <string>PaintBoard</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__VERSION__</string>
+    <key>CFBundleVersion</key>
+    <string>__VERSION__</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.productivity</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <!-- Talktracks record from the microphone; macOS asks once with this text. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>PaintBoard records your voice for talktracks.</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>PaintBoard board</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>CFBundleTypeIconFile</key>
+            <string>PaintBoard</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.paintboard.board</string>
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>PaintBoard plugin</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>CFBundleTypeIconFile</key>
+            <string>PaintBoard</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.paintboard.plugin</string>
+            </array>
+        </dict>
+    </array>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.paintboard.board</string>
+            <key>UTTypeDescription</key>
+            <string>PaintBoard board</string>
+            <key>UTTypeIconFile</key>
+            <string>PaintBoard</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>pboard</string>
+                </array>
+                <key>public.mime-type</key>
+                <array>
+                    <string>application/x-paintboard</string>
+                </array>
+            </dict>
+        </dict>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.paintboard.plugin</string>
+            <key>UTTypeDescription</key>
+            <string>PaintBoard plugin</string>
+            <key>UTTypeIconFile</key>
+            <string>PaintBoard</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+                <string>public.zip-archive</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>pbplugin</string>
+                </array>
+                <key>public.mime-type</key>
+                <array>
+                    <string>application/x-paintboard-plugin</string>
+                </array>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>

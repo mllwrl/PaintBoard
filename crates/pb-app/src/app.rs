@@ -5875,6 +5875,13 @@ impl ApplicationHandler<UserEvent> for App {
             use winit::platform::web::WindowAttributesExtWebSys;
             attributes.with_append(true)
         };
+        // The app id (Wayland) and window class (X11), which desktops match with
+        // paintboard.desktop for the icon and the taskbar.
+        #[cfg(target_os = "linux")]
+        let attributes = {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            attributes.with_name("paintboard", "paintboard")
+        };
         let window = Arc::new(
             event_loop
                 .create_window(attributes)

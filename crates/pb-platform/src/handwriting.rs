@@ -141,7 +141,7 @@ mod imp {
 
     pub fn recognize(_strokes: Vec<Stroke>, done: impl super::Done) {
         done(Err(
-            "handwriting recognition is not available on this platform yet".into(),
+            "handwriting recognition is not available on this system (only on Windows)".into(),
         ));
     }
 }
