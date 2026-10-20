@@ -21,6 +21,7 @@ mod sounds;
 mod talktrack;
 mod templates;
 mod ui;
+mod updates;
 
 use app::{App, UserEvent};
 use winit::event_loop::EventLoop;

@@ -115,6 +115,18 @@ pub enum UserEvent {
         page: u32,
         result: Result<pb_io::pdf::Page, String>,
     },
+    /// GitHub answered about the latest release; the check was asked for by hand or not.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    UpdateChecked {
+        by_hand: bool,
+        result: Result<Option<crate::updates::Release>, String>,
+    },
+    /// The new version's installer is downloading: bytes so far, of how many.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    UpdateProgress(u64, u64),
+    /// The new version's installer is downloaded (here), or why not.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    UpdateDownloaded(Result<PathBuf, String>),
 }
 
 /// The server the web version was loaded from, which likely shares boards too.
@@ -312,6 +324,10 @@ pub struct App {
     making: Option<(export::Job, Made)>,
     next_request: u64,
     shown_title: String,
+    /// Looking for, and installing, a newer PaintBoard.
+    updates: crate::updates::Updates,
+    /// The app closes after this pass of the event loop (for the installer).
+    quit: bool,
 }
 
 impl App {
@@ -431,6 +447,11 @@ impl App {
             share_error: None,
             next_request: 0,
             shown_title: String::new(),
+            updates: crate::updates::Updates {
+                prefs: crate::settings::update_prefs(),
+                ..Default::default()
+            },
+            quit: false,
         };
         // The page is a shared board's link: that board. Else the board was shared when
         // last open: go on sharing it.
@@ -447,7 +468,194 @@ impl App {
         if let Some(path) = plugin_file {
             app.install_plugin(vec![path]);
         }
+        // A newer PaintBoard is looked for once a day, in the background.
+        if !crate::updates::off_by_env() && app.updates.prefs.check_due(pb_platform::now_ms()) {
+            app.check_for_updates(false);
+        }
         app
+    }
+
+    /// Asks GitHub about the latest release on a thread of its own; the answer comes as
+    /// [`UserEvent::UpdateChecked`]. `by_hand`: asked for, so "no newer one" is said too.
+    fn check_for_updates(&mut self, by_hand: bool) {
+        if self.updates.checking.is_some() {
+            // Already asking: say what it finds if this one was by hand.
+            self.updates.checking = Some(by_hand || self.updates.checking == Some(true));
+            return;
+        }
+        self.updates.checking = Some(by_hand);
+        self.updates.prefs.checked = Some(pb_platform::now_ms());
+        crate::settings::save_update_prefs(&self.updates.prefs);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let proxy = self.proxy.clone();
+            let spawned = std::thread::Builder::new()
+                .name("update check".into())
+                .spawn(move || {
+                    let result = crate::updates::fetch_latest();
+                    let _ = proxy.send_event(UserEvent::UpdateChecked { by_hand, result });
+                });
+            if let Err(err) = spawned {
+                log::warn!("update check not started: {err}");
+                self.updates.checking = None;
+            }
+        }
+    }
+
+    /// GitHub answered about the latest release.
+    fn update_checked(
+        &mut self,
+        by_hand: bool,
+        result: Result<Option<crate::updates::Release>, String>,
+    ) {
+        use crate::updates::Version;
+        let by_hand = by_hand || self.updates.checking == Some(true);
+        self.updates.checking = None;
+        let current = Version::current();
+        let release = match result {
+            Ok(release) => release.filter(|r| r.version > current),
+            Err(err) => {
+                log::warn!("could not check for updates: {err}");
+                if by_hand {
+                    let text = trf("Could not check for updates: {}", &[&err]);
+                    self.show_notice(text);
+                }
+                return;
+            }
+        };
+        let Some(release) = release else {
+            log::info!("PaintBoard {current} is the latest version");
+            if by_hand {
+                let text = trf("You have the latest version ({}).", &[&current]);
+                self.show_notice(text);
+            }
+            return;
+        };
+        log::info!("PaintBoard {} is out", release.version);
+        let now = pb_platform::now_ms();
+        if by_hand || !self.updates.prefs.put_off(&release.version, now) {
+            self.updates.notice = true;
+        }
+        // A newer one than the one downloaded or tried: start over.
+        if self
+            .updates
+            .found
+            .as_ref()
+            .is_some_and(|f| f.version != release.version)
+        {
+            self.updates.download = None;
+        }
+        self.updates.found = Some(release);
+    }
+
+    /// Shows a line about PaintBoard itself for a few seconds, like plugins' messages.
+    fn show_notice(&mut self, text: String) {
+        self.notices
+            .push(("PaintBoard".to_owned(), text, Instant::now() + NOTICE_FOR));
+        if self.notices.len() > 4 {
+            self.notices.remove(0);
+        }
+        self.request_redraw();
+    }
+
+    /// "Update": on Windows, downloads the installer in the background; elsewhere, opens
+    /// the release's page to download it there.
+    fn install_update(&mut self) {
+        let Some(release) = &self.updates.found else {
+            return;
+        };
+        let asset = crate::updates::Os::this()
+            .filter(|&os| os == crate::updates::Os::Windows)
+            .and_then(|os| crate::updates::asset_for(&release.assets, os))
+            .cloned();
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(asset) = asset {
+            if matches!(
+                self.updates.download,
+                Some(crate::updates::Download::Running(..) | crate::updates::Download::Ready(_))
+            ) {
+                return;
+            }
+            self.updates.download = Some(crate::updates::Download::Running(0, asset.size));
+            let proxy = self.proxy.clone();
+            let spawned = std::thread::Builder::new()
+                .name("update download".into())
+                .spawn(move || {
+                    // A progress event per percent is plenty.
+                    let mut shown = u64::MAX;
+                    let mut progress = |done: u64, total: u64| {
+                        let percent = done * 100 / total.max(1);
+                        if percent != shown {
+                            shown = percent;
+                            let _ = proxy.send_event(UserEvent::UpdateProgress(done, total));
+                        }
+                    };
+                    let result = crate::updates::download(&asset, &mut progress);
+                    let _ = proxy.send_event(UserEvent::UpdateDownloaded(result));
+                });
+            if let Err(err) = spawned {
+                self.updates.download = Some(crate::updates::Download::Failed(err.to_string()));
+            }
+            return;
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = asset;
+        let page = release.page.clone();
+        if !pb_platform::browser::open_url(&page) {
+            dialog::show_error(tr("Could not open the link"), &page);
+        }
+    }
+
+    /// The installer is downloaded: saves the board, starts the installer and quits.
+    fn run_installer(&mut self) {
+        let Some(crate::updates::Download::Ready(path)) = self.updates.download.clone() else {
+            return;
+        };
+        self.finish_editing();
+        if self.recording.is_some() {
+            self.perform(Action::StopRecording);
+        }
+        if !self.session.flush(&self.document) {
+            // Not saved: stay, and offer it again.
+            self.updates.download = None;
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        match crate::updates::run_installer(&path) {
+            Ok(()) => self.quit = true,
+            Err(err) => {
+                log::warn!("could not start the installer: {err}");
+                self.updates.download = Some(crate::updates::Download::Failed(err.clone()));
+                dialog::show_error(tr("Could not start the installer"), &err);
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = path;
+    }
+
+    /// The notice about a newer PaintBoard, if it shows.
+    fn update_view(&self) -> Option<crate::ui::UpdateView> {
+        use crate::updates::Download;
+        let release = self
+            .updates
+            .found
+            .as_ref()
+            .filter(|_| self.updates.notice)?;
+        let download = self.updates.download.as_ref();
+        Some(crate::ui::UpdateView {
+            version: release.version.to_string(),
+            progress: match download {
+                Some(Download::Running(done, total)) => {
+                    Some((*done as f64 / (*total).max(1) as f64).clamp(0.0, 1.0) as f32)
+                }
+                _ => None,
+            },
+            error: match download {
+                Some(Download::Failed(err)) => Some(err.clone()),
+                _ => None,
+            },
+            installing: matches!(download, Some(Download::Ready(_))),
+        })
     }
 
     /// Lends the plugins and the app (their host) at once.
@@ -921,6 +1129,8 @@ impl App {
             thread: self.thread_view(),
             threads: self.thread_list(),
             show_resolved: self.show_resolved,
+            update: self.update_view(),
+            update_checks: (!cfg!(target_arch = "wasm32")).then_some(!self.updates.prefs.off),
             palette: self.palette.clone(),
             search: self.search.as_ref().map(|s| SearchInfo {
                 count: s.hits.len(),
@@ -1796,6 +2006,29 @@ impl App {
                 self.set_view(scale, self.high_contrast);
                 crate::settings::save_view(self.ui_scale, self.high_contrast);
             }
+            Action::CheckForUpdates => self.check_for_updates(true),
+            Action::ToggleUpdateChecks => {
+                self.updates.prefs.off = !self.updates.prefs.off;
+                crate::settings::save_update_prefs(&self.updates.prefs);
+            }
+            Action::InstallUpdate => self.install_update(),
+            Action::UpdateNotes => {
+                if let Some(release) = &self.updates.found {
+                    let page = release.page.clone();
+                    if !pb_platform::browser::open_url(&page) {
+                        dialog::show_error(tr("Could not open the link"), &page);
+                    }
+                }
+            }
+            Action::UpdateLater => {
+                self.updates.notice = false;
+                if let Some(release) = &self.updates.found {
+                    let now = pb_platform::now_ms();
+                    self.updates.prefs.later = Some((release.version.to_string(), now));
+                    crate::settings::save_update_prefs(&self.updates.prefs);
+                }
+            }
+            Action::RunInstaller => self.run_installer(),
             Action::ToggleHighContrast => {
                 self.set_view(self.ui_scale, !self.high_contrast);
                 crate::settings::save_view(self.ui_scale, self.high_contrast);
@@ -6106,6 +6339,10 @@ impl ApplicationHandler<UserEvent> for App {
 
     /// Runs after each batch of events: autosaves when due and wakes up for the next one.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.quit {
+            event_loop.exit();
+            return;
+        }
         if !self.dropped.is_empty() {
             let paths = std::mem::take(&mut self.dropped);
             // Windows sends no cursor moves during a drag: this is the last known position.
@@ -6278,6 +6515,35 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::PageRendered { pdf, page, result } => {
                 self.finish_page(pdf, page, result);
+            }
+            UserEvent::UpdateChecked { by_hand, result } => {
+                self.update_checked(by_hand, result);
+                self.request_redraw();
+            }
+            UserEvent::UpdateProgress(done, total) => {
+                if matches!(
+                    self.updates.download,
+                    Some(crate::updates::Download::Running(..))
+                ) {
+                    self.updates.download = Some(crate::updates::Download::Running(done, total));
+                    self.request_redraw();
+                }
+            }
+            UserEvent::UpdateDownloaded(result) => {
+                self.updates.download = Some(match result {
+                    Ok(path) => {
+                        // Saving and starting the installer may need to say something:
+                        // after the frame.
+                        self.defer(Action::RunInstaller);
+                        crate::updates::Download::Ready(path)
+                    }
+                    Err(err) => {
+                        log::warn!("could not download the update: {err}");
+                        crate::updates::Download::Failed(err)
+                    }
+                });
+                self.updates.notice = true;
+                self.request_redraw();
             }
         }
     }

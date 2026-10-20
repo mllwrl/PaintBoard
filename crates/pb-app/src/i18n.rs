@@ -1246,6 +1246,37 @@ const RU: &[(&str, &str)] = &[
     ("{} min ago", "{} мин назад"),
     ("{} h ago", "{} ч назад"),
     ("{} d ago", "{} дн назад"),
+    // Updates.
+    ("PaintBoard {} is out", "Вышел PaintBoard {}"),
+    (
+        "Installing: PaintBoard will close and start again.",
+        "Установка: PaintBoard закроется и запустится снова.",
+    ),
+    ("Downloading the update…", "Загрузка обновления…"),
+    (
+        "Could not download the update: {}",
+        "Не удалось загрузить обновление: {}",
+    ),
+    ("Update", "Обновить"),
+    ("What's new", "Что нового"),
+    ("Later", "Позже"),
+    ("Check for updates", "Проверить обновления"),
+    (
+        "Check for updates every day",
+        "Проверять обновления каждый день",
+    ),
+    (
+        "Could not check for updates: {}",
+        "Не удалось проверить обновления: {}",
+    ),
+    (
+        "You have the latest version ({}).",
+        "У вас последняя версия ({}).",
+    ),
+    (
+        "Could not start the installer",
+        "Не удалось запустить установщик",
+    ),
 ];
 
 #[cfg(test)]
@@ -1262,6 +1293,7 @@ mod tests {
             include_str!("session.rs"),
             include_str!("account.rs"),
             include_str!("plugins.rs"),
+            include_str!("updates.rs"),
         ];
         let table = russian();
         let mut missing = Vec::new();

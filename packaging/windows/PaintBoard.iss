@@ -63,3 +63,12 @@ Root: HKA; Subkey: "Software\Classes\PaintBoard.Plugin\shell\open\command"; Valu
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+; The app updating itself runs this installer with /SILENT /CLOSEAPPLICATIONS /RELAUNCH=1:
+; it closes the running app (it quits by itself too) and starts the new version after.
+Filename: "{app}\{#AppExe}"; Flags: nowait skipifnotsilent runasoriginaluser; Check: Relaunch
+
+[Code]
+function Relaunch: Boolean;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
+end;

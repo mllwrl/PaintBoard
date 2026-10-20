@@ -341,6 +341,18 @@ pub enum Action {
     ToText,
     /// Solve the selected handwritten expression.
     Calculate,
+    /// Looks for a newer PaintBoard now, and says so if there is none.
+    CheckForUpdates,
+    /// Turns the daily check for a newer PaintBoard on or off.
+    ToggleUpdateChecks,
+    /// Downloads and installs the newer PaintBoard (Windows), or opens its page.
+    InstallUpdate,
+    /// Opens the newer PaintBoard's page, with what is new.
+    UpdateNotes,
+    /// Hides the notice about the newer PaintBoard for a day.
+    UpdateLater,
+    /// The new version's installer is downloaded: saves the board, runs it and quits.
+    RunInstaller,
 }
 
 /// What the UI shows.
@@ -576,6 +588,22 @@ pub struct Model<'a> {
     /// The board's threads: id, a line about it, and whether it is resolved.
     pub threads: Vec<(std::sync::Arc<str>, String, bool)>,
     pub show_resolved: bool,
+    /// The notice about a newer PaintBoard, while it shows.
+    pub update: Option<UpdateView>,
+    /// Updates can be looked for here (the desktop): whether that happens by itself.
+    pub update_checks: Option<bool>,
+}
+
+/// The notice about a newer PaintBoard.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UpdateView {
+    pub version: String,
+    /// Downloading the installer: how far, from 0 to 1.
+    pub progress: Option<f32>,
+    /// The download failed, and why.
+    pub error: Option<String>,
+    /// Downloaded: the app is about to close for the installer.
+    pub installing: bool,
 }
 
 pub struct VersionItem {
@@ -1227,6 +1255,9 @@ impl Ui {
             }
             if !model.notices.is_empty() {
                 notices(ctx, &model.notices);
+            }
+            if let Some(update) = &model.update {
+                update_notice(ctx, update, &mut actions);
             }
             match &model.thread {
                 Some(thread) => thread_panel(ctx, thread, comment_text, &mut actions),
@@ -2721,6 +2752,22 @@ fn view_controls(ctx: &Context, model: &Model, actions: &mut Vec<Action>) -> Rec
                             if ui.add(Button::selectable(shown, tr(label))).clicked() {
                                 actions.push(Action::TogglePanel(panel));
                                 ui.close();
+                            }
+                        }
+                        if let Some(automatic) = model.update_checks {
+                            ui.separator();
+                            if ui.button(tr("Check for updates")).clicked() {
+                                actions.push(Action::CheckForUpdates);
+                                ui.close();
+                            }
+                            if ui
+                                .add(Button::selectable(
+                                    automatic,
+                                    tr("Check for updates every day"),
+                                ))
+                                .clicked()
+                            {
+                                actions.push(Action::ToggleUpdateChecks);
                             }
                         }
                     });
@@ -4932,6 +4979,8 @@ struct PaletteCan {
     voting: Option<VotingView>,
     timer: bool,
     recording: bool,
+    /// Updates can be looked for (the desktop).
+    updates: bool,
 }
 
 /// What the menus and the tools offer, for the command palette: the English label, the
@@ -5058,6 +5107,12 @@ fn palette_commands(can: PaletteCan) -> Vec<(&'static str, &'static str, Action,
         ("High contrast", "", Action::ToggleHighContrast, true),
         ("Full screen", "F11", Action::ToggleFullscreen, true),
         ("Clean board", "Ctrl+\\", Action::ToggleClean, true),
+        (
+            "Check for updates",
+            "",
+            Action::CheckForUpdates,
+            can.updates,
+        ),
         ("Select", "V", tool(ToolKind::Select), true),
         (
             "Rectangle",
@@ -5113,6 +5168,7 @@ fn palette_entries(model: &Model) -> Vec<PaletteEntry> {
         voting: model.voting,
         timer: model.timer.is_some(),
         recording: model.recording.is_some(),
+        updates: model.update_checks.is_some(),
     };
     let mut entries: Vec<PaletteEntry> = palette_commands(can)
         .into_iter()
@@ -6139,6 +6195,47 @@ fn notices(ctx: &Context, notices: &[(String, String)]) {
                     });
                 });
             }
+        });
+}
+
+/// A newer PaintBoard is out: at the top right, with what can be done about it.
+fn update_notice(ctx: &Context, update: &UpdateView, actions: &mut Vec<Action>) {
+    Area::new(Id::unique("update notice"))
+        .anchor(Align2::RIGHT_TOP, egui::vec2(-12.0, 56.0))
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            panel().show(ui, |ui| {
+                ui.set_max_width(280.0);
+                ui.strong(trf("PaintBoard {} is out", &[&update.version]));
+                if update.installing {
+                    ui.label(tr("Installing: PaintBoard will close and start again."));
+                    return;
+                }
+                if let Some(progress) = update.progress {
+                    ui.label(tr("Downloading the update…"));
+                    ui.add(egui::ProgressBar::new(progress).show_percentage());
+                    return;
+                }
+                if let Some(error) = &update.error {
+                    ui.label(trf("Could not download the update: {}", &[error]));
+                }
+                ui.horizontal(|ui| {
+                    let update_text = if update.error.is_some() {
+                        tr("Try again")
+                    } else {
+                        tr("Update")
+                    };
+                    if ui.button(update_text).clicked() {
+                        actions.push(Action::InstallUpdate);
+                    }
+                    if ui.button(tr("What's new")).clicked() {
+                        actions.push(Action::UpdateNotes);
+                    }
+                    if ui.button(tr("Later")).clicked() {
+                        actions.push(Action::UpdateLater);
+                    }
+                });
+            });
         });
 }
 

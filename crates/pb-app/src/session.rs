@@ -135,14 +135,17 @@ impl Session {
         }
     }
 
-    /// Writes pending changes right away (before quitting or switching boards).
-    pub fn flush(&mut self, doc: &Document) {
+    /// Writes pending changes right away (before quitting or switching boards). Returns
+    /// false if that failed (and said so).
+    pub fn flush(&mut self, doc: &Document) -> bool {
         self.autosave.observe(doc.revision(), Instant::now());
         if self.autosave.is_dirty()
             && let Err(err) = self.write(doc)
         {
             dialog::show_error(tr("Could not save the board"), &err.to_string());
+            return false;
         }
+        true
     }
 
     /// Ctrl+S: an untitled board asks for a name, others are written right away.

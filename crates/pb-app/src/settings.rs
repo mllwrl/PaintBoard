@@ -226,6 +226,25 @@ pub fn save_dark_theme(dark: bool) {
     }
 }
 
+/// File with what is remembered about update checks (see [`crate::updates::Prefs`]).
+const UPDATES_FILE: &str = "updates.txt";
+
+pub fn update_prefs() -> crate::updates::Prefs {
+    pb_platform::fs::app_data_dir()
+        .and_then(|dir| pb_platform::fs::read(&dir.join(UPDATES_FILE)))
+        .map(|bytes| crate::updates::Prefs::parse(&String::from_utf8_lossy(&bytes)))
+        .unwrap_or_default()
+}
+
+pub fn save_update_prefs(prefs: &crate::updates::Prefs) {
+    let saved = pb_platform::fs::app_data_dir().and_then(|dir| {
+        pb_platform::fs::write_atomic(&dir.join(UPDATES_FILE), prefs.to_text().as_bytes())
+    });
+    if let Err(err) = saved {
+        log::warn!("update settings not saved: {err}");
+    }
+}
+
 /// File with the accounts signed in, a line each: server, email, session.
 const ACCOUNTS_FILE: &str = "accounts.txt";
 
