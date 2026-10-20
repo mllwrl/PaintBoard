@@ -73,7 +73,12 @@ pub fn post(
     header: Option<(&str, &str)>,
     done: impl FnOnce(Result<String, String>) + MaybeSend + 'static,
 ) {
-    imp::post(url, header, Box::new(done));
+    imp::request("POST", url, header, Box::new(done));
+}
+
+/// GETs `url` and hands the answer's body (or why there is none) to `done`.
+pub fn get(url: &str, done: impl FnOnce(Result<String, String>) + MaybeSend + 'static) {
+    imp::request("GET", url, None, Box::new(done));
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -208,7 +213,8 @@ mod imp {
         }
     }
 
-    pub fn post(
+    pub fn request(
+        method: &'static str,
         url: &str,
         header: Option<(&str, &str)>,
         done: Box<dyn FnOnce(Result<String, String>) + Send>,
@@ -221,12 +227,14 @@ mod imp {
                 .http_status_as_error(false)
                 .build()
                 .into();
-            let mut request = agent.post(&url);
+            let mut request = ureq::http::Request::builder().method(method).uri(&url);
             if let Some((name, value)) = &header {
                 request = request.header(name, value);
             }
             let result = request
-                .send_empty()
+                .body(())
+                .map_err(|e| e.to_string())
+                .and_then(|request| agent.run(request).map_err(|e| e.to_string()))
                 .map_err(|e| e.to_string())
                 .and_then(|response| {
                     let status = response.status();
@@ -382,13 +390,14 @@ mod imp {
             .unwrap_or_else(|| format!("{err:?}"))
     }
 
-    pub fn post(
+    pub fn request(
+        method: &'static str,
         url: &str,
         header: Option<(&str, &str)>,
         done: Box<dyn FnOnce(Result<String, String>)>,
     ) {
         let init = RequestInit::new();
-        init.set_method("POST");
+        init.set_method(method);
         if let Some((name, value)) = header {
             let headers = web_sys::Headers::new().expect("empty headers");
             let _ = headers.set(name, value);

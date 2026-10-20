@@ -2252,8 +2252,30 @@ impl App {
                 });
             });
         }
+        // The browser may not read other sites: the server fetches the page's head.
         #[cfg(target_arch = "wasm32")]
-        let _ = (url, replace_title);
+        {
+            let server = self
+                .sharing
+                .as_ref()
+                .map(|s| s.link.server.clone())
+                .or_else(|| Some(crate::settings::server()).filter(|s| !s.is_empty()))
+                .or_else(page_server);
+            let Some(server) = server else {
+                return;
+            };
+            let proxy = self.proxy.clone();
+            let ask = format!("{server}/preview?url={}", crate::sharing::query_value(&url));
+            pb_platform::net::get(&ask, move |answer| {
+                let result = answer.map(|html| pb_io::preview::parse(&html));
+                let _ = proxy.send_event(UserEvent::Previewed {
+                    id,
+                    url,
+                    replace_title,
+                    result,
+                });
+            });
+        }
     }
 
     /// Fills in a web page card from its fetched page, if the card is still there and

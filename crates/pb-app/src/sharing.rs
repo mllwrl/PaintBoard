@@ -80,6 +80,20 @@ pub fn server_address(typed: &str) -> Option<String> {
     }
 }
 
+/// `text` made safe as a value in a web address's query: everything but letters, digits
+/// and `-_.~` written as `%XX`.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn query_value(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                char::from(b).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 /// `scheme://host[:port]` of a web address, if it is one (`http` or `https`).
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub fn origin(address: &str) -> Option<String> {
@@ -409,6 +423,14 @@ mod tests {
             Some("http://localhost:8080")
         );
         assert_eq!(server_address("  "), None);
+    }
+
+    #[test]
+    fn query_values_are_escaped() {
+        assert_eq!(
+            query_value("https://ex.com/a b?x=1&y=ж"),
+            "https%3A%2F%2Fex.com%2Fa%20b%3Fx%3D1%26y%3D%D0%B6"
+        );
     }
 
     #[test]

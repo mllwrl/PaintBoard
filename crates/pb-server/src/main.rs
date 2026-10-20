@@ -8,10 +8,14 @@
 //!   in a browser.
 //!
 //! - `PB_MAX_BOARDS`: the most boards the server keeps (no limit if unset);
-//! - `PB_BACKUP`: a folder for a daily copy of the database (the newest 7 are kept).
+//! - `PB_BACKUP`: a folder for a daily copy of the database (the newest 7 are kept);
+//! - `PB_PREVIEWS`: if set to `1`, the server fetches the heads of web pages for link
+//!   previews in the web version (see `preview`).
 //!
 //! Put it behind a proxy with TLS (e.g. Caddy) so links work over `wss://`.
 
+#[cfg(not(target_arch = "wasm32"))]
+mod preview;
 #[cfg(not(target_arch = "wasm32"))]
 mod server;
 #[cfg(not(target_arch = "wasm32"))]
@@ -47,6 +51,11 @@ async fn main() {
         std::sync::Arc::get_mut(&mut shared)
             .expect("not shared yet")
             .max_boards = Some(max);
+    }
+    if std::env::var("PB_PREVIEWS").is_ok_and(|v| v == "1") {
+        std::sync::Arc::get_mut(&mut shared)
+            .expect("not shared yet")
+            .previews = Some(preview::Previews::new());
     }
     if let Some(dir) = std::env::var_os("PB_BACKUP").map(PathBuf::from) {
         let backer = shared.clone();

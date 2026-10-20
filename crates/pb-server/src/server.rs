@@ -69,6 +69,8 @@ pub struct Shared {
     web: Option<std::path::PathBuf>,
     /// The most boards the server keeps; `None` for no limit.
     pub max_boards: Option<usize>,
+    /// Link previews for the web version, when the server makes them.
+    pub previews: Option<crate::preview::Previews>,
 }
 
 /// A board in memory and the connections to it.
@@ -97,6 +99,7 @@ impl Shared {
             create_key,
             web,
             max_boards: None,
+            previews: None,
         })
     }
 
@@ -220,6 +223,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/health", get(|| async { "ok" }))
         .route("/boards", post(create_board).options(allow_other_sites))
         .route("/ws", get(connect))
+        .route("/preview", get(preview))
         .route(
             "/",
             get(|state, headers| web_file(state, headers, "index.html".to_owned())),
@@ -306,6 +310,27 @@ fn cors(mut response: Response) -> Response {
         "x-create-key".parse().expect("valid"),
     );
     response
+}
+
+/// The head of a web page for a link preview: `GET /preview?url=<address>`.
+async fn preview(
+    State(shared): State<Arc<Shared>>,
+    axum::extract::Query(query): axum::extract::Query<HashMap<String, String>>,
+) -> Response {
+    let Some(previews) = &shared.previews else {
+        return cors((StatusCode::NOT_FOUND, "this server does not make previews").into_response());
+    };
+    let Some(url) = query.get("url") else {
+        return cors((StatusCode::BAD_REQUEST, "which page?").into_response());
+    };
+    cors(match previews.head_of(url).await {
+        Ok(head) => (
+            [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            head,
+        )
+            .into_response(),
+        Err(err) => (StatusCode::BAD_GATEWAY, err).into_response(),
+    })
 }
 
 async fn allow_other_sites() -> Response {

@@ -22,6 +22,9 @@ RUN cargo build --release -p pb-server \
     && gzip -k -9 /web/paintboard_bg.wasm /web/paintboard.js /web/index.html
 
 FROM debian:bookworm-slim
+# TLS and certificates for link previews (PB_PREVIEWS).
+RUN apt-get update && apt-get install -y --no-install-recommends libssl3 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/paintboard-server /usr/local/bin/
 COPY --from=build /web /web
 ENV PB_ADDR=0.0.0.0:8080 PB_DB=/data/paintboard.db PB_WEB=/web PB_BACKUP=/data/backups

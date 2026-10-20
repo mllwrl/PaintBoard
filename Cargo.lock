@@ -3596,6 +3596,7 @@ dependencies = [
  "rusqlite",
  "tokio",
  "tokio-tungstenite",
+ "ureq",
 ]
 
 [[package]]
