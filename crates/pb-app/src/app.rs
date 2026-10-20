@@ -1153,6 +1153,12 @@ impl App {
             }),
             timer: self.timer_drawn.clone(),
             timer_sound: self.timer_sound,
+            bookmarks: self
+                .document
+                .bookmarks()
+                .iter()
+                .map(|&(slot, _)| slot)
+                .collect(),
             voting: self.document.voting().map(|v| VotingView {
                 open: v.open,
                 limit: v.limit,
@@ -1949,6 +1955,8 @@ impl App {
                 }
             }
             Action::CloseTimer => self.apply(Command::SetTimer(None)),
+            Action::SaveBookmark(slot) => self.save_bookmark(slot),
+            Action::GoToBookmark(slot) => self.go_to_bookmark(slot),
             Action::ToggleTimerSound => {
                 self.timer_sound = !self.timer_sound;
                 crate::settings::save_timer_sound(self.timer_sound);
@@ -3952,6 +3960,45 @@ impl App {
             window.set_cursor_visible(!laser);
         }
         self.request_redraw();
+    }
+
+    /// Saves the view in the board's slot `slot`, for everyone on the board.
+    fn save_bookmark(&mut self, slot: u8) {
+        let viewport = self.viewport();
+        let center = self.camera.visible_world_rect(viewport).center();
+        let view = pb_core::Bookmark {
+            x: center.x,
+            y: center.y,
+            zoom: self.camera.zoom(),
+        };
+        let saved = self.document.apply(Command::SetBookmark {
+            slot,
+            view: Some(view),
+        });
+        match saved {
+            Ok(_) => self.show_notice(trf("View {} saved", &[&slot])),
+            Err(err) => {
+                log::warn!("view not saved: {err}");
+                self.show_notice(trf("View {} could not be saved", &[&slot]));
+            }
+        }
+    }
+
+    /// Glides to the view saved in the board's slot `slot`.
+    fn go_to_bookmark(&mut self, slot: u8) {
+        let Some(view) = self.document.bookmark(slot) else {
+            self.show_notice(trf(
+                "No view saved as {} yet: Ctrl+Shift+{} saves one",
+                &[&slot, &slot],
+            ));
+            return;
+        };
+        if self.following.is_some() {
+            self.stop_following();
+        }
+        let mut target = self.camera;
+        target.look_at(Point::new(view.x, view.y), view.zoom, self.viewport());
+        self.glide_to(&target);
     }
 
     /// Starts the camera gliding from where it is to `target`.
@@ -6301,6 +6348,15 @@ impl App {
             KeyCode::Digit0 | KeyCode::Numpad0 if ctrl => {
                 self.navigation.zoom_reset(&mut self.camera, viewport);
             }
+            // Saved views: Ctrl+Shift+1…9 saves, Ctrl+1…9 goes there.
+            _ if ctrl && !modifiers.alt_key() && !event.repeat && digit_key(code).is_some() => {
+                let slot = digit_key(code).unwrap_or(1);
+                if modifiers.shift_key() {
+                    self.save_bookmark(slot);
+                } else {
+                    self.go_to_bookmark(slot);
+                }
+            }
             KeyCode::Home => self.camera.look_at(Point::ZERO, 1.0, viewport),
             KeyCode::KeyG if modifiers.shift_key() && !ctrl && !event.repeat => {
                 self.tools.set_snap_to_grid(!self.tools.snap_to_grid());
@@ -7083,6 +7139,22 @@ fn timer_view(timer: &pb_core::Timer, now: i64) -> Option<crate::ui::TimerView> 
         done,
         // Blinks twice a second once time is up.
         flash: done && over % 1000 < 500,
+    })
+}
+
+/// The number on a key of the top row, 1 to 9.
+fn digit_key(code: KeyCode) -> Option<u8> {
+    Some(match code {
+        KeyCode::Digit1 => 1,
+        KeyCode::Digit2 => 2,
+        KeyCode::Digit3 => 3,
+        KeyCode::Digit4 => 4,
+        KeyCode::Digit5 => 5,
+        KeyCode::Digit6 => 6,
+        KeyCode::Digit7 => 7,
+        KeyCode::Digit8 => 8,
+        KeyCode::Digit9 => 9,
+        _ => return None,
     })
 }
 

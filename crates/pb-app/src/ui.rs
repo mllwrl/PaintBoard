@@ -210,6 +210,10 @@ pub enum Action {
     CloseTimer,
     /// Turns the chime when the countdown runs out on or off (here only).
     ToggleTimerSound,
+    /// Saves the view in the board's numbered slot (Ctrl+Shift+1…9).
+    SaveBookmark(u8),
+    /// Glides to the view saved in the slot (Ctrl+1…9).
+    GoToBookmark(u8),
     /// Enters focus mode on the selection or the view, or leaves it (Shift+F).
     ToggleFocus,
     /// Presents the board frame by frame (F5).
@@ -585,6 +589,8 @@ pub struct Model<'a> {
     pub timer: Option<TimerView>,
     /// A chime sounds when the countdown runs out.
     pub timer_sound: bool,
+    /// The slots with a saved view, in order.
+    pub bookmarks: Vec<u8>,
     /// The voting session, if there is one.
     pub voting: Option<VotingView>,
     /// The voting results window: objects with their votes, most first.
@@ -4851,6 +4857,8 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Space+drag, middle drag", "Pan"),
             ("Ctrl+wheel, Ctrl+= / -", "Zoom"),
             ("Ctrl+0", "Zoom to 100%"),
+            ("Ctrl+Shift+1…9", "Save the view as 1…9 (on the board)"),
+            ("Ctrl+1…9", "Go to the saved view 1…9"),
             (
                 "Ctrl+Alt+= / - / 0",
                 "Interface size: larger / smaller / normal",
@@ -5251,6 +5259,24 @@ fn palette_entries(model: &Model) -> Vec<PaletteEntry> {
             hint: String::new(),
             action: Action::GoToFrame(*id),
         });
+    }
+    for &slot in &model.bookmarks {
+        entries.push(PaletteEntry {
+            label: trf("Go to view {}", &[&slot]),
+            english: format!("Go to view {slot}"),
+            hint: format!("Ctrl+{slot}"),
+            action: Action::GoToBookmark(slot),
+        });
+    }
+    if !model.view_only {
+        for slot in pb_core::Bookmark::SLOTS {
+            entries.push(PaletteEntry {
+                label: trf("Save view as {}", &[&slot]),
+                english: format!("Save view as {slot}"),
+                hint: format!("Ctrl+Shift+{slot}"),
+                action: Action::SaveBookmark(slot),
+            });
+        }
     }
     if !model.read_only {
         for c in &model.plugin_commands {

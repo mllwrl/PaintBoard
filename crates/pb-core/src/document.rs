@@ -61,6 +61,8 @@ mod key {
     pub const VOTING: &str = "voting";
     /// Root map of talktracks: each in its stored form (see `Talktrack::to_bytes`) by id.
     pub const TALKTRACKS: &str = "talktracks";
+    /// Root map of saved views: `x;y;zoom` (see `Bookmark::to_value`) by slot number.
+    pub const BOOKMARKS: &str = "bookmarks";
     /// Root map of saved versions: each in its stored form (see `Version::to_bytes`) by id.
     pub const VERSIONS: &str = "versions";
     /// Root map of layers: `order;flags;name` by layer id, see `Layer::to_value`.
@@ -188,6 +190,8 @@ pub enum Error {
     UnknownThread(Arc<str>),
     /// A saved version that does not exist.
     UnknownVersion(Arc<str>),
+    /// A view slot out of [`crate::Bookmark::SLOTS`].
+    NoSuchBookmark(u8),
     /// The board was saved by a newer version of the app.
     UnsupportedSchema(i64),
     /// The board is read-only and the command would change it.
@@ -201,6 +205,7 @@ impl fmt::Display for Error {
             Self::UnknownObject(id) => write!(f, "object {id} does not exist"),
             Self::UnknownThread(id) => write!(f, "comment thread {id} does not exist"),
             Self::UnknownVersion(id) => write!(f, "version {id} does not exist"),
+            Self::NoSuchBookmark(slot) => write!(f, "there is no view slot {slot}"),
             Self::UnsupportedSchema(v) => {
                 write!(
                     f,
@@ -1315,6 +1320,19 @@ impl Document {
                 self.doc.get_map(key::META).insert(key::TITLE, &*title)?;
                 self.doc.set_next_commit_origin(NOT_UNDONE);
             }
+            Command::SetBookmark { slot, view } => {
+                if !crate::Bookmark::SLOTS.contains(&slot) {
+                    return Err(Error::NoSuchBookmark(slot));
+                }
+                let map = self.doc.get_map(key::BOOKMARKS);
+                let slot = slot.to_string();
+                match view {
+                    Some(view) => map.insert(&slot, view.to_value())?,
+                    None if map.get(&slot).is_some() => map.delete(&slot)?,
+                    None => {}
+                }
+                self.doc.set_next_commit_origin(NOT_UNDONE);
+            }
             Command::SaveVersion {
                 id,
                 name,
@@ -1351,6 +1369,8 @@ impl Document {
                     .iter()
                     .map(|v| (v.id.clone(), v.to_bytes()))
                     .collect();
+                // Saved views are how the board is looked at, not what is on it: kept too.
+                let views = self.bookmarks();
                 self.doc.commit();
                 self.doc.revert_to(&frontiers)?;
                 let map = self.doc.get_map(key::VERSIONS);
@@ -1361,6 +1381,15 @@ impl Document {
                 }
                 for (id, bytes) in saved {
                     map.insert(&id, bytes)?;
+                }
+                let map = self.doc.get_map(key::BOOKMARKS);
+                let mut slots = Vec::new();
+                map.for_each(|slot, _| slots.push(slot.to_owned()));
+                for slot in slots {
+                    map.delete(&slot)?;
+                }
+                for (slot, view) in views {
+                    map.insert(&slot.to_string(), view.to_value())?;
                 }
             }
             Command::SaveTalktrack(track) => {
@@ -1452,6 +1481,21 @@ impl Document {
     /// The board's countdown, if one is set (see [`Command::SetTimer`]).
     pub fn timer(&self) -> Option<crate::Timer> {
         crate::Timer::from_value(&get_str(&self.doc.get_map(key::META), key::TIMER)?)
+    }
+
+    /// The view saved in `slot`, if any (see [`Command::SetBookmark`]).
+    pub fn bookmark(&self, slot: u8) -> Option<crate::Bookmark> {
+        crate::Bookmark::from_value(&get_str(
+            &self.doc.get_map(key::BOOKMARKS),
+            &slot.to_string(),
+        )?)
+    }
+
+    /// The slots with a saved view, in order.
+    pub fn bookmarks(&self) -> Vec<(u8, crate::Bookmark)> {
+        crate::Bookmark::SLOTS
+            .filter_map(|slot| Some((slot, self.bookmark(slot)?)))
+            .collect()
     }
 
     /// The board's name, if it was given one (see [`Command::SetTitle`]).
@@ -4155,6 +4199,65 @@ mod tests {
         assert!(matches!(
             doc.apply(Command::RestoreVersion("v2".into())),
             Err(Error::UnknownVersion(_))
+        ));
+    }
+
+    #[test]
+    fn views_are_saved_in_slots_even_read_only_and_not_undone() {
+        let mut doc = Document::new();
+        let [a, ..] = four(&mut doc);
+        save_version(&mut doc, "v0", 1);
+        let view = crate::Bookmark {
+            x: 10.0,
+            y: -20.5,
+            zoom: 1.5,
+        };
+        doc.apply(Command::SetBookmark {
+            slot: 3,
+            view: Some(view),
+        })
+        .unwrap();
+        assert_eq!(doc.bookmark(3), Some(view));
+        assert_eq!(doc.bookmark(4), None);
+        assert_eq!(doc.bookmarks(), [(3, view)]);
+        // Kept in the board.
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(loaded.bookmarks(), [(3, view)]);
+        // Not undone: undo takes back the last edit, not the view.
+        let moved = doc.get(a).unwrap().data.bounds;
+        doc.apply(Command::Move {
+            ids: vec![a],
+            delta: Vec2::new(5.0, 0.0),
+        })
+        .unwrap();
+        let other = crate::Bookmark { zoom: 0.5, ..view };
+        doc.apply(Command::SetBookmark {
+            slot: 9,
+            view: Some(other),
+        })
+        .unwrap();
+        assert!(doc.undo().unwrap());
+        assert_eq!(doc.get(a).unwrap().data.bounds, moved);
+        assert_eq!(doc.bookmarks(), [(3, view), (9, other)]);
+        while doc.undo().unwrap() {}
+        assert_eq!(doc.bookmarks(), [(3, view), (9, other)]);
+        // Going back to a version keeps the views saved since.
+        doc.apply(Command::RestoreVersion("v0".into())).unwrap();
+        assert_eq!(doc.bookmarks(), [(3, view), (9, other)]);
+        // Allowed on a read-only board.
+        doc.apply(Command::SetReadOnly(true)).unwrap();
+        doc.apply(Command::SetBookmark {
+            slot: 3,
+            view: None,
+        })
+        .unwrap();
+        assert_eq!(doc.bookmarks(), [(9, other)]);
+        assert!(matches!(
+            doc.apply(Command::SetBookmark {
+                slot: 0,
+                view: Some(view),
+            }),
+            Err(Error::NoSuchBookmark(0))
         ));
     }
 

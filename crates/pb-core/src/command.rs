@@ -211,6 +211,13 @@ pub enum Command {
     /// Names the board: shown for a shared board, whose file each person names as they
     /// like. Not undoable.
     SetTitle(Arc<str>),
+    /// Saves a view of the board in a numbered slot (see [`crate::Bookmark::SLOTS`]), or
+    /// forgets it with `None`. Only how the board is looked at: allowed on a read-only
+    /// board, and not undoable.
+    SetBookmark {
+        slot: u8,
+        view: Option<crate::Bookmark>,
+    },
     /// Saves the board as it is now as a version. Not undoable.
     SaveVersion {
         id: Arc<str>,
@@ -296,6 +303,7 @@ impl Command {
                 | Self::SaveTalktrack(_)
                 | Self::RemoveTalktrack(_)
                 | Self::SetTimer(_)
+                | Self::SetBookmark { .. }
                 // Reading a book does not change what it says.
                 | Self::TurnPage { .. }
         )

@@ -1,6 +1,7 @@
 //! Document model, commands and undo/redo. Knows nothing about rendering, UI or the platform.
 
 mod asset;
+mod bookmark;
 mod command;
 pub mod comment;
 pub mod connector;
@@ -21,6 +22,7 @@ pub mod version;
 mod fuzz_tests;
 
 pub use asset::{AssetId, Assets};
+pub use bookmark::Bookmark;
 pub use command::{Applied, Command, Role, ZOrder};
 pub use comment::{Comment, Thread, ThreadAnchor};
 pub use connector::{Anchor, Cap, Connector, ConnectorChange, End, Label, Route};

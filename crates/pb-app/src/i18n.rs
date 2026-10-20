@@ -1179,6 +1179,22 @@ const RU: &[(&str, &str)] = &[
     ("On the board", "На доске"),
     ("Plugin", "Плагин"),
     ("Go to frame: {}", "Перейти к фрейму: {}"),
+    ("Go to view {}", "Перейти к виду {}"),
+    ("Save view as {}", "Сохранить вид как {}"),
+    ("View {} saved", "Вид {} сохранён"),
+    (
+        "No view saved as {} yet: Ctrl+Shift+{} saves one",
+        "Вид {} ещё не сохранён: сохранить — Ctrl+Shift+{}",
+    ),
+    ("View {} could not be saved", "Не удалось сохранить вид {}"),
+    (
+        "Save the view as 1…9 (on the board)",
+        "Сохранить вид как 1…9 (в доске)",
+    ),
+    (
+        "Go to the saved view 1…9",
+        "Перейти к сохранённому виду 1…9",
+    ),
     ("Tagged {}", "С тегом {}"),
     ("Undo", "Отменить"),
     ("Redo", "Повторить"),
