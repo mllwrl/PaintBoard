@@ -11,15 +11,7 @@ COPY . .
 # wasm-bindgen-cli must match the wasm-bindgen crate in Cargo.lock.
 RUN version=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/version = "\(.*\)"/\1/p') \
     && cargo install wasm-bindgen-cli --version "$version" --locked
-RUN cargo build --release -p pb-server \
-    && cargo build --release --target wasm32-unknown-unknown -p pb-app \
-    && mkdir -p /web \
-    && wasm-bindgen --target web --no-typescript --remove-name-section --remove-producers-section \
-        --out-dir /web --out-name paintboard target/wasm32-unknown-unknown/release/paintboard.wasm \
-    && cp packaging/web/index.html crates/pb-app/assets/icon.png /web/ \
-    && version=$(sha256sum /web/paintboard_bg.wasm | cut -c1-16) \
-    && sed "s/__VERSION__/$version/" packaging/web/sw.js > /web/sw.js \
-    && gzip -k -9 /web/paintboard_bg.wasm /web/paintboard.js /web/index.html
+RUN cargo build --release -p pb-server && sh packaging/web/build-web.sh /web
 
 FROM debian:bookworm-slim
 # TLS and certificates for link previews (PB_PREVIEWS).
