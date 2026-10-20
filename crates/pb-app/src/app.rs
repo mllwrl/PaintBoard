@@ -207,6 +207,8 @@ pub struct App {
     stylus_clock: Instant,
     /// Whether a pen was ever seen here, and whether fingers move the board.
     pen: crate::settings::PenSettings,
+    /// Fingers that started on a panel while fingers move the board: they work the panel.
+    ui_touches: Vec<u64>,
     text: TextRenderer,
     images: ImageCache,
     /// Pages of books (PDFs shown a page at a time) rendered and on their way.
@@ -410,6 +412,7 @@ impl App {
             stylus: crate::stylus::Stylus::default(),
             stylus_clock: Instant::now(),
             pen: crate::settings::pen(),
+            ui_touches: Vec::new(),
             text: TextRenderer::new(),
             images,
             books: Books::default(),
@@ -6623,6 +6626,25 @@ impl App {
             time: self.stylus_clock.elapsed().as_secs_f64(),
         };
         let fingers_navigate = self.pen.fingers_navigate();
+        // A finger moving the board that starts on a panel works the panel instead.
+        let ui_finger = self.ui_touches.contains(&touch.id)
+            || kind == Kind::Touch
+                && sample.phase == Phase::Down
+                && fingers_navigate
+                && !self.stylus.pen_near(sample.time)
+                && self.ui.as_ref().is_some_and(|ui| {
+                    let scale = self.scale();
+                    ui.is_over_ui(Point::new(sample.pos.x / scale, sample.pos.y / scale))
+                });
+        if ui_finger {
+            match sample.phase {
+                Phase::Down => self.ui_touches.push(touch.id),
+                Phase::Up | Phase::Cancel => self.ui_touches.retain(|&id| id != touch.id),
+                Phase::Move => {}
+            }
+            self.handle_window_event(event_loop, WindowEvent::Touch(touch), true);
+            return;
+        }
         let Some(outs) = self.stylus.feed(sample, fingers_navigate) else {
             return;
         };

@@ -1092,6 +1092,14 @@ impl Ui {
         self.ctx.is_pointer_over_egui() || self.ctx.egui_is_using_pointer()
     }
 
+    /// Whether a panel, menu or window is at `pos` (in logical pixels), as of the last
+    /// frame.
+    pub fn is_over_ui(&self, pos: kurbo::Point) -> bool {
+        self.ctx
+            .layer_id_at(egui::pos2(pos.x as f32, pos.y as f32))
+            .is_some_and(|layer| layer.order != Order::Background)
+    }
+
     /// Pastes `text` into the focused text field (where egui cannot read the clipboard
     /// itself: the browser).
     pub fn paste(&mut self, text: String) {
