@@ -8,7 +8,7 @@
     <key>CFBundleDisplayName</key>
     <string>PaintBoard</string>
     <key>CFBundleIdentifier</key>
-    <string>com.paintboard.PaintBoard</string>
+    <string>com.mllwrl.paintboard</string>
     <key>CFBundleExecutable</key>
     <string>paintboard</string>
     <key>CFBundleIconFile</key>
@@ -45,7 +45,7 @@
             <string>PaintBoard</string>
             <key>LSItemContentTypes</key>
             <array>
-                <string>com.paintboard.board</string>
+                <string>com.mllwrl.paintboard.board</string>
             </array>
         </dict>
         <dict>
@@ -59,7 +59,7 @@
             <string>PaintBoard</string>
             <key>LSItemContentTypes</key>
             <array>
-                <string>com.paintboard.plugin</string>
+                <string>com.mllwrl.paintboard.plugin</string>
             </array>
         </dict>
     </array>
@@ -67,7 +67,7 @@
     <array>
         <dict>
             <key>UTTypeIdentifier</key>
-            <string>com.paintboard.board</string>
+            <string>com.mllwrl.paintboard.board</string>
             <key>UTTypeDescription</key>
             <string>PaintBoard board</string>
             <key>UTTypeIconFile</key>
@@ -90,7 +90,7 @@
         </dict>
         <dict>
             <key>UTTypeIdentifier</key>
-            <string>com.paintboard.plugin</string>
+            <string>com.mllwrl.paintboard.plugin</string>
             <key>UTTypeDescription</key>
             <string>PaintBoard plugin</string>
             <key>UTTypeIconFile</key>
