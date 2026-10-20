@@ -11,6 +11,8 @@ mod export;
 mod i18n;
 mod navigation;
 mod pictures;
+mod plugin_api;
+mod plugins;
 mod session;
 mod settings;
 mod sharing;

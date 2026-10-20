@@ -49,6 +49,9 @@ struct VersionView {
     summary: String,
 }
 
+/// How long a plugin's message shows.
+const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub enum UserEvent {
     /// GPU initialization finished (asynchronous on the web).
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -80,6 +83,20 @@ pub enum UserEvent {
     BoardMade(String, Result<String, String>),
     /// The server answered a request about the account.
     Account(crate::account::Reply),
+    /// A plugin posted something (in the browser, where plugins run in workers).
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    PluginPosted,
+    /// A plugin's fetch was answered: the plugin, its call, and the answer.
+    PluginFetched {
+        plugin: String,
+        call: u64,
+        result: Result<String, String>,
+    },
+    /// Files to install a plugin from were picked.
+    PluginFiles(Vec<PathBuf>),
+    /// A plugin's manifest was picked to develop it from its folder.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    DevPluginPicked(PathBuf),
     /// A board file was picked to open (later than asked on the web).
     BoardPicked(PathBuf),
     /// Files were picked to add to the board.
@@ -261,6 +278,12 @@ pub struct App {
     sharing: Option<crate::sharing::Sharing>,
     /// The account on the sharing server.
     accounts: crate::account::Accounts,
+    plugins: crate::plugins::Plugins,
+    plugins_window: bool,
+    /// Messages from plugins, shown for a few seconds: the plugin's name, the text, until.
+    notices: Vec<(String, String, Instant)>,
+    /// When plugins developed from their folders are looked at for changes next.
+    plugin_check_at: Option<Instant>,
     /// Whose view this copy follows on a shared board, the camera as following last set
     /// it (moved since: the user took over) and when.
     following: Option<pb_sync::ClientId>,
@@ -304,6 +327,10 @@ impl App {
         };
         let mut app = Self {
             accounts,
+            plugins: crate::plugins::Plugins::default(),
+            plugins_window: false,
+            notices: Vec::new(),
+            plugin_check_at: None,
             proxy,
             window: None,
             gpu: None,
@@ -388,7 +415,58 @@ impl App {
             // The web version starts with the boards kept in the browser.
             app.show_boards = cfg!(target_arch = "wasm32");
         }
+        app.with_plugins(|plugins, app| *plugins = crate::plugins::Plugins::load_all(app));
         app
+    }
+
+    /// Lends the plugins and the app (their host) at once.
+    fn with_plugins<R>(
+        &mut self,
+        f: impl FnOnce(&mut crate::plugins::Plugins, &mut Self) -> R,
+    ) -> R {
+        let mut plugins = std::mem::take(&mut self.plugins);
+        let result = f(&mut plugins, self);
+        self.plugins = plugins;
+        self.request_redraw();
+        result
+    }
+
+    /// Reads picked plugin files and installs the plugin they make.
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+    fn install_plugin(&mut self, mut paths: Vec<PathBuf>) {
+        // On the desktop the manifest alone will do: its folder has the rest.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let [manifest] = &paths[..]
+            && let Some(dir) = manifest.parent()
+        {
+            paths = pb_platform::fs::list(dir);
+        }
+        let files: Vec<(String, Vec<u8>)> = paths
+            .iter()
+            .filter_map(|p| {
+                let name = p.file_name()?.to_string_lossy().into_owned();
+                let bytes = pb_platform::fs::read(p).ok()?;
+                (bytes.len() <= 8 << 20).then_some((name, bytes))
+            })
+            .collect();
+        // Picked in the browser, they were kept in memory only to be read.
+        #[cfg(target_arch = "wasm32")]
+        for path in &paths {
+            let _ = pb_platform::fs::remove(path);
+        }
+        let installed = self.with_plugins(|plugins, app| plugins.install(app, &files));
+        match installed {
+            Ok(Some(name)) => {
+                self.plugins_window = true;
+                self.notices.push((
+                    name,
+                    tr("Installed").to_owned(),
+                    Instant::now() + NOTICE_FOR,
+                ));
+            }
+            Ok(None) => {}
+            Err(err) => dialog::show_error(tr("Could not install the plugin"), &err),
+        }
     }
 
     fn scale(&self) -> f64 {
@@ -621,7 +699,64 @@ impl App {
         }
         let (share_window, share_badge) = self.share_model();
         let (cursors, their_selections) = self.others_on_screen();
+        let plugin_commands: Vec<crate::ui::PluginCommandView> = self
+            .plugins
+            .commands()
+            .into_iter()
+            .map(|(plugin, plugin_name, c)| crate::ui::PluginCommandView {
+                plugin,
+                plugin_name,
+                id: c.id,
+                title: c.title,
+                selection: c.selection,
+            })
+            .collect();
+        let plugins_view = self.plugins_window.then(|| {
+            self.plugins
+                .list
+                .iter()
+                .map(|p| crate::ui::PluginView {
+                    id: p.manifest.id.clone(),
+                    name: p.manifest.name.clone(),
+                    version: p.manifest.version.clone(),
+                    author: p.manifest.author.clone(),
+                    description: p.manifest.description.clone(),
+                    permissions: p
+                        .manifest
+                        .permissions
+                        .iter()
+                        .map(crate::plugins::describe)
+                        .collect(),
+                    enabled: p.enabled,
+                    running: p.running(),
+                    dev: p.dev,
+                    error: p.error.clone(),
+                    log: p.log.iter().cloned().collect(),
+                })
+                .collect()
+        });
+        let plugin_panels: Vec<(String, String, serde_json::Value)> = self
+            .plugins
+            .list
+            .iter()
+            .filter_map(|p| {
+                Some((
+                    p.manifest.id.clone(),
+                    p.manifest.name.clone(),
+                    p.panel.clone()?,
+                ))
+            })
+            .collect();
+        let notices: Vec<(String, String)> = self
+            .notices
+            .iter()
+            .map(|(name, text, _)| (name.clone(), text.clone()))
+            .collect();
         let model = Model {
+            plugin_commands,
+            plugins: plugins_view,
+            plugin_panels,
+            notices,
             background: self.document.background(),
             panels: self.panels,
             fullscreen: self
@@ -1257,6 +1392,57 @@ impl App {
                 self.accounts.start(&server, &email);
             }
             Action::CancelSignIn => self.accounts.cancel(),
+            Action::TogglePlugins => self.plugins_window = !self.plugins_window,
+            Action::InstallPlugin => {
+                let proxy = self.proxy.clone();
+                pb_platform::dialog::pick_files(
+                    tr("PaintBoard plugin (manifest.json and scripts)"),
+                    &["json", "js"],
+                    true,
+                    move |paths| {
+                        let _ = proxy.send_event(UserEvent::PluginFiles(paths));
+                    },
+                );
+            }
+            Action::LoadDevPlugin => {
+                let proxy = self.proxy.clone();
+                pb_platform::dialog::pick_files(
+                    tr("The plugin's manifest.json"),
+                    &["json"],
+                    false,
+                    move |paths| {
+                        if let Some(path) = paths.into_iter().next() {
+                            let _ = proxy.send_event(UserEvent::DevPluginPicked(path));
+                        }
+                    },
+                );
+            }
+            Action::SetPluginEnabled(id, on) => {
+                self.with_plugins(|plugins, app| plugins.set_enabled(app, &id, on));
+            }
+            Action::RemovePlugin(id) => {
+                let name = self
+                    .plugins
+                    .list
+                    .iter()
+                    .find(|p| p.manifest.id == id)
+                    .map(|p| p.manifest.name.clone())
+                    .unwrap_or_default();
+                if dialog::confirm(
+                    tr("Remove plugin"),
+                    &trf("Remove the plugin \"{}\" and what it keeps?", &[&name]),
+                ) {
+                    self.plugins.remove(&id);
+                }
+            }
+            Action::RunPluginCommand(plugin, command) => {
+                self.finish_editing();
+                self.with_plugins(|plugins, app| plugins.run_command(app, &plugin, &command));
+            }
+            Action::PluginPanel(plugin, data) => {
+                self.with_plugins(|plugins, app| plugins.panel_event(app, &plugin, data));
+            }
+            Action::ClosePluginPanel(plugin) => self.plugins.close_panel(&plugin),
             Action::SignOut => self.accounts.sign_out(),
             Action::RefreshBoards => self.accounts.refresh_boards(),
             Action::OpenMyBoard(board) => {
@@ -5710,6 +5896,23 @@ impl ApplicationHandler<UserEvent> for App {
         let now = Instant::now();
         self.tick_sharing(now);
         self.accounts.tick(now);
+        if !self.plugins.list.is_empty() {
+            self.with_plugins(|plugins, app| plugins.tell_changes(app));
+        }
+        if self.plugins.watching() {
+            if self.plugin_check_at.is_none_or(|at| at <= now) {
+                self.with_plugins(|plugins, app| plugins.reload_changed(app));
+                self.plugin_check_at = Some(now + std::time::Duration::from_secs(1));
+            }
+        } else {
+            self.plugin_check_at = None;
+        }
+        let shown = self.notices.len();
+        self.notices.retain(|(_, _, until)| *until > now);
+        if self.notices.len() != shown {
+            self.request_redraw();
+        }
+        let notice_end = self.notices.iter().map(|(_, _, until)| *until).min();
         self.session.tick(&self.document, now);
         // The GPU reports back between frames: keep them coming until the file is made.
         if self.step_making() {
@@ -5759,6 +5962,8 @@ impl ApplicationHandler<UserEvent> for App {
             sampling,
             self.sharing.as_ref().and_then(|s| s.deadline()),
             self.accounts.deadline(),
+            self.plugin_check_at,
+            notice_end,
         ]
         .into_iter()
         .flatten()
@@ -5789,6 +5994,30 @@ impl ApplicationHandler<UserEvent> for App {
             // Waking up is all it takes: `about_to_wait` ticks the sharing.
             UserEvent::Network => {}
             UserEvent::BoardMade(server, answer) => self.board_made(&server, answer),
+            UserEvent::PluginPosted => {
+                self.with_plugins(|plugins, app| plugins.poll(app));
+            }
+            UserEvent::PluginFetched {
+                plugin,
+                call,
+                result,
+            } => {
+                self.with_plugins(|plugins, app| plugins.fetched(app, &plugin, call, result));
+            }
+            UserEvent::PluginFiles(paths) => self.install_plugin(paths),
+            UserEvent::DevPluginPicked(path) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(dir) = path.parent() {
+                    let dir = dir.to_owned();
+                    let loaded = self.with_plugins(|plugins, app| plugins.load_dev(app, &dir));
+                    match loaded {
+                        Ok(_) => self.plugins_window = true,
+                        Err(err) => dialog::show_error(tr("Could not load the plugin"), &err),
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                let _ = path;
+            }
             UserEvent::Account(reply) => {
                 if let Some(outcome) = self.accounts.receive(reply) {
                     self.account_outcome(outcome);
@@ -6457,6 +6686,120 @@ fn overlay(document: &Document, tools: &Tools, overrides: &[Object], zoom: f64) 
         bend_handles: tools.bend_handles(document),
         connection_points,
         connection_active,
+    }
+}
+
+impl crate::plugins::Host for App {
+    fn document(&self) -> &Document {
+        &self.document
+    }
+
+    fn apply(&mut self, commands: Vec<Command>) -> Result<Vec<ObjectId>, String> {
+        let mut created = Vec::new();
+        let mut result = Ok(());
+        for command in commands {
+            match self.document.apply(command) {
+                Ok(applied) => created.extend(applied.created),
+                Err(err) => {
+                    result = Err(err.to_string());
+                    break;
+                }
+            }
+        }
+        self.tools.sync(&self.document);
+        self.request_redraw();
+        result.map(|()| created)
+    }
+
+    fn selection(&self) -> Vec<ObjectId> {
+        self.tools.selection().ids().to_vec()
+    }
+
+    fn select(&mut self, ids: Vec<ObjectId>) {
+        self.tools.select_only(ids);
+        self.tools.sync(&self.document);
+    }
+
+    fn view(&self) -> (pb_geom::kurbo::Rect, f64) {
+        (
+            self.camera.visible_world_rect(self.viewport()),
+            self.camera.zoom(),
+        )
+    }
+
+    fn zoom_to(&mut self, ids: &[ObjectId]) {
+        let area = ids
+            .iter()
+            .filter_map(|&id| self.document.get(id))
+            .map(|o| o.data.frame().aabb())
+            .reduce(|a, b| a.union(b));
+        if let Some(area) = area {
+            let viewport = self.viewport();
+            self.camera.fit(area, viewport, FRAME_MARGIN);
+        }
+    }
+
+    fn measured(&mut self) -> (&Document, Box<crate::plugin_api::Measure<'_>>) {
+        let text = &mut self.text;
+        (
+            &self.document,
+            Box::new(move |t: &str, size: f64, wrap: Option<f64>| {
+                let layout = text.engine().layout(t, size, wrap);
+                (layout.width, layout.height)
+            }),
+        )
+    }
+
+    fn copy_text(&mut self, text: &str) {
+        clipboard::set_text(text);
+    }
+
+    fn notify(&mut self, name: &str, text: &str) {
+        self.notices.push((
+            name.to_owned(),
+            text.chars().take(300).collect(),
+            Instant::now() + NOTICE_FOR,
+        ));
+        if self.notices.len() > 4 {
+            self.notices.remove(0);
+        }
+    }
+
+    fn fetch(&mut self, plugin: &str, id: u64, url: &str, options: &serde_json::Value) {
+        let method = match options.get("method").and_then(serde_json::Value::as_str) {
+            Some("POST") | Some("post") => "POST",
+            Some("PUT") | Some("put") => "PUT",
+            Some("DELETE") | Some("delete") => "DELETE",
+            _ => "GET",
+        };
+        let body = options
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let proxy = self.proxy.clone();
+        let plugin = plugin.to_owned();
+        pb_platform::net::fetch(method, url, &[], body.as_deref(), move |result| {
+            let _ = proxy.send_event(UserEvent::PluginFetched {
+                plugin,
+                call: id,
+                result,
+            });
+        });
+    }
+
+    fn group(&mut self, on: bool) {
+        if on {
+            self.document.begin_undo_group();
+        } else {
+            self.document.end_undo_group();
+        }
+    }
+
+    fn waker(&self) -> Box<dyn Fn()> {
+        let proxy = self.proxy.clone();
+        Box::new(move || {
+            let _ = proxy.send_event(UserEvent::PluginPosted);
+        })
     }
 }
 

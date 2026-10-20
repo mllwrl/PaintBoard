@@ -27,7 +27,8 @@ impl ObjectId {
         }
     }
 
-    pub(crate) fn parse(s: &str) -> Option<Self> {
+    /// Reads the text form, `counter@peer`.
+    pub fn parse(s: &str) -> Option<Self> {
         let (counter, peer) = s.split_once('@')?;
         Some(Self {
             peer: peer.parse().ok()?,
@@ -102,7 +103,7 @@ impl ObjectKind {
     }
 
     /// The shape stored under `s`. Ink is read separately, with its points.
-    pub(crate) fn parse_shape(s: &str) -> Option<ShapeKind> {
+    pub fn parse_shape(s: &str) -> Option<ShapeKind> {
         ShapeKind::ALL
             .into_iter()
             .find(|&shape| shape_name(shape) == s)
@@ -169,7 +170,8 @@ impl ObjectKind {
     }
 }
 
-fn shape_name(kind: ShapeKind) -> &'static str {
+/// The stored name of a shape kind, like `rect` or `roundRect`; plugins use it too.
+pub fn shape_name(kind: ShapeKind) -> &'static str {
     match kind {
         ShapeKind::Rectangle => "rect",
         ShapeKind::RoundedRectangle => "roundRect",

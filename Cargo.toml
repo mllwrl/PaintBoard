@@ -18,6 +18,7 @@ pb-io = { path = "crates/pb-io" }
 pb-tools = { path = "crates/pb-tools" }
 pb-platform = { path = "crates/pb-platform" }
 pb-sync = { path = "crates/pb-sync" }
+pb-plugin = { path = "crates/pb-plugin" }
 
 kurbo = "0.13"
 rstar = "0.12"

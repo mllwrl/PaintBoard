@@ -245,6 +245,87 @@ const RU: &[(&str, &str)] = &[
         "Сервер не смог отправить письмо.",
     ),
     ("The server did not do it: {}", "Сервер этого не сделал: {}"),
+    ("Plugins", "Плагины"),
+    ("No plugin commands yet", "Команд плагинов пока нет"),
+    ("Manage plugins…", "Управление плагинами…"),
+    (
+        "No plugins installed. A plugin is a folder with manifest.json and a script; see the user guide.",
+        "Плагинов нет. Плагин — папка с manifest.json и скриптом; подробнее в руководстве.",
+    ),
+    ("On", "Включён"),
+    ("development", "разработка"),
+    (
+        "Runs from its own folder and reloads when its files change",
+        "Работает из своей папки и перезапускается, когда меняются её файлы",
+    ),
+    ("Asks for no permissions", "Не просит прав"),
+    ("Not running", "Не запущен"),
+    ("Install plugin…", "Установить плагин…"),
+    (
+        "Pick the plugin's manifest.json (in the browser: with its scripts)",
+        "Выберите manifest.json плагина (в браузере — вместе с его скриптами)",
+    ),
+    ("Develop from a folder…", "Разрабатывать из папки…"),
+    (
+        "Runs a plugin from its folder and reloads it when you save its files",
+        "Запускает плагин из его папки и перезапускает, когда вы сохраняете его файлы",
+    ),
+    (
+        "Install plugins only from people you trust: a plugin can change your boards.",
+        "Ставьте плагины только от тех, кому доверяете: плагин может менять ваши доски.",
+    ),
+    ("by {}", "автор: {}"),
+    ("May: {}", "Может: {}"),
+    ("Log ({})", "Журнал ({})"),
+    ("Installed", "Установлен"),
+    (
+        "Could not install the plugin",
+        "Не удалось установить плагин",
+    ),
+    (
+        "PaintBoard plugin (manifest.json and scripts)",
+        "Плагин PaintBoard (manifest.json и скрипты)",
+    ),
+    ("The plugin's manifest.json", "manifest.json плагина"),
+    ("Remove plugin", "Удалить плагин"),
+    ("Could not load the plugin", "Не удалось загрузить плагин"),
+    (
+        "Remove the plugin \"{}\" and what it keeps?",
+        "Удалить плагин «{}» и то, что он хранит?",
+    ),
+    ("read the board", "читать доску"),
+    ("change the board", "менять доску"),
+    ("put text on the clipboard", "класть текст в буфер обмена"),
+    ("fetch from {}", "загружать с {}"),
+    ("Started", "Запущен"),
+    (
+        "Pick the plugin's manifest.json and its scripts.",
+        "Выберите manifest.json плагина и его скрипты.",
+    ),
+    (
+        "The plugin's script {} is missing.",
+        "Нет скрипта плагина {}.",
+    ),
+    (
+        "Reloaded: its files changed",
+        "Перезапущен: его файлы изменились",
+    ),
+    (
+        "Stopped: too many calls at once",
+        "Остановлен: слишком много вызовов сразу",
+    ),
+    ("Install the plugin \"{}\" {}", "Установить плагин «{}» {}"),
+    (" by {}", " (автор: {})"),
+    (
+        "It asks for no permissions: it can only show its own commands and panel.",
+        "Он не просит прав: может только показывать свои команды и окно.",
+    ),
+    ("It will be able to:", "Он сможет:"),
+    (
+        "Install plugins only from people you trust.",
+        "Ставьте плагины только от тех, кому доверяете.",
+    ),
+    ("Install plugin", "Установка плагина"),
     ("Here now:", "Сейчас здесь:"),
     ("Link to comment", "Ссылка для комментариев"),
     (
@@ -1121,6 +1202,7 @@ mod tests {
             include_str!("export.rs"),
             include_str!("session.rs"),
             include_str!("account.rs"),
+            include_str!("plugins.rs"),
         ];
         let table = russian();
         let mut missing = Vec::new();

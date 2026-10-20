@@ -1,0 +1,10 @@
+{
+  "id": "paintboard.quick-notes",
+  "name": "Quick notes",
+  "version": "1.0.0",
+  "author": "PaintBoard",
+  "description": "A panel to paste a list: each line becomes a sticky note in a grid. Remembers the last color used.",
+  "api": 1,
+  "permissions": ["board:read", "board:write"],
+  "main": "main.js"
+}

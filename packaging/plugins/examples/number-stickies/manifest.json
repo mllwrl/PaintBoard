@@ -1,0 +1,10 @@
+{
+  "id": "paintboard.number-stickies",
+  "name": "Number stickies",
+  "version": "1.0.0",
+  "author": "PaintBoard",
+  "description": "Puts 1, 2, 3… before the text of the selected sticky notes, top to bottom, left to right.",
+  "api": 1,
+  "permissions": ["board:read", "board:write"],
+  "main": "main.js"
+}

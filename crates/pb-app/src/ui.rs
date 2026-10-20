@@ -71,6 +71,18 @@ pub enum Action {
     DeleteSharedBoard,
     /// Deletes the account and the boards it owns from the server, after asking.
     DeleteAccount,
+    /// Opens or closes the plugins window.
+    TogglePlugins,
+    InstallPlugin,
+    /// Runs a plugin from its own folder, reloading it as it changes (desktop).
+    LoadDevPlugin,
+    SetPluginEnabled(String, bool),
+    RemovePlugin(String),
+    /// Runs this command of this plugin.
+    RunPluginCommand(String, String),
+    /// Something happened in this plugin's panel.
+    PluginPanel(String, serde_json::Value),
+    ClosePluginPanel(String),
     /// Puts text on the clipboard (a link to share).
     CopyText(String),
     /// Opens this board (one kept in the browser).
@@ -404,7 +416,42 @@ impl Panels {
     }
 }
 
+/// A command a plugin offers.
+pub struct PluginCommandView {
+    pub plugin: String,
+    pub plugin_name: String,
+    pub id: String,
+    pub title: String,
+    /// Offered for the selection in the right-click menu too.
+    pub selection: bool,
+}
+
+/// An installed plugin, for the plugins window.
+pub struct PluginView {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub author: String,
+    pub description: String,
+    /// What it may do, in words.
+    pub permissions: Vec<String>,
+    pub enabled: bool,
+    pub running: bool,
+    /// Run from its own folder for development.
+    pub dev: bool,
+    pub error: Option<String>,
+    /// (level, text), oldest first.
+    pub log: Vec<(String, String)>,
+}
+
 pub struct Model<'a> {
+    pub plugin_commands: Vec<PluginCommandView>,
+    /// The plugins window, when open.
+    pub plugins: Option<Vec<PluginView>>,
+    /// Panels plugins show: plugin id, plugin name, the panel as described.
+    pub plugin_panels: Vec<(String, String, serde_json::Value)>,
+    /// Messages from plugins: the plugin's name, the text.
+    pub notices: Vec<(String, String)>,
     /// Which panels show.
     pub panels: Panels,
     /// The window fills the screen.
@@ -872,6 +919,8 @@ pub struct Ui {
     renaming_board: Option<(std::path::PathBuf, String)>,
     /// What is typed in the sharing window.
     share_texts: ShareTexts,
+    /// What is typed in plugins' panels, by plugin and field.
+    panel_values: std::collections::HashMap<(String, String), String>,
     repaint_at: Option<Instant>,
 }
 
@@ -915,6 +964,7 @@ impl Ui {
             timer_text: String::new(),
             renaming_board: None,
             share_texts: ShareTexts::default(),
+            panel_values: std::collections::HashMap::new(),
             repaint_at: None,
         }
     }
@@ -1029,6 +1079,7 @@ impl Ui {
         let timer_text = &mut self.timer_text;
         let renaming_board = &mut self.renaming_board;
         let share_texts = &mut self.share_texts;
+        let panel_values = &mut self.panel_values;
         let output = self.ctx.run_pass(input, |ctx| {
             others(ctx, model);
             if let Some(banner) = &model.follow_banner {
@@ -1106,7 +1157,7 @@ impl Ui {
                 None => search_text.clear(),
             }
             if let Some(info) = model.context_menu {
-                context_menu(ctx, info, &mut actions);
+                context_menu(ctx, info, &model.plugin_commands, &mut actions);
             }
             if model.show_shortcuts {
                 shortcuts_window(ctx, &mut actions);
@@ -1140,6 +1191,15 @@ impl Ui {
             }
             if let Some(view) = &model.share_window {
                 share_window(ctx, view, share_texts, &mut actions);
+            }
+            if let Some(plugins) = &model.plugins {
+                plugins_window(ctx, plugins, model.web, &mut actions);
+            }
+            for (plugin, name, panel) in &model.plugin_panels {
+                plugin_panel(ctx, plugin, name, panel, panel_values, &mut actions);
+            }
+            if !model.notices.is_empty() {
+                notices(ctx, &model.notices);
             }
             match &model.thread {
                 Some(thread) => thread_panel(ctx, thread, comment_text, &mut actions),
@@ -1511,6 +1571,7 @@ fn board_menu(ctx: &Context, model: &Model, typed: Typed, actions: &mut Vec<Acti
                     {
                         actions.push(Action::Present);
                     }
+                    ui.menu_button(tr("Plugins"), |ui| plugins_menu(ui, model, actions));
                     ui.menu_button(tr("Talktracks"), |ui| talktracks_menu(ui, model, actions));
                     ui.menu_button(tr("History"), |ui| {
                         history_menu(ui, model, version_name, actions)
@@ -3368,7 +3429,12 @@ fn selection_toolbar(
 }
 
 /// The right-click menu: what can be done with the selection, or on empty board.
-fn context_menu(ctx: &Context, info: ContextMenuInfo, actions: &mut Vec<Action>) {
+fn context_menu(
+    ctx: &Context,
+    info: ContextMenuInfo,
+    plugin_commands: &[PluginCommandView],
+    actions: &mut Vec<Action>,
+) {
     let area = Area::new(Id::unique("context menu"))
         .fixed_pos(Pos2::new(info.pos.0, info.pos.1) / ui_scale())
         .order(Order::Foreground)
@@ -3376,6 +3442,22 @@ fn context_menu(ctx: &Context, info: ContextMenuInfo, actions: &mut Vec<Action>)
         .show(ctx, |ui| {
             panel().show(ui, |ui| {
                 ui.set_min_width(180.0);
+                // Plugins' commands for the selection come first.
+                let mut offered = false;
+                for c in plugin_commands
+                    .iter()
+                    .filter(|c| c.selection && info.selection && !info.read_only)
+                {
+                    let button = Button::new(&c.title).frame(false);
+                    if ui.add(button).on_hover_text(&c.plugin_name).clicked() {
+                        actions.push(Action::RunPluginCommand(c.plugin.clone(), c.id.clone()));
+                        actions.push(Action::CloseContextMenu);
+                    }
+                    offered = true;
+                }
+                if offered {
+                    ui.separator();
+                }
                 let mut item = |ui: &mut egui::Ui,
                                 label: &'static str,
                                 keys: &str,
@@ -5364,6 +5446,259 @@ fn paint_turn(painter: &Painter, rect: Rect, color: Color32, redo: bool) {
 fn to_color32(color: Rgba) -> Color32 {
     let [r, g, b, a] = color.to_bytes();
     Color32::from_rgba_unmultiplied(r, g, b, a)
+}
+
+/// The Plugins menu: the commands plugins offer, and managing plugins.
+fn plugins_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
+    if model.plugin_commands.is_empty() {
+        ui.weak(tr("No plugin commands yet"));
+    }
+    for c in &model.plugin_commands {
+        let button = Button::new(&c.title);
+        if ui
+            .add_enabled(!model.read_only, button)
+            .on_hover_text(&c.plugin_name)
+            .clicked()
+        {
+            actions.push(Action::RunPluginCommand(c.plugin.clone(), c.id.clone()));
+            ui.close();
+        }
+    }
+    ui.separator();
+    if ui.button(tr("Manage plugins…")).clicked() {
+        actions.push(Action::TogglePlugins);
+        ui.close();
+    }
+}
+
+/// Installed plugins: what they are and may do, on or off, their log.
+fn plugins_window(ctx: &Context, plugins: &[PluginView], web: bool, actions: &mut Vec<Action>) {
+    let mut open = true;
+    egui::Window::new(tr("Plugins"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_width(460.0)
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            if plugins.is_empty() {
+                ui.label(tr("No plugins installed. A plugin is a folder with manifest.json and a script; see the user guide."));
+            }
+            egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                for p in plugins {
+                    ui.horizontal(|ui| {
+                        let mut on = p.enabled;
+                        if ui.checkbox(&mut on, "").on_hover_text(tr("On")).changed() {
+                            actions.push(Action::SetPluginEnabled(p.id.clone(), on));
+                        }
+                        ui.strong(&p.name);
+                        ui.weak(&p.version);
+                        if !p.author.is_empty() {
+                            ui.weak(trf("by {}", &[&p.author]));
+                        }
+                        if p.dev {
+                            ui.colored_label(Color32::from_rgb(0x3B, 0x82, 0xF6), tr("development"))
+                                .on_hover_text(tr("Runs from its own folder and reloads when its files change"));
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button(tr("Remove")).clicked() {
+                                actions.push(Action::RemovePlugin(p.id.clone()));
+                            }
+                        });
+                    });
+                    if !p.description.is_empty() {
+                        ui.label(&p.description);
+                    }
+                    let may = if p.permissions.is_empty() {
+                        tr("Asks for no permissions").to_owned()
+                    } else {
+                        trf("May: {}", &[&p.permissions.join(", ")])
+                    };
+                    ui.weak(may);
+                    if let Some(error) = &p.error {
+                        ui.colored_label(Color32::from_rgb(0xDC, 0x26, 0x26), error);
+                    } else if p.enabled && !p.running {
+                        ui.weak(tr("Not running"));
+                    }
+                    egui::CollapsingHeader::new(trf("Log ({})", &[&p.log.len()]))
+                        .id_salt(("plugin log", &p.id))
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical()
+                                .id_salt(("plugin log lines", &p.id))
+                                .max_height(160.0)
+                                .stick_to_bottom(true)
+                                .show(ui, |ui| {
+                                    for (level, text) in &p.log {
+                                        let line = RichText::new(text).monospace().small();
+                                        let line = match level.as_str() {
+                                            "error" => line.color(Color32::from_rgb(0xDC, 0x26, 0x26)),
+                                            "warn" => line.color(Color32::from_rgb(0xD9, 0x77, 0x06)),
+                                            _ => line,
+                                        };
+                                        ui.label(line);
+                                    }
+                                });
+                        });
+                    ui.separator();
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui
+                    .button(tr("Install plugin…"))
+                    .on_hover_text(tr("Pick the plugin's manifest.json (in the browser: with its scripts)"))
+                    .clicked()
+                {
+                    actions.push(Action::InstallPlugin);
+                }
+                if !web
+                    && ui
+                        .button(tr("Develop from a folder…"))
+                        .on_hover_text(tr("Runs a plugin from its folder and reloads it when you save its files"))
+                        .clicked()
+                {
+                    actions.push(Action::LoadDevPlugin);
+                }
+            });
+            ui.weak(tr("Install plugins only from people you trust: a plugin can change your boards."));
+        });
+    if !open {
+        actions.push(Action::TogglePlugins);
+    }
+}
+
+/// A plugin's own window: text, fields, buttons and lists it described.
+fn plugin_panel(
+    ctx: &Context,
+    plugin: &str,
+    name: &str,
+    panel: &serde_json::Value,
+    values: &mut std::collections::HashMap<(String, String), String>,
+    actions: &mut Vec<Action>,
+) {
+    use serde_json::{Value, json};
+    let title = panel
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or(name)
+        .to_owned();
+    let items = panel
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let field = |item: &Value, key: &str| {
+        item.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let mut open = true;
+    egui::Window::new(&title)
+        .id(Id::unique(("plugin panel", plugin)))
+        .open(&mut open)
+        .collapsible(true)
+        .resizable(true)
+        .default_width(280.0)
+        // On the right, clear of the menus and tools.
+        .default_pos(egui::pos2(ctx.content_rect().right() - 320.0, 110.0))
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            let mut event: Option<Value> = None;
+            for item in &items {
+                let id = field(item, "id");
+                match item.get("type").and_then(Value::as_str).unwrap_or("text") {
+                    "text" => {
+                        ui.label(field(item, "text"));
+                    }
+                    "separator" => {
+                        ui.separator();
+                    }
+                    "input" => {
+                        let label = field(item, "label");
+                        if !label.is_empty() {
+                            ui.label(label);
+                        }
+                        let value = values
+                            .entry((plugin.to_owned(), id.clone()))
+                            .or_insert_with(|| field(item, "value"));
+                        let multiline = item
+                            .get("multiline")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        let edit = if multiline {
+                            egui::TextEdit::multiline(value)
+                        } else {
+                            egui::TextEdit::singleline(value)
+                        };
+                        ui.add(
+                            edit.hint_text(field(item, "placeholder"))
+                                .desired_width(f32::INFINITY),
+                        );
+                    }
+                    "button" => {
+                        if ui.button(field(item, "label")).clicked() {
+                            event = Some(json!({ "button": id }));
+                        }
+                    }
+                    "list" => {
+                        let label = field(item, "label");
+                        if !label.is_empty() {
+                            ui.label(label);
+                        }
+                        let entries = item
+                            .get("items")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default();
+                        egui::ScrollArea::vertical()
+                            .id_salt(("plugin list", plugin, &id))
+                            .max_height(200.0)
+                            .show(ui, |ui| {
+                                for (index, entry) in entries.iter().enumerate() {
+                                    let text = entry
+                                        .as_str()
+                                        .map_or_else(|| entry.to_string(), str::to_owned);
+                                    if ui.add(Button::new(text).frame(false)).clicked() {
+                                        event = Some(json!({ "list": id, "index": index }));
+                                    }
+                                }
+                            });
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(mut event) = event {
+                let fields: serde_json::Map<String, Value> = values
+                    .iter()
+                    .filter(|((p, _), _)| p == plugin)
+                    .map(|((_, k), v)| (k.clone(), Value::String(v.clone())))
+                    .collect();
+                event["values"] = Value::Object(fields);
+                actions.push(Action::PluginPanel(plugin.to_owned(), event));
+            }
+        });
+    if !open {
+        values.retain(|(p, _), _| p != plugin);
+        actions.push(Action::ClosePluginPanel(plugin.to_owned()));
+    }
+}
+
+/// Plugins' messages, at the bottom of the window.
+fn notices(ctx: &Context, notices: &[(String, String)]) {
+    Area::new(Id::unique("plugin notices"))
+        .anchor(Align2::CENTER_BOTTOM, egui::vec2(0.0, -72.0))
+        .order(Order::Foreground)
+        .interactable(false)
+        .show(ctx, |ui| {
+            for (name, text) in notices {
+                panel().show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.strong(name);
+                        ui.label(text);
+                    });
+                });
+            }
+        });
 }
 
 #[cfg(test)]

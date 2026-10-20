@@ -33,7 +33,7 @@ pub use mindmap::{MindMap, MindMapPart, Node};
 pub use object::{
     Book, Content, Doc, Embed, Filter, FrameData, Group, HAlign, Image, Ink, InkPoint, Link,
     Object, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Sticky, Style, StyleChange, Tag, Tags,
-    Text, TextBox, VAlign,
+    Text, TextBox, VAlign, shape_name,
 };
 pub use pb_geom::ShapeKind;
 pub use reaction::Reaction;
