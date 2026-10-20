@@ -842,6 +842,42 @@ fn shift_draws_straight_ink_and_letting_go_goes_on_freehand() {
 }
 
 #[test]
+fn straight_ink_is_even_and_snaps_level_or_upright() {
+    let doc = Document::new();
+    let pen = |x, y, pressure| Pointer {
+        pressure,
+        ..at(x, y)
+    };
+    let straight = |tools: &mut Tools, end: Point| {
+        tools.set_active(ToolKind::Pen);
+        // A stylus touches down lightly, then presses.
+        let data = ink_of(draw(
+            tools,
+            &doc,
+            &[pen(0.0, 0.0, 0.05), shift(pen(end.x, end.y, 0.6))],
+        ));
+        let ObjectKind::Ink(ink) = &data.kind else {
+            unreachable!()
+        };
+        ink.points_in(data.bounds)
+    };
+    let mut tools = Tools::default();
+    // Nearly level: level, and as wide at its start as at its end.
+    let points = straight(&mut tools, Point::new(100.0, 7.0));
+    let ends: Vec<_> = points.iter().map(|(p, _)| *p).collect();
+    assert_eq!(ends, [Point::ZERO, Point::new(100.0, 0.0)]);
+    for (_, pressure) in &points {
+        assert!((pressure - 0.6).abs() < 0.01, "{points:?}");
+    }
+    // Nearly upright: upright.
+    let points = straight(&mut tools, Point::new(-6.0, 80.0));
+    assert_eq!(points[1].0, Point::new(0.0, 80.0));
+    // Clearly slanted: as drawn.
+    let points = straight(&mut tools, Point::new(50.0, 40.0));
+    assert_eq!(points[1].0, Point::new(50.0, 40.0));
+}
+
+#[test]
 fn ink_width_follows_zoom_and_pressure_is_kept() {
     let doc = Document::new();
     let mut tools = Tools::default();
