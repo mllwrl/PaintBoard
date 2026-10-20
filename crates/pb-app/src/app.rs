@@ -1369,8 +1369,8 @@ impl App {
             }
             Action::CloseContextMenu => self.context_menu = None,
             Action::ToggleShortcuts => self.show_shortcuts = !self.show_shortcuts,
-            Action::StartTimer(minutes) => {
-                let timer = pb_core::Timer::new(minutes * 60_000, pb_platform::now_ms());
+            Action::StartTimer(ms) => {
+                let timer = pb_core::Timer::new(ms, pb_platform::now_ms());
                 self.apply(Command::SetTimer(Some(timer)));
             }
             Action::PauseTimer => {
@@ -5898,7 +5898,11 @@ fn timer_view(timer: &pb_core::Timer, now: i64) -> Option<crate::ui::TimerView> 
     let secs = left.div_ceil(1000);
     let done = left == 0;
     Some(crate::ui::TimerView {
-        text: format!("{}:{:02}", secs / 60, secs % 60),
+        text: if secs >= 3600 {
+            format!("{}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+        } else {
+            format!("{}:{:02}", secs / 60, secs % 60)
+        },
         running: timer.running(),
         done,
         // Blinks twice a second once time is up.
@@ -6236,6 +6240,8 @@ mod tests {
         let up = timer_view(&timer, secs(150) + 100).unwrap();
         assert!(up.done && up.flash);
         assert!(!timer_view(&timer, secs(150) + 600).unwrap().flash);
+        let long = pb_core::Timer::new(2 * 3_600_000, t0);
+        assert_eq!(text(&long, t0), "2:00:00");
         // Long after, it is gone.
         assert_eq!(timer_view(&timer, secs(150 + 11 * 60)), None);
         assert_eq!(timer_tick(&timer, secs(150 + 11 * 60)), None);

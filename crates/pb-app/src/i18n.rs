@@ -588,6 +588,13 @@ const RU: &[(&str, &str)] = &[
     ("Start over", "Сначала"),
     ("Close", "Закрыть"),
     ("Everyone on the board sees it", "Его видят все на доске"),
+    (
+        "Your own time, like 7 or 2:30:",
+        "Своё время, например 7 или 2:30:",
+    ),
+    ("min", "мин"),
+    ("Start", "Запустить"),
+    ("From 1 second to 24 hours", "От 1 секунды до 24 часов"),
     // Layers.
     ("+ Add", "+ Добавить"),
     ("New layer on top", "Новый слой сверху"),

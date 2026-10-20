@@ -168,7 +168,7 @@ pub enum Action {
     ClearVotes,
     /// Opens or closes the voting results.
     ToggleResults,
-    /// Starts a countdown of this many minutes.
+    /// Starts a countdown of this many milliseconds.
     StartTimer(u64),
     /// Pauses the countdown, or runs it on.
     PauseTimer,
@@ -843,6 +843,8 @@ pub struct Ui {
     export_shown: bool,
     /// Name typed for a version to save.
     version_name: String,
+    /// Time typed for the countdown, like `7` or `2:30`.
+    timer_text: String,
     /// Server address and shared link typed in the sharing window.
     server_text: String,
     share_link_text: String,
@@ -888,6 +890,7 @@ impl Ui {
             export: crate::export::Settings::default(),
             export_shown: false,
             version_name: String::new(),
+            timer_text: String::new(),
             server_text: String::new(),
             share_link_text: String::new(),
             share_name: None,
@@ -1002,6 +1005,7 @@ impl Ui {
         let export = &mut self.export;
         let export_shown = &mut self.export_shown;
         let version_name = &mut self.version_name;
+        let timer_text = &mut self.timer_text;
         let server_text = &mut self.server_text;
         let share_link_text = &mut self.share_link_text;
         let share_name = &mut self.share_name;
@@ -1044,7 +1048,7 @@ impl Ui {
             if model.focus {
                 focus_bar(ctx, &mut actions);
             } else if panels.shows(Panel::Menu) {
-                board_menu(ctx, model, version_name, &mut actions);
+                board_menu(ctx, model, (version_name, timer_text), &mut actions);
             }
             if panels.shows(Panel::Tools) {
                 if model.read_only {
@@ -1268,7 +1272,13 @@ fn stored_boards_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action
     });
 }
 
-fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: &mut Vec<Action>) {
+/// The menu bar at the top left; `version_name` and `timer_text` are typed in its menus.
+fn board_menu(
+    ctx: &Context,
+    model: &Model,
+    (version_name, timer_text): (&mut String, &mut String),
+    actions: &mut Vec<Action>,
+) {
     Area::new(Id::unique("board"))
         .fixed_pos(Pos2::new(MARGIN, MARGIN))
         .order(Order::Foreground)
@@ -1360,14 +1370,7 @@ fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: 
                         voting_menu(ui, model.voting, &mut *actions)
                     });
                     ui.menu_button(tr("Timer"), |ui| {
-                        ui.weak(tr("Everyone on the board sees it"));
-                        for minutes in [1, 3, 5, 10, 15, 30] {
-                            let button = Button::new(trf("{} min", &[&minutes]));
-                            if ui.add_enabled(!model.view_only, button).clicked() {
-                                actions.push(Action::StartTimer(minutes));
-                                ui.close();
-                            }
-                        }
+                        timer_menu(ui, model.view_only, timer_text, actions)
                     });
                     if ui
                         .add_enabled(!model.read_only, Button::new(tr("Templates")))
@@ -3337,6 +3340,71 @@ fn results_window(ctx: &Context, results: &[(ObjectId, u32, String)], actions: &
     }
 }
 
+/// The longest countdown that can be set, in milliseconds: a day.
+const TIMER_MAX: u64 = 24 * 3_600_000;
+
+/// A countdown's length typed by someone: minutes (`7`, `1.5`), or minutes and seconds
+/// (`2:30`), or hours, minutes and seconds (`1:00:00`). In milliseconds.
+pub fn parse_timer(text: &str) -> Option<u64> {
+    let text = text.trim().replace(',', ".");
+    let ms = if text.contains(':') {
+        let parts: Vec<u64> = text
+            .split(':')
+            .map(|p| p.trim().parse().ok())
+            .collect::<Option<_>>()?;
+        let (h, m, s) = match parts[..] {
+            [m, s] if s < 60 => (0, m, s),
+            [h, m, s] if m < 60 && s < 60 => (h, m, s),
+            _ => return None,
+        };
+        ((h * 60 + m) * 60 + s).checked_mul(1000)?
+    } else {
+        let minutes: f64 = text.parse().ok()?;
+        if !minutes.is_finite() || minutes < 0.0 {
+            return None;
+        }
+        (minutes * 60_000.0).round().min(u64::MAX as f64) as u64
+    };
+    (1000..=TIMER_MAX).contains(&ms).then_some(ms)
+}
+
+/// Countdowns of a few usual lengths, and one of the length typed in `text`.
+fn timer_menu(ui: &mut egui::Ui, view_only: bool, text: &mut String, actions: &mut Vec<Action>) {
+    ui.weak(tr("Everyone on the board sees it"));
+    for minutes in [1, 3, 5, 10, 15, 30] {
+        let button = Button::new(trf("{} min", &[&minutes]));
+        if ui.add_enabled(!view_only, button).clicked() {
+            actions.push(Action::StartTimer(minutes * 60_000));
+            ui.close();
+        }
+    }
+    ui.separator();
+    ui.weak(tr("Your own time, like 7 or 2:30:"));
+    ui.horizontal(|ui| {
+        let field = ui.add_enabled(
+            !view_only,
+            egui::TextEdit::singleline(text)
+                .desired_width(70.0)
+                .hint_text(tr("min")),
+        );
+        let ms = parse_timer(text);
+        let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let start = ui
+            .add_enabled(!view_only && ms.is_some(), Button::new(tr("Start")))
+            .clicked();
+        if let Some(ms) = ms.filter(|_| start || enter) {
+            actions.push(Action::StartTimer(ms));
+            ui.close();
+        }
+    });
+    if !text.trim().is_empty() && parse_timer(text).is_none() {
+        ui.colored_label(
+            Color32::from_rgb(0xDC, 0x26, 0x26),
+            tr("From 1 second to 24 hours"),
+        );
+    }
+}
+
 /// The countdown at the top middle, under the board menu, with its buttons if it can be
 /// `changed` here.
 fn timer_pill(ctx: &Context, timer: &TimerView, changed: bool, actions: &mut Vec<Action>) {
@@ -4919,6 +4987,17 @@ fn to_color32(color: Rgba) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timer_lengths_are_read_as_people_type_them() {
+        assert_eq!(parse_timer("7"), Some(7 * 60_000));
+        assert_eq!(parse_timer(" 1,5 "), Some(90_000));
+        assert_eq!(parse_timer("2:30"), Some(150_000));
+        assert_eq!(parse_timer("1:00:00"), Some(3_600_000));
+        for bad in ["", "abc", "2:75", "0", "-3", "25:00:00", "1:2:3:4", "inf"] {
+            assert_eq!(parse_timer(bad), None, "{bad}");
+        }
+    }
 
     #[test]
     fn panels_come_back_one_by_one_or_all_at_once() {
