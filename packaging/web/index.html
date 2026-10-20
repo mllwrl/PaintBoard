@@ -31,6 +31,15 @@
         message.textContent = 'PaintBoard could not start: ' + err;
       }
     }
+    // Keep the app in the browser for the next start, also without a connection. The
+    // worker lives at the app's root: above `board/<id>` on pages of shared boards.
+    if ('serviceWorker' in navigator) {
+      const path = location.pathname;
+      const at = path.lastIndexOf('/board/');
+      const root = at >= 0 ? path.slice(0, at + 1) : path.slice(0, path.lastIndexOf('/') + 1);
+      navigator.serviceWorker.register(root + 'sw.js', { scope: root }).catch((err) =>
+        console.warn('PaintBoard is not kept for offline use:', err));
+    }
   </script>
 </body>
 </html>

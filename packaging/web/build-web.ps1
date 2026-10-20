@@ -22,6 +22,11 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'wasm-bindgen failed' }
     Copy-Item -Force 'packaging\web\index.html' $out
     Copy-Item -Force 'crates\pb-app\assets\icon.png' $out
+    # The service worker keeps this build: its version is the build's own, so browsers
+    # notice a new one.
+    $hash = (Get-FileHash -Algorithm SHA256 (Join-Path $out 'paintboard_bg.wasm')).Hash.Substring(0, 16)
+    $worker = [System.IO.File]::ReadAllText((Join-Path $root 'packaging\web\sw.js'))
+    [System.IO.File]::WriteAllText((Join-Path $out 'sw.js'), $worker.Replace('__VERSION__', $hash.ToLower()))
     # Compressed copies for servers that send them as they are (paintboard-server does):
     # the .wasm shrinks to about a third.
     foreach ($name in 'paintboard_bg.wasm', 'paintboard.js', 'index.html') {
