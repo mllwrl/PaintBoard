@@ -20,6 +20,8 @@ pub struct Metrics {
     /// Requests refused by the limits per address.
     pub limited: AtomicU64,
     pub previews: AtomicU64,
+    /// Sign-in emails sent.
+    pub sign_ins: AtomicU64,
 }
 
 /// Adds one to `counter`.
@@ -31,7 +33,7 @@ impl Metrics {
     /// The text Prometheus reads, with the board count and live rooms known elsewhere.
     pub fn render(&self, boards: u64, rooms: u64) -> String {
         let get = |c: &AtomicU64| c.load(Ordering::Relaxed);
-        let rows: [(&str, &str, &str, u64); 11] = [
+        let rows: [(&str, &str, &str, u64); 12] = [
             ("boards", "gauge", "Boards kept", boards),
             ("rooms", "gauge", "Boards open in memory", rooms),
             (
@@ -87,6 +89,12 @@ impl Metrics {
                 "counter",
                 "Link previews fetched",
                 get(&self.previews),
+            ),
+            (
+                "sign_ins_total",
+                "counter",
+                "Sign-in emails sent",
+                get(&self.sign_ins),
             ),
         ];
         let mut out = String::new();

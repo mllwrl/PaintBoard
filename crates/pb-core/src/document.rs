@@ -163,6 +163,12 @@ mod key {
     pub const GROUP: &str = "group";
 }
 
+/// The name of the board in `doc`, if it was given one: for the server, which keeps
+/// boards as bare CRDT documents.
+pub fn board_title(doc: &LoroDoc) -> Option<String> {
+    get_str(&doc.get_map(key::META), key::TITLE).filter(|t| !t.trim().is_empty())
+}
+
 /// Whether someone who may only comment may write `key` of the root map `map`: exactly
 /// what [`Command::allowed_commenting`](crate::Command::allowed_commenting) commands write
 /// (their own votes, not the voting's settings). The server checks such people's changes
@@ -1389,7 +1395,7 @@ impl Document {
 
     /// The board's name, if it was given one (see [`Command::SetTitle`]).
     pub fn title(&self) -> Option<String> {
-        get_str(&self.doc.get_map(key::META), key::TITLE).filter(|t| !t.trim().is_empty())
+        board_title(&self.doc)
     }
 
     /// What this copy may do (see [`Document::set_role`]).

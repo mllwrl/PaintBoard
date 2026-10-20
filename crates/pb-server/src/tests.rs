@@ -54,12 +54,19 @@ struct Peer {
 
 impl Peer {
     async fn join(addr: &str, board: &str, token: &str, doc: Document) -> Self {
+        Self::join_as(addr, board, token, "", doc).await
+    }
+
+    /// Joins with the account of `session` too.
+    async fn join_as(addr: &str, board: &str, token: &str, session: &str, doc: Document) -> Self {
         let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
             .await
             .unwrap();
+        let mut client = Client::new(board, token, "tester");
+        client.set_session(session);
         let mut peer = Self {
             doc,
-            client: Client::new(board, token, "tester"),
+            client,
             socket,
             events: Vec::new(),
         };
@@ -361,7 +368,7 @@ fn backups_keep_the_newest() {
         std::fs::write(dir.join(day), "old").unwrap();
     }
     let store = Store::in_memory().unwrap();
-    let made = store.create_board().unwrap();
+    let made = store.create_board(None).unwrap();
     let shared = Shared::new(store, None);
     shared.back_up(&dir, 2);
     let mut names: Vec<_> = std::fs::read_dir(&dir)
@@ -379,4 +386,197 @@ fn backups_keep_the_newest() {
     assert!(copy.load(&made.board).unwrap().is_some());
     drop(copy);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A server with accounts whose emails are kept: the server's address and the emails.
+async fn start_with_accounts() -> (
+    String,
+    std::sync::Arc<Shared>,
+    std::sync::Arc<std::sync::Mutex<Vec<crate::mail::Mail>>>,
+) {
+    let mut shared = Shared::new(Store::in_memory().unwrap(), None);
+    let kept = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    std::sync::Arc::get_mut(&mut shared).unwrap().mailer =
+        Some(crate::mail::Mailer::Kept(kept.clone()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let app = router(shared.clone()).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (addr, shared, kept)
+}
+
+/// Any request: the status code and body.
+async fn http(
+    addr: &str,
+    method: &str,
+    path: &str,
+    session: Option<&str>,
+    body: &str,
+) -> (u16, String) {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let auth = session.map_or(String::new(), |s| format!("authorization: Bearer {s}\r\n"));
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nhost: {addr}\r\n{auth}content-type: application/json\r\n\
+         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8_lossy(&response).into_owned();
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    let status = head.split(' ').nth(1).unwrap().parse().unwrap();
+    (status, body.to_owned())
+}
+
+/// Signs `email` in the way a person would: asks, follows the emailed link, confirms.
+async fn sign_in(
+    addr: &str,
+    kept: &std::sync::Mutex<Vec<crate::mail::Mail>>,
+    email: &str,
+) -> String {
+    let (status, body) = http(
+        addr,
+        "POST",
+        "/auth/start",
+        None,
+        &format!(r#"{{"email":"{email}","lang":"ru"}}"#),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (request, code) = (field(&body, "request"), field(&body, "code"));
+    let mail = kept.lock().unwrap().pop().unwrap();
+    assert_eq!(mail.to, email.to_lowercase());
+    assert!(mail.subject.contains(&code), "{}", mail.subject);
+    let link = mail
+        .body
+        .split_whitespace()
+        .find(|w| w.contains("/auth/"))
+        .unwrap()
+        .to_owned();
+    let path = &link[link.find("/auth/").unwrap()..];
+    let poll = format!(r#"{{"request":"{request}"}}"#);
+    assert_eq!(http(addr, "POST", "/auth/poll", None, &poll).await.0, 202);
+    let (status, page) = http(addr, "GET", path, None, "").await;
+    assert_eq!(status, 200);
+    assert!(page.contains(&code) && page.contains("<form"), "{page}");
+    assert_eq!(http(addr, "POST", path, None, "").await.0, 200);
+    let (status, body) = http(addr, "POST", "/auth/poll", None, &poll).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(http(addr, "POST", "/auth/poll", None, &poll).await.0, 410);
+    // The link is used up with the sign-in.
+    assert_eq!(http(addr, "POST", path, None, "").await.0, 410);
+    field(&body, "session")
+}
+
+#[tokio::test]
+async fn accounts_sign_in_by_email_and_own_boards() {
+    let (addr, shared, kept) = start_with_accounts().await;
+    let ann = sign_in(&addr, &kept, "Ann@Example.com").await;
+    let (status, body) = http(&addr, "GET", "/me", Some(&ann), "").await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains(r#""email":"ann@example.com""#) && body.contains(r#""boards":[]"#),
+        "{body}"
+    );
+    assert_eq!(http(&addr, "GET", "/me", Some("forged"), "").await.0, 401);
+    assert_eq!(http(&addr, "GET", "/me", None, "").await.0, 401);
+
+    // A board made while signed in is the account's: it opens without a link.
+    let (status, made) = http(&addr, "POST", "/boards", Some(&ann), "").await;
+    assert_eq!(status, 200, "{made}");
+    let board = field(&made, "board");
+    let mut a = Peer::join_as(&addr, &board, "", &ann, doc(1)).await;
+    a.pump().await;
+    assert_eq!(a.client.joined(), Some(Role::Edit));
+    a.doc.apply(Command::SetTitle("Plans".into())).unwrap();
+    a.pump().await;
+    shared.save_all();
+    let (_, body) = http(&addr, "GET", "/me", Some(&ann), "").await;
+    assert!(
+        body.contains(r#""title":"Plans""#) && body.contains(r#""role":"owner""#),
+        "{body}"
+    );
+
+    // The owner lets Bob comment; Bob hears of it by email and finds the board in his list.
+    let path = format!("/boards/{board}/members");
+    let (status, _) = http(
+        &addr,
+        "POST",
+        &path,
+        Some(&ann),
+        r#"{"email":"bob@example.com","role":"comment"}"#,
+    )
+    .await;
+    assert_eq!(status, 204);
+    let invite = kept.lock().unwrap().pop().unwrap();
+    assert_eq!(invite.to, "bob@example.com");
+    assert!(
+        invite.body.contains(&format!("/board/{board}")),
+        "{}",
+        invite.body
+    );
+    let bob = sign_in(&addr, &kept, "bob@example.com").await;
+    let (_, body) = http(&addr, "GET", "/me", Some(&bob), "").await;
+    assert!(
+        body.contains(r#""role":"comment""#) && body.contains(&board),
+        "{body}"
+    );
+    let mut b = Peer::join_as(&addr, &board, "", &bob, doc(2)).await;
+    b.pump().await;
+    assert_eq!(b.client.joined(), Some(Role::Comment));
+    // A link gives more if it allows more.
+    let mut b2 = Peer::join_as(&addr, &board, &field(&made, "edit"), &bob, doc(3)).await;
+    b2.pump().await;
+    assert_eq!(b2.client.joined(), Some(Role::Edit));
+    // Only the owner manages the board.
+    assert_eq!(http(&addr, "GET", &path, Some(&bob), "").await.0, 403);
+    let (status, members) = http(&addr, "GET", &path, Some(&ann), "").await;
+    assert_eq!(status, 200);
+    assert!(
+        members.contains("bob@example.com") && members.contains(r#""role":"owner""#),
+        "{members}"
+    );
+    // Signed out, the account gives nothing.
+    assert_eq!(
+        http(&addr, "POST", "/auth/logout", Some(&bob), "").await.0,
+        204
+    );
+    let mut out = Peer::join_as(&addr, &board, "", &bob, doc(4)).await;
+    out.pump().await;
+    assert_eq!(out.client.joined(), None);
+
+    // A new edit link: the old one stops working.
+    let links = format!("/boards/{board}/links");
+    let (status, body) = http(&addr, "POST", &links, Some(&ann), r#"{"role":"edit"}"#).await;
+    assert_eq!(status, 200, "{body}");
+    let mut old = Peer::join(&addr, &board, &field(&made, "edit"), doc(5)).await;
+    old.pump().await;
+    assert_eq!(old.client.joined(), None);
+    let mut new = Peer::join(&addr, &board, &field(&body, "token"), doc(6)).await;
+    new.pump().await;
+    assert_eq!(new.client.joined(), Some(Role::Edit));
+
+    // Deleting the account deletes its boards, and those on them are let go.
+    assert_eq!(http(&addr, "DELETE", "/me", Some(&ann), "").await.0, 204);
+    a.pump().await;
+    assert!(
+        a.events
+            .iter()
+            .any(|e| matches!(e, Event::Error(t) if t.contains("deleted")))
+    );
+    assert_eq!(http(&addr, "GET", "/me", Some(&ann), "").await.0, 401);
+    let mut late = Peer::join(&addr, &board, &field(&body, "token"), doc(7)).await;
+    late.pump().await;
+    assert_eq!(late.client.joined(), None);
+}
+
+#[tokio::test]
+async fn servers_without_mail_have_no_accounts() {
+    let (addr, _) = start(None).await;
+    let (status, _) = http(&addr, "POST", "/auth/start", None, r#"{"email":"a@b.cd"}"#).await;
+    assert_eq!(status, 404);
+    // A session given anyway is ignored, not refused.
+    let (status, _) = http(&addr, "POST", "/boards", Some("whatever"), "").await;
+    assert_eq!(status, 200);
 }

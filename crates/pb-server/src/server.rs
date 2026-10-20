@@ -78,6 +78,10 @@ pub struct Shared {
     /// Counts for monitoring, served at `/metrics` when `serve_metrics`.
     pub metrics: crate::metrics::Metrics,
     pub serve_metrics: bool,
+    /// Sends emails; accounts exist only with it.
+    pub mailer: Option<crate::mail::Mailer>,
+    /// `PB_PUBLIC_URL`: where the server is seen from outside, for links in emails.
+    pub public_url: Option<String>,
 }
 
 /// A board in memory and the connections to it.
@@ -86,6 +90,8 @@ struct Live {
     senders: HashMap<ClientId, mpsc::UnboundedSender<Message>>,
     /// Pictures already in the database.
     saved_assets: HashSet<AssetId>,
+    /// Deleted from the database: never written again.
+    deleted: bool,
 }
 
 impl Shared {
@@ -110,7 +116,28 @@ impl Shared {
             limits: crate::limits::Limits::default(),
             metrics: crate::metrics::Metrics::default(),
             serve_metrics: false,
+            mailer: None,
+            public_url: None,
         })
+    }
+
+    /// The database, for a moment.
+    pub fn store(&self) -> std::sync::MutexGuard<'_, Store> {
+        self.store.lock().expect("store lock")
+    }
+
+    /// A board was deleted: everyone on it is disconnected and it is not written again.
+    pub fn close_board(&self, board: &str) {
+        let live = self.rooms.lock().expect("rooms lock").remove(board);
+        if let Some(live) = live {
+            let mut live = live.lock().expect("room lock");
+            live.deleted = true;
+            for sender in live.senders.values() {
+                let _ = sender.send(Message::Error("the board was deleted".into()));
+            }
+            // Without their senders the connections end.
+            live.senders.clear();
+        }
     }
 
     /// The board in memory, loaded from the database if needed.
@@ -133,6 +160,7 @@ impl Shared {
             room,
             senders: HashMap::new(),
             saved_assets,
+            deleted: false,
         }));
         rooms.insert(board.to_owned(), live.clone());
         Ok(live)
@@ -140,7 +168,7 @@ impl Shared {
 
     /// Writes `live` if it changed.
     fn save(&self, board: &str, live: &mut Live) {
-        if !live.room.take_changed() {
+        if !live.room.take_changed() || live.deleted {
             return;
         }
         let snapshot = live.room.snapshot();
@@ -151,11 +179,12 @@ impl Shared {
             .filter_map(|id| Some((id, live.room.asset(id)?.clone())))
             .collect();
         let assets: Vec<(AssetId, &[u8])> = new.iter().map(|(id, b)| (*id, &**b)).collect();
-        let saved = self
-            .store
-            .lock()
-            .expect("store lock")
-            .save(board, &snapshot, &assets);
+        let saved = self.store.lock().expect("store lock").save(
+            board,
+            &snapshot,
+            live.room.title().as_deref(),
+            &assets,
+        );
         match saved {
             Ok(()) => live.saved_assets.extend(new.iter().map(|(id, _)| *id)),
             Err(err) => log::error!("could not save board {board}: {err}"),
@@ -230,6 +259,7 @@ impl Shared {
 
 pub fn router(shared: Arc<Shared>) -> Router {
     Router::new()
+        .merge(crate::accounts::routes())
         .route("/health", get(|| async { "ok" }))
         .route("/boards", post(create_board).options(allow_other_sites))
         .route("/ws", get(connect))
@@ -309,16 +339,20 @@ async fn web_file(State(shared): State<Arc<Shared>>, headers: HeaderMap, name: S
 }
 
 /// The web version may be served from another site than the server: let browsers ask.
-fn cors(mut response: Response) -> Response {
+/// Accounts are sent as `Authorization` headers, never cookies, so this lets no other
+/// site act as someone.
+pub fn cors(mut response: Response) -> Response {
     let headers = response.headers_mut();
     headers.insert("access-control-allow-origin", "*".parse().expect("valid"));
     headers.insert(
         "access-control-allow-methods",
-        "POST".parse().expect("valid"),
+        "GET, POST, DELETE".parse().expect("valid"),
     );
     headers.insert(
         "access-control-allow-headers",
-        "x-create-key".parse().expect("valid"),
+        "x-create-key, authorization, content-type"
+            .parse()
+            .expect("valid"),
     );
     response
 }
@@ -355,7 +389,7 @@ async fn preview(
     })
 }
 
-async fn allow_other_sites() -> Response {
+pub async fn allow_other_sites() -> Response {
     cors(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -376,7 +410,7 @@ async fn create_board(
     cors(make_board(&shared, &headers))
 }
 
-fn too_many(shared: &Shared, why: &'static str) -> Response {
+pub fn too_many(shared: &Shared, why: &'static str) -> Response {
     bump(&shared.metrics.limited);
     (StatusCode::TOO_MANY_REQUESTS, why).into_response()
 }
@@ -411,6 +445,21 @@ fn make_board(shared: &Shared, headers: &HeaderMap) -> Response {
         }
     }
     let store = shared.store.lock().expect("store lock");
+    // Made while signed in, the board is the account's.
+    let owner = match crate::accounts::session_of(headers) {
+        Some(session) if shared.mailer.is_some() => match store.session_user(session) {
+            Ok(Some(email)) => Some(email),
+            Ok(None) => {
+                return (StatusCode::UNAUTHORIZED, "signed out: sign in again").into_response();
+            }
+            Err(err) => {
+                log::error!("session check failed: {err}");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "could not make a board")
+                    .into_response();
+            }
+        },
+        _ => None,
+    };
     if let Some(max) = shared.max_boards
         && store.board_count().unwrap_or(0) >= max
     {
@@ -420,7 +469,7 @@ fn make_board(shared: &Shared, headers: &HeaderMap) -> Response {
         )
             .into_response();
     }
-    let made = store.create_board();
+    let made = store.create_board(owner.as_deref());
     drop(store);
     match made {
         Ok(new) => {
@@ -491,7 +540,7 @@ async fn serve(mut socket: WebSocket, shared: Arc<Shared>) {
         protocol,
         board,
         token,
-        session: _,
+        session,
         name,
         version,
         assets,
@@ -507,11 +556,23 @@ async fn serve(mut socket: WebSocket, shared: Arc<Shared>) {
         )
         .await;
     }
-    let access = shared
-        .store
-        .lock()
-        .expect("store lock")
-        .access(&board, &token);
+    // The link's right or the account's, whichever is more.
+    let access = {
+        let store = shared.store();
+        let by_link = if token.is_empty() {
+            Ok(None)
+        } else {
+            store.access(&board, &token)
+        };
+        let by_account = match store.session_user(&session) {
+            Ok(Some(email)) if shared.mailer.is_some() => {
+                store.membership(&board, &email).map(|m| m.map(|m| m.role))
+            }
+            Ok(_) => Ok(None),
+            Err(err) => Err(err),
+        };
+        by_link.and_then(|l| by_account.map(|a| l.max(a)))
+    };
     let role = match access {
         Ok(Some(role)) => role,
         Ok(None) => return refuse(&shared, socket, "no such board, or the link is wrong").await,

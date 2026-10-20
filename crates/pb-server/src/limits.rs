@@ -19,6 +19,8 @@ pub struct Limits {
     pub connections: u32,
     /// Link previews one address may ask for per minute.
     pub previews_per_minute: u32,
+    /// Sign-in emails one address may ask for per hour.
+    pub logins_per_hour: u32,
     /// The server is behind a proxy (Caddy) that puts the client's address last in
     /// `X-Forwarded-For`; otherwise the header could be made up and is ignored.
     pub trust_proxy: bool,
@@ -29,6 +31,7 @@ pub struct Limits {
 struct Seen {
     boards: Window,
     previews: Window,
+    logins: Window,
     connections: u32,
 }
 
@@ -82,6 +85,7 @@ impl Default for Limits {
             boards_per_hour: 20,
             connections: 16,
             previews_per_minute: 20,
+            logins_per_hour: 10,
             trust_proxy: false,
             seen: Arc::default(),
         }
@@ -115,6 +119,14 @@ impl Limits {
         })
     }
 
+    /// Counts a sign-in email asked for by `ip`; false if it asked too many lately.
+    pub fn login(&self, ip: IpAddr) -> bool {
+        let max = self.logins_per_hour;
+        self.with(ip, |seen, now| {
+            seen.logins.take(Duration::from_secs(3600), max, now)
+        })
+    }
+
     /// Counts a link preview asked by `ip`; false if it asked too many lately.
     pub fn preview(&self, ip: IpAddr) -> bool {
         let max = self.previews_per_minute;
@@ -143,7 +155,12 @@ impl Limits {
         let now = Instant::now();
         let mut seen = self.seen.lock().expect("limits lock");
         if seen.len() >= REMEMBERED && !seen.contains_key(&ip) {
-            seen.retain(|_, s| s.connections > 0 || s.boards.recent(now) || s.previews.recent(now));
+            seen.retain(|_, s| {
+                s.connections > 0
+                    || s.boards.recent(now)
+                    || s.previews.recent(now)
+                    || s.logins.recent(now)
+            });
         }
         f(seen.entry(ip).or_default(), now)
     }

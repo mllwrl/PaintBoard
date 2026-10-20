@@ -77,6 +77,11 @@ impl Room {
             .expect("a snapshot of a loaded document")
     }
 
+    /// The board's name, if it has one.
+    pub fn title(&self) -> Option<String> {
+        pb_core::board_title(&self.doc)
+    }
+
     pub fn asset(&self, id: AssetId) -> Option<&Arc<[u8]>> {
         self.assets.get(&id)
     }
