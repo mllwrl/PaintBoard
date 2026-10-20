@@ -2,13 +2,14 @@
 //! `GET /ws`, where the first message is the client's `Hello`.
 
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Router;
 use axum::extract::ws::{self, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
@@ -71,6 +72,8 @@ pub struct Shared {
     pub max_boards: Option<usize>,
     /// Link previews for the web version, when the server makes them.
     pub previews: Option<crate::preview::Previews>,
+    /// What one address may do.
+    pub limits: crate::limits::Limits,
 }
 
 /// A board in memory and the connections to it.
@@ -100,6 +103,7 @@ impl Shared {
             web,
             max_boards: None,
             previews: None,
+            limits: crate::limits::Limits::default(),
         })
     }
 
@@ -315,11 +319,16 @@ fn cors(mut response: Response) -> Response {
 /// The head of a web page for a link preview: `GET /preview?url=<address>`.
 async fn preview(
     State(shared): State<Arc<Shared>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     axum::extract::Query(query): axum::extract::Query<HashMap<String, String>>,
 ) -> Response {
     let Some(previews) = &shared.previews else {
         return cors((StatusCode::NOT_FOUND, "this server does not make previews").into_response());
     };
+    if !shared.limits.preview(shared.limits.client(peer, &headers)) {
+        return cors(too_many("too many previews, try again in a minute"));
+    }
     let Some(url) = query.get("url") else {
         return cors((StatusCode::BAD_REQUEST, "which page?").into_response());
     };
@@ -337,8 +346,22 @@ async fn allow_other_sites() -> Response {
     cors(StatusCode::NO_CONTENT.into_response())
 }
 
-async fn create_board(State(shared): State<Arc<Shared>>, headers: HeaderMap) -> Response {
+async fn create_board(
+    State(shared): State<Arc<Shared>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if !shared
+        .limits
+        .make_board(shared.limits.client(peer, &headers))
+    {
+        return cors(too_many("too many boards made from here, try again later"));
+    }
     cors(make_board(&shared, &headers))
+}
+
+fn too_many(why: &'static str) -> Response {
+    (StatusCode::TOO_MANY_REQUESTS, why).into_response()
 }
 
 fn make_board(shared: &Shared, headers: &HeaderMap) -> Response {
@@ -377,10 +400,21 @@ fn make_board(shared: &Shared, headers: &HeaderMap) -> Response {
     }
 }
 
-async fn connect(State(shared): State<Arc<Shared>>, upgrade: WebSocketUpgrade) -> Response {
+async fn connect(
+    State(shared): State<Arc<Shared>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    let Some(counted) = shared.limits.connect(shared.limits.client(peer, &headers)) else {
+        return too_many("too many connections from here");
+    };
     upgrade
         .max_message_size(MAX_ASSET + (1 << 20))
-        .on_upgrade(move |socket| serve(socket, shared))
+        .on_upgrade(move |socket| async move {
+            serve(socket, shared).await;
+            drop(counted);
+        })
 }
 
 async fn send(socket: &mut WebSocket, message: &Message) -> bool {

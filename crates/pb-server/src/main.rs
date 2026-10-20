@@ -9,11 +9,15 @@
 //!
 //! - `PB_MAX_BOARDS`: the most boards the server keeps (no limit if unset);
 //! - `PB_BACKUP`: a folder for a daily copy of the database (the newest 7 are kept);
+//! - `PB_TRUST_PROXY`: set to `1` behind a proxy (Caddy) that puts the client's address
+//!   in `X-Forwarded-For`, so limits per address count clients, not the proxy;
 //! - `PB_PREVIEWS`: if set to `1`, the server fetches the heads of web pages for link
 //!   previews in the web version (see `preview`).
 //!
 //! Put it behind a proxy with TLS (e.g. Caddy) so links work over `wss://`.
 
+#[cfg(not(target_arch = "wasm32"))]
+mod limits;
 #[cfg(not(target_arch = "wasm32"))]
 mod preview;
 #[cfg(not(target_arch = "wasm32"))]
@@ -52,6 +56,12 @@ async fn main() {
             .expect("not shared yet")
             .max_boards = Some(max);
     }
+    if std::env::var("PB_TRUST_PROXY").is_ok_and(|v| v == "1") {
+        std::sync::Arc::get_mut(&mut shared)
+            .expect("not shared yet")
+            .limits
+            .trust_proxy = true;
+    }
     if std::env::var("PB_PREVIEWS").is_ok_and(|v| v == "1") {
         std::sync::Arc::get_mut(&mut shared)
             .expect("not shared yet")
@@ -86,7 +96,8 @@ async fn main() {
         }
     };
     log::info!("listening on {addr}, boards in {}", db.display());
-    let app = server::router(shared.clone());
+    let app = server::router(shared.clone())
+        .into_make_service_with_connect_info::<std::net::SocketAddr>();
     let stopped = axum::serve(listener, app).with_graceful_shutdown(async {
         let _ = tokio::signal::ctrl_c().await;
         log::info!("stopping");

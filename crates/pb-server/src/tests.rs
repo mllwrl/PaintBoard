@@ -19,7 +19,7 @@ async fn start(create_key: Option<&str>) -> (String, std::sync::Arc<Shared>) {
     let shared = Shared::new(Store::in_memory().unwrap(), create_key.map(Into::into));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
-    let app = router(shared.clone());
+    let app = router(shared.clone()).into_make_service_with_connect_info::<std::net::SocketAddr>();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (addr, shared)
 }
@@ -235,7 +235,8 @@ async fn links_open_the_web_version() {
     let shared = Shared::with_web(Store::in_memory().unwrap(), None, Some(web.clone()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
-    tokio::spawn(async move { axum::serve(listener, router(shared)).await.unwrap() });
+    let app = router(shared).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
     assert_eq!(get_page(&addr, "/").await.1, "the page");
     assert_eq!(get_page(&addr, "/board/a1b2?key=c3").await.1, "the page");
@@ -293,9 +294,26 @@ async fn the_number_of_boards_can_be_limited() {
     std::sync::Arc::get_mut(&mut shared).unwrap().max_boards = Some(1);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
-    tokio::spawn(async move { axum::serve(listener, router(shared)).await.unwrap() });
+    let app = router(shared).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     assert!(make_board(&addr, None).await.0.contains("200"));
     assert!(make_board(&addr, None).await.0.contains("507"));
+}
+
+#[tokio::test]
+async fn one_address_makes_only_so_many_boards() {
+    let mut shared = Shared::new(Store::in_memory().unwrap(), None);
+    std::sync::Arc::get_mut(&mut shared)
+        .unwrap()
+        .limits
+        .boards_per_hour = 2;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let app = router(shared).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    assert!(make_board(&addr, None).await.0.contains("200"));
+    assert!(make_board(&addr, None).await.0.contains("200"));
+    assert!(make_board(&addr, None).await.0.contains("429"));
 }
 
 #[test]
