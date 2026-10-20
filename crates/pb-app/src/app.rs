@@ -4102,7 +4102,7 @@ impl App {
         };
         let objects = match template.make {
             crate::templates::Make::Mermaid(source) => {
-                if let Err(err) = self.insert_diagram(source) {
+                if let Err(err) = self.insert_diagram(&source(crate::i18n::lang())) {
                     log::error!("template {}: {err}", template.name);
                 }
                 return;

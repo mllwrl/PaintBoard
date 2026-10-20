@@ -565,7 +565,7 @@ mod tests {
     use super::*;
 
     /// A board of every template built in code, side by side.
-    fn template_board() -> Document {
+    fn template_board(lang: crate::i18n::Lang) -> Document {
         use crate::templates::{Builder, Make, TEMPLATES};
         let mut doc = Document::new();
         let mut engine = pb_text::TextEngine::new();
@@ -574,7 +574,7 @@ mod tests {
             let Make::Objects(make) = template.make else {
                 continue;
             };
-            let mut b = Builder::new(&doc, &mut engine);
+            let mut b = Builder::new(&doc, &mut engine).in_lang(lang);
             make(&mut b);
             let items = b.finish(pb_geom::kurbo::Point::new(x, 0.0));
             doc.apply(pb_core::Command::Create(items)).unwrap();
@@ -599,7 +599,13 @@ mod tests {
 
     #[test]
     fn templates_export_as_svg_and_vector_pdf() {
-        let doc = template_board();
+        for lang in [crate::i18n::Lang::En, crate::i18n::Lang::Ru] {
+            templates_export_in(lang);
+        }
+    }
+
+    fn templates_export_in(lang: crate::i18n::Lang) {
+        let doc = template_board(lang);
         let svg = String::from_utf8(vector(&doc, Scope::Board, Format::Svg)).unwrap();
         assert!(svg.starts_with("<?xml"));
         assert!(svg.trim_end().ends_with("</svg>"));
@@ -621,7 +627,7 @@ mod tests {
     #[ignore = "writes files, run by hand"]
     fn write_template_board() {
         let dir = std::path::PathBuf::from(std::env::var("PB_VECTOR_OUT").unwrap());
-        let doc = template_board();
+        let doc = template_board(crate::i18n::Lang::Ru);
         let svg = vector(&doc, Scope::Board, Format::Svg);
         std::fs::write(dir.join("templates.svg"), &svg).unwrap();
         let drawn = pb_io::svg::draw(&svg, None).unwrap();

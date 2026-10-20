@@ -10,6 +10,8 @@ use pb_core::{
 use pb_geom::kurbo::{Rect, Size, Vec2};
 use pb_text::TextEngine;
 
+use crate::i18n::{Lang, tr_in};
+
 /// A template: what it is called, what it is for, and how it is made.
 pub struct Template {
     pub name: &'static str,
@@ -21,8 +23,8 @@ pub struct Template {
 pub enum Make {
     /// Objects built in code.
     Objects(fn(&mut Builder)),
-    /// A Mermaid flowchart (see `pb_io::mermaid`).
-    Mermaid(&'static str),
+    /// A Mermaid flowchart (see `pb_io::mermaid`), its labels in the given language.
+    Mermaid(fn(Lang) -> String),
 }
 
 pub const TEMPLATES: [Template; 9] = [
@@ -69,9 +71,7 @@ pub const TEMPLATES: [Template; 9] = [
     Template {
         name: "Flowchart",
         description: "Start, steps, a decision and the end, joined by arrows",
-        make: Make::Mermaid(
-            "flowchart TD\n    A([Start]) --> B[First step]\n    B --> C{Decision?}\n    C -->|yes| D[Do this]\n    C -->|no| E[Do that]\n    D --> F([End])\n    E --> F\n",
-        ),
+        make: Make::Mermaid(flowchart),
     },
 ];
 
@@ -92,15 +92,31 @@ pub struct Builder<'a> {
     doc: &'a Document,
     engine: &'a mut TextEngine,
     items: Vec<ObjectData>,
+    /// The language of the texts put on the board.
+    lang: Lang,
 }
 
 impl<'a> Builder<'a> {
+    /// A builder putting texts on the board in the interface's language.
     pub fn new(doc: &'a Document, engine: &'a mut TextEngine) -> Self {
         Self {
             doc,
             engine,
             items: Vec::new(),
+            lang: crate::i18n::lang(),
         }
+    }
+
+    /// Puts the texts on the board in `lang` instead.
+    #[cfg(test)]
+    pub fn in_lang(mut self, lang: Lang) -> Self {
+        self.lang = lang;
+        self
+    }
+
+    /// `en` in the builder's language.
+    fn tr(&self, en: &'static str) -> &'static str {
+        tr_in(self.lang, en)
     }
 
     /// The objects made, frames first, centered on `center`.
@@ -183,11 +199,15 @@ impl<'a> Builder<'a> {
 
     /// A text object with its top left at (`x`, `y`).
     fn heading(&mut self, x: f64, y: f64, text: &str, size: f64) {
-        let layout = self.engine.layout(text, size, None);
+        // Measured bold, as it is drawn, so that it stays on one line.
+        let spans = bold(text);
+        let layout =
+            self.engine
+                .layout_aligned(text, &spans, size, None, pb_text::TextAlign::Start);
         self.push(
             ObjectKind::Text(Text {
                 text: text.into(),
-                spans: bold(text),
+                spans,
                 size,
             }),
             Rect::from_origin_size((x, y), (layout.width, layout.height)),
@@ -259,13 +279,13 @@ fn swot(b: &mut Builder) {
         0.0,
         2.0 * w + 3.0 * gap,
         2.0 * h + 3.0 * gap,
-        "SWOT analysis",
+        b.tr("SWOT analysis"),
     );
     let squares = [
-        ("Strengths", GREEN, "What we do well"),
-        ("Weaknesses", PINK, "Where we fall short"),
-        ("Opportunities", BLUE, "Chances to grow"),
-        ("Threats", ORANGE, "What could hurt us"),
+        (b.tr("Strengths"), GREEN, b.tr("What we do well")),
+        (b.tr("Weaknesses"), PINK, b.tr("Where we fall short")),
+        (b.tr("Opportunities"), BLUE, b.tr("Chances to grow")),
+        (b.tr("Threats"), ORANGE, b.tr("What could hurt us")),
     ];
     for (i, (title, color, hint)) in squares.into_iter().enumerate() {
         let x = gap + (i % 2) as f64 * (w + gap);
@@ -282,23 +302,23 @@ fn retro(b: &mut Builder) {
         0.0,
         3.0 * w + 4.0 * gap,
         h + 2.0 * gap,
-        "Retrospective",
+        b.tr("Retrospective"),
     );
     let columns = [
         (
-            "What went well",
+            b.tr("What went well"),
             GREEN,
-            ["A win worth keeping", "Someone to thank"],
+            [b.tr("A win worth keeping"), b.tr("Someone to thank")],
         ),
         (
-            "What to improve",
+            b.tr("What to improve"),
             PINK,
-            ["Something that slowed us", "A surprise"],
+            [b.tr("Something that slowed us"), b.tr("A surprise")],
         ),
         (
-            "Actions",
+            b.tr("Actions"),
             BLUE,
-            ["One thing to try", "Who does it, by when"],
+            [b.tr("One thing to try"), b.tr("Who does it, by when")],
         ),
     ];
     for (i, (title, color, notes)) in columns.into_iter().enumerate() {
@@ -311,12 +331,13 @@ fn retro(b: &mut Builder) {
 }
 
 fn kanban(b: &mut Builder) {
-    let mut board = Kanban::starter(|| b.doc.new_line_id());
+    let titles = [b.tr("To do"), b.tr("In progress"), b.tr("Done")];
+    let mut board = Kanban::new(&titles, || b.doc.new_line_id());
     let cards = [
-        (0, "Plan the next release"),
-        (0, "Write the docs"),
-        (1, "Fix the login bug"),
-        (2, "Set up the project"),
+        (0, b.tr("Plan the next release")),
+        (0, b.tr("Write the docs")),
+        (1, b.tr("Fix the login bug")),
+        (2, b.tr("Set up the project")),
     ];
     for (n, (col, text)) in cards.into_iter().enumerate() {
         let card = Card {
@@ -335,42 +356,61 @@ fn kanban(b: &mut Builder) {
         49.0,
     ));
     let frame_h = bounds.height() + 96.0;
-    b.frame(0.0, 0.0, bounds.width() + 96.0, frame_h, "Kanban");
+    b.frame(0.0, 0.0, bounds.width() + 96.0, frame_h, b.tr("Kanban"));
     b.push(ObjectKind::Kanban(board), bounds, Kanban::style());
 }
 
 fn roadmap(b: &mut Builder) {
-    b.frame(0.0, 0.0, 1400.0, 620.0, "Roadmap");
-    b.heading(40.0, 36.0, "Product roadmap", 32.0);
-    b.table(
-        40.0,
-        110.0,
-        1320.0,
-        470.0,
-        &[
-            &["", "Q1", "Q2", "Q3", "Q4"],
-            &["Product", "Research users", "Beta", "Launch", "Grow"],
-            &["Design", "Prototype", "Design system", "", ""],
-            &[
-                "Engineering",
-                "Architecture",
-                "Core features",
-                "Performance",
-                "Scale",
-            ],
-            &["Marketing", "", "Landing page", "Launch campaign", ""],
+    b.frame(0.0, 0.0, 1400.0, 620.0, b.tr("Roadmap"));
+    b.heading(40.0, 36.0, b.tr("Product roadmap"), 32.0);
+    let rows: [[&str; 5]; 5] = [
+        ["", b.tr("Q1"), b.tr("Q2"), b.tr("Q3"), b.tr("Q4")],
+        [
+            b.tr("Product"),
+            b.tr("Research users"),
+            b.tr("Beta"),
+            b.tr("Launch"),
+            b.tr("Grow"),
         ],
-    );
+        [
+            b.tr("Design"),
+            b.tr("Prototype"),
+            b.tr("Design system"),
+            "",
+            "",
+        ],
+        [
+            b.tr("Engineering"),
+            b.tr("Architecture"),
+            b.tr("Core features"),
+            b.tr("Performance"),
+            b.tr("Scale"),
+        ],
+        [
+            b.tr("Marketing"),
+            "",
+            b.tr("Landing page"),
+            b.tr("Launch campaign"),
+            "",
+        ],
+    ];
+    let rows: Vec<&[&str]> = rows.iter().map(|r| &r[..]).collect();
+    b.table(40.0, 110.0, 1320.0, 470.0, &rows);
 }
 
 fn story_map(b: &mut Builder) {
     let col = NOTE + 30.0;
-    let activities = ["Discover", "Sign up", "Use", "Share"];
+    let activities = [
+        b.tr("Discover"),
+        b.tr("Sign up"),
+        b.tr("Use"),
+        b.tr("Share"),
+    ];
     let width = 220.0 + activities.len() as f64 * 2.0 * col + 40.0;
-    b.frame(0.0, 0.0, width, 980.0, "User story map");
-    b.heading(40.0, 40.0, "Activities", 22.0);
-    b.heading(40.0, 220.0, "Steps", 22.0);
-    let releases = ["Release 1", "Release 2"];
+    b.frame(0.0, 0.0, width, 980.0, b.tr("User story map"));
+    b.heading(40.0, 40.0, b.tr("Activities"), 22.0);
+    b.heading(40.0, 220.0, b.tr("Steps"), 22.0);
+    let releases = [b.tr("Release 1"), b.tr("Release 2")];
     for (i, release) in releases.iter().enumerate() {
         let y = 420.0 + i as f64 * 270.0;
         b.area(20.0, y - 20.0, width - 40.0, 250.0, release, GRAY);
@@ -379,37 +419,35 @@ fn story_map(b: &mut Builder) {
         let x = 220.0 + i as f64 * 2.0 * col;
         b.note(x, 40.0, activity, BLUE);
         for s in 0..2 {
-            b.note(x + s as f64 * col, 220.0, "A step", YELLOW);
+            b.note(x + s as f64 * col, 220.0, b.tr("A step"), YELLOW);
         }
-        b.note(x, 450.0, "A story", PINK);
-        b.note(x, 720.0, "A later story", PINK);
+        b.note(x, 450.0, b.tr("A story"), PINK);
+        b.note(x, 720.0, b.tr("A later story"), PINK);
     }
 }
 
 fn journey(b: &mut Builder) {
-    b.frame(0.0, 0.0, 1500.0, 760.0, "Customer journey");
-    b.heading(40.0, 36.0, "Customer journey map", 32.0);
-    b.table(
-        40.0,
-        110.0,
-        1420.0,
-        610.0,
-        &[
-            &[
-                "",
-                "Awareness",
-                "Consideration",
-                "Purchase",
-                "Retention",
-                "Advocacy",
-            ],
-            &["Actions", "", "", "", "", ""],
-            &["Thoughts", "", "", "", "", ""],
-            &["Feelings", "", "", "", "", ""],
-            &["Pain points", "", "", "", "", ""],
-            &["Opportunities", "", "", "", "", ""],
-        ],
-    );
+    b.frame(0.0, 0.0, 1500.0, 760.0, b.tr("Customer journey"));
+    b.heading(40.0, 36.0, b.tr("Customer journey map"), 32.0);
+    let stages = [
+        "",
+        b.tr("Awareness"),
+        b.tr("Consideration"),
+        b.tr("Purchase"),
+        b.tr("Retention"),
+        b.tr("Advocacy"),
+    ];
+    let lanes = [
+        b.tr("Actions"),
+        b.tr("Thoughts"),
+        b.tr("Feelings"),
+        b.tr("Pain points"),
+        b.tr("Opportunities"),
+    ];
+    let lanes: Vec<[&str; 6]> = lanes.iter().map(|l| [l, "", "", "", "", ""]).collect();
+    let mut rows: Vec<&[&str]> = vec![&stages];
+    rows.extend(lanes.iter().map(|r| &r[..]));
+    b.table(40.0, 110.0, 1420.0, 610.0, &rows);
 }
 
 fn brainwriting(b: &mut Builder) {
@@ -422,12 +460,13 @@ fn brainwriting(b: &mut Builder) {
         0.0,
         180.0 + people as f64 * col,
         120.0 + rounds as f64 * row,
-        "Brainwriting 6-3-5",
+        b.tr("Brainwriting 6-3-5"),
     );
     let colors = [YELLOW, ORANGE, PINK, BLUE, GREEN, PURPLE];
+    let person = b.tr("Person {}");
     for (p, &color) in colors.iter().enumerate().take(people) {
         let x = 180.0 + p as f64 * col;
-        b.heading(x, 40.0, &format!("Person {}", p + 1), 20.0);
+        b.heading(x, 40.0, &person.replace("{}", &(p + 1).to_string()), 20.0);
         for r in 0..rounds {
             for i in 0..ideas {
                 let y = 100.0 + r as f64 * row;
@@ -435,11 +474,12 @@ fn brainwriting(b: &mut Builder) {
             }
         }
     }
+    let round = b.tr("Round {}");
     for r in 0..rounds {
         b.heading(
             30.0,
             150.0 + r as f64 * row,
-            &format!("Round {}", r + 1),
+            &round.replace("{}", &(r + 1).to_string()),
             20.0,
         );
     }
@@ -453,16 +493,13 @@ fn mind_map(b: &mut Builder) {
     let probe = MindMap::new("probe", "", Size::ZERO);
     let root_size = probe.font_size(0);
     let root_id: Arc<str> = b.doc.new_line_id().into();
-    let mut map = MindMap::new(
-        root_id.clone(),
-        "Main idea",
-        measure(b.engine, "Main idea", root_size),
-    );
+    let main = b.tr("Main idea");
+    let mut map = MindMap::new(root_id.clone(), main, measure(b.engine, main, root_size));
     let branches = [
-        ("Goals", false),
-        ("Ideas", false),
-        ("Questions", true),
-        ("Next steps", true),
+        (b.tr("Goals"), false),
+        (b.tr("Ideas"), false),
+        (b.tr("Questions"), true),
+        (b.tr("Next steps"), true),
     ];
     for (n, (text, left)) in branches.into_iter().enumerate() {
         let id: Arc<str> = b.doc.new_line_id().into();
@@ -501,6 +538,22 @@ fn mind_map(b: &mut Builder) {
     );
 }
 
+/// The flowchart template's Mermaid source, its labels in `lang`.
+fn flowchart(lang: Lang) -> String {
+    let tr = |en| tr_in(lang, en);
+    format!(
+        "flowchart TD\n    A([{}]) --> B[{}]\n    B --> C{{{}}}\n    C -->|{}| D[{}]\n    C -->|{}| E[{}]\n    D --> F([{}])\n    E --> F\n",
+        tr("Begin"),
+        tr("First step"),
+        tr("Decision?"),
+        tr("yes"),
+        tr("Do this"),
+        tr("no"),
+        tr("Do that"),
+        tr("End"),
+    )
+}
+
 /// `color` mixed halfway with white, for areas behind notes of that color.
 fn lighter(color: Rgba) -> Rgba {
     let [r, g, b, _] = color.to_bytes();
@@ -514,16 +567,39 @@ mod tests {
 
     #[test]
     fn every_template_fits_in_its_frame() {
+        fits_in_its_frame(Lang::En);
+    }
+
+    /// Russian texts are longer; they still fit where they go.
+    #[test]
+    fn every_template_fits_in_russian_too() {
+        fits_in_its_frame(Lang::Ru);
+    }
+
+    #[test]
+    fn russian_templates_put_russian_text_on_the_board() {
+        let ru = flowchart(Lang::Ru);
+        assert!(ru.contains("Начало") && pb_io::mermaid::parse(&ru).is_ok());
+        let doc = Document::new();
+        let mut engine = TextEngine::new();
+        let mut b = Builder::new(&doc, &mut engine).in_lang(Lang::Ru);
+        swot(&mut b);
+        let items = b.finish(pb_geom::kurbo::Point::ZERO);
+        let shapes: Vec<ObjectData> = items.iter().flat_map(Content::shapes).collect();
+        assert!(matches!(&shapes[0].kind, ObjectKind::Frame(f) if &*f.title == "SWOT-анализ"));
+    }
+
+    fn fits_in_its_frame(lang: Lang) {
         let doc = Document::new();
         let mut engine = TextEngine::new();
         for template in &TEMPLATES {
             let Make::Objects(make) = template.make else {
                 assert!(
-                    matches!(template.make, Make::Mermaid(src) if pb_io::mermaid::parse(src).is_ok())
+                    matches!(template.make, Make::Mermaid(src) if pb_io::mermaid::parse(&src(lang)).is_ok())
                 );
                 continue;
             };
-            let mut b = Builder::new(&doc, &mut engine);
+            let mut b = Builder::new(&doc, &mut engine).in_lang(lang);
             make(&mut b);
             let items = b.finish(pb_geom::kurbo::Point::new(500.0, 500.0));
             assert!(!items.is_empty(), "{}", template.name);
@@ -540,6 +616,35 @@ mod tests {
                         d.bounds,
                         frame.bounds
                     );
+                }
+                // The title fits over the frame.
+                let ObjectKind::Frame(data) = &frame.kind else {
+                    unreachable!()
+                };
+                let title = engine.layout(&data.title, 16.0, None);
+                assert!(title.width < frame.bounds.width(), "{}", data.title);
+            }
+            // Texts fit on one line where they go: area titles, table cells.
+            for d in &shapes {
+                match &d.kind {
+                    ObjectKind::Shape(shape) => {
+                        let size = d.style.font_size.unwrap_or(16.0);
+                        let line = engine.layout(&shape.text, size, None);
+                        assert!(line.width < d.bounds.width() - 40.0, "{}", shape.text);
+                    }
+                    ObjectKind::Table(table) => {
+                        for r in 0..table.rows.len() {
+                            for c in 0..table.cols.len() {
+                                let Some(cell) = table.cell(r, c) else {
+                                    continue;
+                                };
+                                let rect = table.cell_rect(d.bounds, r, c).unwrap();
+                                let line = engine.layout(&cell.text, Table::FONT_SIZE, None);
+                                assert!(line.width < rect.width() - 12.0, "{}", cell.text);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             // Centered where asked.
