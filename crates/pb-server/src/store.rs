@@ -42,6 +42,61 @@ fn now() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
+/// The database's layout, one step per version: step `i` takes a database from version `i`
+/// (in `PRAGMA user_version`) to `i + 1`. Never change a step that was released; add one.
+const MIGRATIONS: &[&str] = &[
+    // 1: boards, their pictures and tokens. Databases from before versions had these
+    // already, at version 0: the step leaves them as they are.
+    "CREATE TABLE IF NOT EXISTS boards (
+         id TEXT PRIMARY KEY,
+         created INTEGER NOT NULL,
+         updated INTEGER NOT NULL,
+         snapshot BLOB
+     );
+     CREATE TABLE IF NOT EXISTS assets (
+         board TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+         id BLOB NOT NULL,
+         bytes BLOB NOT NULL,
+         PRIMARY KEY (board, id)
+     );
+     CREATE TABLE IF NOT EXISTS tokens (
+         hash BLOB PRIMARY KEY,
+         board TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+         can_edit INTEGER NOT NULL,
+         created INTEGER NOT NULL
+     );",
+];
+
+/// Brings `db` to the latest layout, each step whole or not at all. A database from a
+/// newer server is refused rather than misread.
+fn migrate(db: &mut Connection) -> rusqlite::Result<()> {
+    migrate_with(db, MIGRATIONS)
+}
+
+/// The layout version `db` is at.
+fn layout(db: &Connection) -> rusqlite::Result<usize> {
+    let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    Ok(usize::try_from(version).unwrap_or(usize::MAX))
+}
+
+fn migrate_with(db: &mut Connection, steps: &[&str]) -> rusqlite::Result<()> {
+    let version = layout(db)?;
+    if version > steps.len() {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "the database is from a newer server (layout {version}, this one knows {})",
+            steps.len()
+        )));
+    }
+    for (i, step) in steps.iter().enumerate().skip(version) {
+        let tx = db.transaction()?;
+        tx.execute_batch(step)?;
+        tx.pragma_update(None, "user_version", (i + 1) as i64)?;
+        tx.commit()?;
+        log::info!("database layout {} ready", i + 1);
+    }
+    Ok(())
+}
+
 impl Store {
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         Self::init(Connection::open(path)?)
@@ -52,29 +107,12 @@ impl Store {
         Self::init(Connection::open_in_memory()?)
     }
 
-    fn init(db: Connection) -> rusqlite::Result<Self> {
+    fn init(mut db: Connection) -> rusqlite::Result<Self> {
         db.execute_batch(
             "PRAGMA journal_mode = WAL;
-             PRAGMA foreign_keys = ON;
-             CREATE TABLE IF NOT EXISTS boards (
-                 id TEXT PRIMARY KEY,
-                 created INTEGER NOT NULL,
-                 updated INTEGER NOT NULL,
-                 snapshot BLOB
-             );
-             CREATE TABLE IF NOT EXISTS assets (
-                 board TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
-                 id BLOB NOT NULL,
-                 bytes BLOB NOT NULL,
-                 PRIMARY KEY (board, id)
-             );
-             CREATE TABLE IF NOT EXISTS tokens (
-                 hash BLOB PRIMARY KEY,
-                 board TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
-                 can_edit INTEGER NOT NULL,
-                 created INTEGER NOT NULL
-             );",
+             PRAGMA foreign_keys = ON;",
         )?;
+        migrate(&mut db)?;
         Ok(Self { db })
     }
 
@@ -191,6 +229,36 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layouts_step_up_and_newer_ones_are_refused() {
+        let mut db = Connection::open_in_memory().unwrap();
+        // A database from before versions: tables there, version 0, a board in it.
+        db.execute_batch(MIGRATIONS[0]).unwrap();
+        db.execute(
+            "INSERT INTO boards (id, created, updated) VALUES ('old', 1, 1)",
+            [],
+        )
+        .unwrap();
+        let next = "ALTER TABLE boards ADD COLUMN name TEXT;";
+        migrate_with(&mut db, &[MIGRATIONS[0], next]).unwrap();
+        let version = layout(&db).unwrap();
+        assert_eq!(version, 2);
+        let kept: String = db
+            .query_row("SELECT id FROM boards WHERE name IS NULL", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(kept, "old");
+        // Run again, nothing happens; a server knowing fewer steps refuses it.
+        migrate_with(&mut db, &[MIGRATIONS[0], next]).unwrap();
+        assert!(migrate_with(&mut db, MIGRATIONS).is_err());
+        // A failing step leaves the database as it was.
+        let mut db = Connection::open_in_memory().unwrap();
+        assert!(migrate_with(&mut db, &[MIGRATIONS[0], "CREATE TABLE x (a); nonsense"]).is_err());
+        let version = layout(&db).unwrap();
+        assert_eq!(version, 1);
+    }
 
     #[test]
     fn tokens_give_their_access_to_their_board_only() {
