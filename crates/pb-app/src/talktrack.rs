@@ -73,13 +73,14 @@ impl Recording {
         });
     }
 
-    /// Stops recording: the talktrack, its voice stored in `doc`'s assets.
+    /// Stops recording: the talktrack by `author`, its voice stored in `doc`'s assets.
     pub fn finish(
         self,
         now: Instant,
         doc: &mut Document,
         id: Arc<str>,
         title: String,
+        author: &str,
     ) -> Talktrack {
         let duration = millis(now.duration_since(self.started));
         let audio = self.mic.map(Recorder::finish).and_then(|clip| {
@@ -89,7 +90,7 @@ impl Recording {
         Talktrack {
             id,
             title: title.into(),
-            author: pb_platform::user_name().into(),
+            author: author.into(),
             created: pb_platform::now_ms(),
             duration,
             audio,

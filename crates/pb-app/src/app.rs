@@ -217,8 +217,8 @@ pub struct App {
     recording: Option<Recording>,
     /// A talktrack being played back.
     playback: Option<Playback>,
-    /// The countdown timer, while shown.
-    timer: Option<Timer>,
+    /// What the board's countdown showed when last drawn.
+    timer_drawn: Option<crate::ui::TimerView>,
     /// The voting results window is open.
     show_results: bool,
     /// The camera gliding to a new place.
@@ -338,7 +338,7 @@ impl App {
             recording: None,
             playback: None,
             camera_glide: None,
-            timer: None,
+            timer_drawn: None,
             show_results: false,
             diagram: None,
             graph: None,
@@ -399,6 +399,10 @@ impl App {
         if self.gpu.is_none() {
             return;
         }
+        self.timer_drawn = self
+            .document
+            .timer()
+            .and_then(|t| timer_view(&t, pb_platform::now_ms()));
         // A read-only board can be looked at and commented on, nothing more.
         if self.document.read_only()
             && !matches!(self.tools.active(), ToolKind::Select | ToolKind::Comment)
@@ -644,6 +648,7 @@ impl App {
             show_shortcuts: self.show_shortcuts,
             hidden: (self.document.hidden_count(), self.document.shows_hidden()),
             read_only: self.document.read_only(),
+            view_only: self.document.view_only(),
             layers: self.layers_view(),
             recording: self
                 .recording
@@ -706,7 +711,7 @@ impl App {
                     .unwrap_or_default();
                 (p.index, p.frames.len(), title)
             }),
-            timer: self.timer.as_ref().map(|t| t.view(Instant::now())),
+            timer: self.timer_drawn.clone(),
             voting: self.document.voting().map(|v| VotingView {
                 open: v.open,
                 limit: v.limit,
@@ -1365,19 +1370,22 @@ impl App {
             Action::CloseContextMenu => self.context_menu = None,
             Action::ToggleShortcuts => self.show_shortcuts = !self.show_shortcuts,
             Action::StartTimer(minutes) => {
-                self.timer = Some(Timer::new(pb_platform::Duration::from_secs(minutes * 60)));
+                let timer = pb_core::Timer::new(minutes * 60_000, pb_platform::now_ms());
+                self.apply(Command::SetTimer(Some(timer)));
             }
             Action::PauseTimer => {
-                if let Some(timer) = &mut self.timer {
-                    timer.toggle(Instant::now());
+                if let Some(timer) = self.document.timer() {
+                    let timer = timer.toggled(pb_platform::now_ms());
+                    self.apply(Command::SetTimer(Some(timer)));
                 }
             }
             Action::ResetTimer => {
-                if let Some(timer) = &mut self.timer {
-                    *timer = Timer::new(timer.duration);
+                if let Some(timer) = self.document.timer() {
+                    let timer = pb_core::Timer::new(timer.duration, pb_platform::now_ms());
+                    self.apply(Command::SetTimer(Some(timer)));
                 }
             }
-            Action::CloseTimer => self.timer = None,
+            Action::CloseTimer => self.apply(Command::SetTimer(None)),
             Action::StartVoting(limit) => {
                 self.finish_editing();
                 self.tools.clear_selection();
@@ -3132,7 +3140,7 @@ impl App {
         };
         let id: Arc<str> = self.document.new_line_id().into();
         let title = trf("Talktrack {}", &[&(self.document.talktracks().len() + 1)]);
-        let track = recording.finish(Instant::now(), &mut self.document, id, title);
+        let track = recording.finish(Instant::now(), &mut self.document, id, title, &self.me);
         self.apply(Command::SaveTalktrack(track));
     }
 
@@ -5466,7 +5474,12 @@ impl ApplicationHandler<UserEvent> for App {
             edit.next_blink(now)
         });
         // A running timer shows each second; a finished one blinks.
-        let timer = self.timer.as_ref().and_then(|t| t.next_tick(now));
+        let timer = self.document.timer();
+        let now_ms = pb_platform::now_ms();
+        if timer.and_then(|t| timer_view(&t, now_ms)) != self.timer_drawn {
+            self.request_redraw();
+        }
+        let timer = timer.and_then(|t| timer_tick(&t, now_ms)).map(|d| now + d);
         // Recording samples the view, and shows each second.
         let viewport = self.viewport();
         let center = self.camera.visible_world_rect(viewport).center();
@@ -5484,15 +5497,12 @@ impl ApplicationHandler<UserEvent> for App {
         if redraw {
             self.request_redraw();
         }
-        if timer.is_some_and(|at| at <= now) {
-            self.request_redraw();
-        }
         let wake = [
             autopan,
             self.session.deadline(),
             ui_repaint.filter(|&at| at > now),
             blink,
-            timer.filter(|&at| at > now),
+            timer,
             sampling,
             self.sharing.as_ref().and_then(|s| s.deadline()),
         ]
@@ -5871,70 +5881,41 @@ impl App {
     }
 }
 
-/// A countdown.
-struct Timer {
-    duration: pb_platform::Duration,
-    /// When it last started running; `None` while paused.
-    started: Option<Instant>,
-    /// Time run before the last start.
-    run: pb_platform::Duration,
+/// A board's countdown that ran out this long ago (milliseconds) is no longer shown, so
+/// a board opened the next day does not blink at once.
+const TIMER_SHOWN_FOR: u64 = 10 * 60_000;
+
+/// What the board's countdown shows at `now` (wall-clock milliseconds); `None` once it ran
+/// out long ago.
+fn timer_view(timer: &pb_core::Timer, now: i64) -> Option<crate::ui::TimerView> {
+    let elapsed = timer.elapsed(now);
+    let over = elapsed.saturating_sub(timer.duration);
+    if over > TIMER_SHOWN_FOR {
+        return None;
+    }
+    let left = timer.left(now);
+    // Rounded up, so it reads 0:00 only when time is up.
+    let secs = left.div_ceil(1000);
+    let done = left == 0;
+    Some(crate::ui::TimerView {
+        text: format!("{}:{:02}", secs / 60, secs % 60),
+        running: timer.running(),
+        done,
+        // Blinks twice a second once time is up.
+        flash: done && over % 1000 < 500,
+    })
 }
 
-impl Timer {
-    /// A countdown of `duration`, running from now.
-    fn new(duration: pb_platform::Duration) -> Self {
-        Self {
-            duration,
-            started: Some(Instant::now()),
-            run: pb_platform::Duration::ZERO,
-        }
+/// How long until the countdown next looks different: the next whole second while
+/// running, the next half second once time is up; `None` while paused or no longer shown.
+fn timer_tick(timer: &pb_core::Timer, now: i64) -> Option<pb_platform::Duration> {
+    timer.started?;
+    let elapsed = timer.elapsed(now);
+    if elapsed.saturating_sub(timer.duration) > TIMER_SHOWN_FOR {
+        return None;
     }
-
-    fn elapsed(&self, now: Instant) -> pb_platform::Duration {
-        self.run
-            + self
-                .started
-                .map_or(pb_platform::Duration::ZERO, |s| now.duration_since(s))
-    }
-
-    /// Pauses it, or runs it on.
-    fn toggle(&mut self, now: Instant) {
-        match self.started.take() {
-            Some(start) => self.run += now.duration_since(start),
-            None => self.started = Some(now),
-        }
-    }
-
-    /// What it shows at `now`.
-    fn view(&self, now: Instant) -> crate::ui::TimerView {
-        let elapsed = self.elapsed(now);
-        let left = self.duration.saturating_sub(elapsed);
-        // Rounded up, so it reads 0:00 only when time is up.
-        let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
-        let done = left.is_zero();
-        let over = elapsed.saturating_sub(self.duration);
-        crate::ui::TimerView {
-            text: format!("{}:{:02}", secs / 60, secs % 60),
-            running: self.started.is_some(),
-            done,
-            // Blinks twice a second once time is up.
-            flash: done && over.subsec_millis() < 500,
-        }
-    }
-
-    /// When it next needs drawing: at the next whole second while running, every half
-    /// second once time is up; `None` while paused.
-    fn next_tick(&self, now: Instant) -> Option<Instant> {
-        self.started?;
-        let elapsed = self.elapsed(now);
-        let step = if elapsed >= self.duration {
-            pb_platform::Duration::from_millis(500)
-        } else {
-            pb_platform::Duration::from_secs(1)
-        };
-        let into = pb_platform::Duration::from_nanos((elapsed.as_nanos() % step.as_nanos()) as u64);
-        Some(now + (step - into))
-    }
+    let step = if elapsed >= timer.duration { 500 } else { 1000 };
+    Some(pb_platform::Duration::from_millis(step - elapsed % step))
 }
 
 /// Margin around a presented frame, in logical pixels.
@@ -6233,32 +6214,31 @@ mod tests {
 
     #[test]
     fn timers_count_down_pause_and_run_out() {
-        use pb_platform::Duration;
-        let t0 = Instant::now();
-        let secs = |s: u64| t0 + Duration::from_secs(s);
-        let mut timer = Timer {
-            duration: Duration::from_secs(90),
-            started: Some(t0),
-            run: Duration::ZERO,
-        };
-        assert_eq!(timer.view(t0).text, "1:30");
-        assert_eq!(timer.view(t0 + Duration::from_millis(500)).text, "1:30");
-        assert_eq!(timer.view(secs(31)).text, "0:59");
+        let t0 = 1_760_000_000_000;
+        let secs = |s: i64| t0 + s * 1000;
+        let text = |timer: &pb_core::Timer, now| timer_view(timer, now).unwrap().text;
+        let timer = pb_core::Timer::new(90_000, t0);
+        assert_eq!(text(&timer, t0), "1:30");
+        assert_eq!(text(&timer, t0 + 500), "1:30");
+        assert_eq!(text(&timer, secs(31)), "0:59");
         // Paused for a minute, it does not move.
-        timer.toggle(secs(31));
-        assert!(!timer.view(secs(91)).running);
-        assert_eq!(timer.view(secs(91)).text, "0:59");
-        assert_eq!(timer.next_tick(secs(91)), None);
-        timer.toggle(secs(91));
-        assert_eq!(timer.view(secs(100)).text, "0:50");
+        let timer = timer.toggled(secs(31));
+        assert!(!timer_view(&timer, secs(91)).unwrap().running);
+        assert_eq!(text(&timer, secs(91)), "0:59");
+        assert_eq!(timer_tick(&timer, secs(91)), None);
+        let timer = timer.toggled(secs(91));
+        assert_eq!(text(&timer, secs(100)), "0:50");
         // Next tick on the next whole second of running time.
         assert_eq!(
-            timer.next_tick(secs(100) + Duration::from_millis(300)),
-            Some(secs(101))
+            timer_tick(&timer, secs(100) + 300),
+            Some(pb_platform::Duration::from_millis(700))
         );
-        let up = timer.view(secs(150) + Duration::from_millis(100));
+        let up = timer_view(&timer, secs(150) + 100).unwrap();
         assert!(up.done && up.flash);
-        assert!(!timer.view(secs(150) + Duration::from_millis(600)).flash);
+        assert!(!timer_view(&timer, secs(150) + 600).unwrap().flash);
+        // Long after, it is gone.
+        assert_eq!(timer_view(&timer, secs(150 + 11 * 60)), None);
+        assert_eq!(timer_tick(&timer, secs(150 + 11 * 60)), None);
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub mod rich;
 pub mod search;
 pub mod table;
 pub mod talktrack;
+pub mod timer;
 pub mod version;
 
 #[cfg(test)]
@@ -37,4 +38,5 @@ pub use reaction::Reaction;
 pub use rich::{Span, Spans, TextMarks};
 pub use table::{Cell, CellRange, Line, Merge, Table};
 pub use talktrack::Talktrack;
+pub use timer::Timer;
 pub use version::Version;

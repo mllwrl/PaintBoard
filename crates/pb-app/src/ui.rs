@@ -444,6 +444,8 @@ pub struct Model<'a> {
     pub hidden: (usize, bool),
     /// The board is read-only: only looking and commenting.
     pub read_only: bool,
+    /// Opened with a link for viewing: nothing can be changed, not even the timer.
+    pub view_only: bool,
     /// The layers panel, while open.
     pub layers: Option<LayersView>,
     /// Recording a talktrack: seconds so far, and whether there is sound.
@@ -567,7 +569,7 @@ pub struct VotingView {
 }
 
 /// What the countdown shows.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TimerView {
     /// Time left, like `4:32`.
     pub text: String,
@@ -1009,7 +1011,7 @@ impl Ui {
                 follow_banner(ctx, banner, &mut actions);
             }
             if let Some(timer) = &model.timer {
-                timer_pill(ctx, timer, &mut actions);
+                timer_pill(ctx, timer, !model.view_only, &mut actions);
             }
             if let Some(voting) = model.voting.filter(|v| v.open) {
                 voting_banner(ctx, voting, &mut actions);
@@ -1358,8 +1360,10 @@ fn board_menu(ctx: &Context, model: &Model, version_name: &mut String, actions: 
                         voting_menu(ui, model.voting, &mut *actions)
                     });
                     ui.menu_button(tr("Timer"), |ui| {
+                        ui.weak(tr("Everyone on the board sees it"));
                         for minutes in [1, 3, 5, 10, 15, 30] {
-                            if ui.button(trf("{} min", &[&minutes])).clicked() {
+                            let button = Button::new(trf("{} min", &[&minutes]));
+                            if ui.add_enabled(!model.view_only, button).clicked() {
                                 actions.push(Action::StartTimer(minutes));
                                 ui.close();
                             }
@@ -3333,8 +3337,9 @@ fn results_window(ctx: &Context, results: &[(ObjectId, u32, String)], actions: &
     }
 }
 
-/// The countdown at the top middle, with its controls.
-fn timer_pill(ctx: &Context, timer: &TimerView, actions: &mut Vec<Action>) {
+/// The countdown at the top middle, under the board menu, with its buttons if it can be
+/// `changed` here.
+fn timer_pill(ctx: &Context, timer: &TimerView, changed: bool, actions: &mut Vec<Action>) {
     let screen = ctx.content_rect();
     let alert = Color32::from_rgb(0xDC, 0x26, 0x26);
     // Under the board menu, which can reach the middle of narrow windows.
@@ -3357,6 +3362,9 @@ fn timer_pill(ctx: &Context, timer: &TimerView, actions: &mut Vec<Action>) {
                         (timer.text.clone(), ui.visuals().strong_text_color())
                     };
                     ui.label(RichText::new(text).size(20.0).color(color).strong());
+                    if !changed {
+                        return;
+                    }
                     if !timer.done {
                         let label = if timer.running {
                             tr("Pause")

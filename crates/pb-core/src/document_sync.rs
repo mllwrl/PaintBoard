@@ -340,6 +340,27 @@ mod tests {
     }
 
     #[test]
+    fn the_timer_reaches_the_others_and_undo_leaves_it() {
+        let mut doc = Document::new();
+        let (mut a, mut b) = two(&doc);
+        let first = rect(&mut a);
+        let timer = crate::Timer::new(300_000, 1_000);
+        a.apply(Command::SetTimer(Some(timer))).unwrap();
+        exchange(&mut a, &mut b);
+        assert_eq!(b.timer(), Some(timer));
+        // Undo takes back the rectangle, not the timer.
+        assert!(a.undo().unwrap());
+        assert!(a.get(first).is_none());
+        assert_eq!(a.timer(), Some(timer));
+        b.apply(Command::SetTimer(None)).unwrap();
+        exchange(&mut a, &mut b);
+        assert_eq!(a.timer(), None);
+        // Allowed on a protected board too.
+        doc.apply(Command::SetReadOnly(true)).unwrap();
+        doc.apply(Command::SetTimer(Some(timer))).unwrap();
+    }
+
+    #[test]
     fn the_board_name_reaches_the_others() {
         let mut doc = Document::new();
         assert_eq!(doc.title(), None);

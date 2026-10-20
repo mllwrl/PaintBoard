@@ -587,6 +587,7 @@ const RU: &[(&str, &str)] = &[
     ("Run the clock on", "Продолжить отсчёт"),
     ("Start over", "Сначала"),
     ("Close", "Закрыть"),
+    ("Everyone on the board sees it", "Его видят все на доске"),
     // Layers.
     ("+ Add", "+ Добавить"),
     ("New layer on top", "Новый слой сверху"),

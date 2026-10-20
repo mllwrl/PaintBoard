@@ -48,6 +48,8 @@ mod key {
     pub const TITLE: &str = "title";
     /// In `META`: the board's background color (`RRGGBBAA` as a number), if not the usual.
     pub const BACKGROUND: &str = "background";
+    /// In `META`: the board's countdown, see `Timer::to_value`.
+    pub const TIMER: &str = "timer";
     pub const OBJECTS: &str = "objects";
     /// Root map of the board's tags: `RRGGBBAA;name` (hex color) by tag id.
     pub const TAGS: &str = "tags";
@@ -1221,6 +1223,15 @@ impl Document {
                     None => meta.delete(key::BACKGROUND)?,
                 }
             }
+            Command::SetTimer(timer) => {
+                let meta = self.doc.get_map(key::META);
+                match timer {
+                    Some(timer) => meta.insert(key::TIMER, timer.to_value())?,
+                    None if meta.get(key::TIMER).is_some() => meta.delete(key::TIMER)?,
+                    None => {}
+                }
+                self.doc.set_next_commit_origin(NOT_UNDONE);
+            }
             Command::SetTitle(title) => {
                 self.doc.get_map(key::META).insert(key::TITLE, &*title)?;
                 self.doc.set_next_commit_origin(NOT_UNDONE);
@@ -1357,6 +1368,11 @@ impl Document {
             Some(ValueOrContainer::Value(LoroValue::I64(v))) => u32::try_from(v).ok().map(Rgba),
             _ => None,
         }
+    }
+
+    /// The board's countdown, if one is set (see [`Command::SetTimer`]).
+    pub fn timer(&self) -> Option<crate::Timer> {
+        crate::Timer::from_value(&get_str(&self.doc.get_map(key::META), key::TIMER)?)
     }
 
     /// The board's name, if it was given one (see [`Command::SetTitle`]).

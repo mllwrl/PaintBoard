@@ -206,6 +206,8 @@ pub enum Command {
     SetReadOnly(bool),
     /// Colors the board's background, or (`None`) gives it the usual one back.
     SetBackground(Option<crate::Rgba>),
+    /// Sets the board's countdown, or removes it with `None`. Undo leaves it alone.
+    SetTimer(Option<crate::Timer>),
     /// Names the board: shown for a shared board, whose file each person names as they
     /// like. Not undoable.
     SetTitle(Arc<str>),
@@ -256,6 +258,7 @@ impl Command {
                 | Self::Vote { .. }
                 | Self::SaveTalktrack(_)
                 | Self::RemoveTalktrack(_)
+                | Self::SetTimer(_)
                 // Reading a book does not change what it says.
                 | Self::TurnPage { .. }
         )
