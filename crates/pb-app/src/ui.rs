@@ -74,6 +74,8 @@ pub enum Action {
     /// Opens or closes the plugins window.
     TogglePlugins,
     InstallPlugin,
+    /// Offers to install the plugin in these files.
+    InstallPluginFiles(Vec<std::path::PathBuf>),
     /// Runs a plugin from its own folder, reloading it as it changes (desktop).
     LoadDevPlugin,
     SetPluginEnabled(String, bool),
@@ -87,7 +89,7 @@ pub enum Action {
     PackPlugin(String),
     /// Puts text on the clipboard (a link to share).
     CopyText(String),
-    /// Opens this board (one kept in the browser).
+    /// Opens this board (one kept in the browser, or a file PaintBoard was started with).
     OpenFile(std::path::PathBuf),
     /// Lets the browser download the board as a file (web only).
     DownloadBoard,

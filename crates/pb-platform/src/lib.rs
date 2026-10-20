@@ -8,6 +8,7 @@ pub mod clipboard;
 pub mod dialog;
 pub mod fs;
 pub mod handwriting;
+pub mod instance;
 pub mod net;
 pub mod web;
 

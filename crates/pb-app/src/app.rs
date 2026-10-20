@@ -99,6 +99,10 @@ pub enum UserEvent {
     DevPluginPicked(PathBuf),
     /// A board file was picked to open (later than asked on the web).
     BoardPicked(PathBuf),
+    /// PaintBoard was started again, with this file to open (or none): this copy opens it
+    /// and comes to the front instead.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    StartedAgain(Option<PathBuf>),
     /// Files were picked to add to the board.
     FilesPicked(Vec<PathBuf>),
     /// Files were dropped on the page at this point (physical pixels; the web only).
@@ -326,6 +330,14 @@ impl App {
             let wake = proxy.clone();
             session.set_waker(move || {
                 let _ = wake.send_event(UserEvent::Saved);
+            });
+        }
+        // Later starts hand their files to this copy.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let proxy = proxy.clone();
+            pb_platform::instance::listen(move |file| {
+                let _ = proxy.send_event(UserEvent::StartedAgain(file));
             });
         }
         let accounts = {
@@ -1429,6 +1441,7 @@ impl App {
                     },
                 );
             }
+            Action::InstallPluginFiles(paths) => self.install_plugin(paths),
             Action::LoadDevPlugin => {
                 let proxy = self.proxy.clone();
                 pb_platform::dialog::pick_files(
@@ -5171,6 +5184,23 @@ impl App {
         }
     }
 
+    /// PaintBoard was started again with `file`: shows the window, then opens the board
+    /// or offers to install the plugin, as when this copy was started with it. That may
+    /// ask something in a window of the system, so it is done after the next frame.
+    fn started_again(&mut self, file: Option<PathBuf>) {
+        if let Some(window) = &self.window {
+            window.set_minimized(false);
+            window.focus_window();
+        }
+        match file {
+            Some(f) if has_extension(&f, pb_plugin::package::EXTENSION) => {
+                self.defer(Action::InstallPluginFiles(vec![f]));
+            }
+            Some(f) => self.defer(Action::OpenFile(f)),
+            None => self.request_redraw(),
+        }
+    }
+
     fn new_board(&mut self) {
         self.finish_editing();
         self.end_style_drag();
@@ -6077,6 +6107,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.request_redraw();
             }
             UserEvent::BoardPicked(path) => self.open_file(path),
+            UserEvent::StartedAgain(file) => self.started_again(file),
             UserEvent::FilesDropped(paths, at) => {
                 let at = self.camera.screen_to_world(at);
                 self.insert_files(&paths, Some(at));
