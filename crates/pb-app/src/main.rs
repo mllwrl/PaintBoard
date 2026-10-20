@@ -10,6 +10,7 @@ mod editing;
 mod export;
 mod i18n;
 mod navigation;
+mod palette;
 mod pictures;
 mod plugin_api;
 mod plugins;

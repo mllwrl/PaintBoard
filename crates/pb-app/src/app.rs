@@ -7,7 +7,7 @@ use pb_core::{
     Style, Text, ZOrder,
 };
 use pb_geom::Camera;
-use pb_geom::kurbo::{Point, Size, Vec2};
+use pb_geom::kurbo::{Point, Rect, Size, Vec2};
 use pb_platform::Instant;
 use pb_platform::{clipboard, dialog, handwriting};
 use pb_render::vello::Scene;
@@ -219,6 +219,8 @@ pub struct App {
     picking_link: Option<ObjectId>,
     /// Searching the board, while the search bar is open.
     search: Option<Search>,
+    /// Objects found for the command palette, while it is open.
+    palette: Option<Vec<(String, Rect)>>,
     /// The right-click menu, where it was opened: on screen (logical pixels) and on the
     /// board.
     context_menu: Option<(Point, Point)>,
@@ -374,6 +376,7 @@ impl App {
             picking_link: None,
             search: None,
             focus_search: false,
+            palette: None,
             context_menu: None,
             show_shortcuts: false,
             show_templates: false,
@@ -898,6 +901,7 @@ impl App {
             thread: self.thread_view(),
             threads: self.thread_list(),
             show_resolved: self.show_resolved,
+            palette: self.palette.clone(),
             search: self.search.as_ref().map(|s| SearchInfo {
                 count: s.hits.len(),
                 current: s.current,
@@ -1796,6 +1800,15 @@ impl App {
             Action::Search(query) => self.search_for(query),
             Action::SearchStep(forward) => self.search_step(forward),
             Action::CloseSearch => self.search = None,
+            Action::TogglePalette => self.toggle_palette(),
+            Action::ClosePalette => self.palette = None,
+            Action::PaletteQuery(query) => {
+                if self.palette.is_some() {
+                    self.palette = Some(self.palette_objects(&query));
+                }
+            }
+            Action::ShowArea(area) => self.show_area(area),
+            Action::ZoomToFit => self.zoom_to_fit(),
             Action::PostComment(text) => self.post_comment(text),
             Action::DeleteComment(comment) => {
                 if let Some(thread) = self.thread_panel.as_ref().and_then(|p| p.thread.clone()) {
@@ -2893,6 +2906,7 @@ impl App {
         self.context_menu = None;
         self.thread_panel = None;
         self.search = None;
+        self.palette = None;
         let doc = match self.document.version_view(&id) {
             Ok(doc) => doc,
             Err(err) => {
@@ -3371,6 +3385,7 @@ impl App {
         self.context_menu = None;
         self.thread_panel = None;
         self.search = None;
+        self.palette = None;
         self.show_templates = false;
         self.show_shortcuts = false;
         // The presentation shows whole frames, and ends where focus mode began.
@@ -3449,6 +3464,7 @@ impl App {
         self.tools.cancel();
         self.context_menu = None;
         self.search = None;
+        self.palette = None;
         // A hair larger, so what was picked keeps its center inside however it rounds.
         let area = area.inflate(1.0, 1.0);
         self.document.set_focus(Some(area));
@@ -3822,6 +3838,115 @@ impl App {
         }
     }
 
+    /// Opens the command palette, or closes it.
+    fn toggle_palette(&mut self) {
+        if self.palette.take().is_none() {
+            self.finish_editing();
+            self.context_menu = None;
+            self.palette = Some(Vec::new());
+        }
+    }
+
+    /// The objects whose text has `query` (two letters or more), for the command palette:
+    /// a line of the text found and where it is. Frames are offered by title already.
+    fn palette_objects(&self, query: &str) -> Vec<(String, Rect)> {
+        /// How many objects the palette offers.
+        const MAX: usize = 5;
+        let query = query.trim().to_lowercase();
+        if query.chars().count() < 2 {
+            return Vec::new();
+        }
+        let mut found: Vec<(String, Rect)> = Vec::new();
+        let mut seen = Vec::new();
+        for hit in pb_core::search::search(&self.document, &query) {
+            let Some(object) = self.document.get(hit.id) else {
+                continue;
+            };
+            if object.data.kind.is_frame() || seen.contains(&hit.id) {
+                continue;
+            }
+            seen.push(hit.id);
+            found.push((self.found_text(&object.data, &query), hit.area.aabb()));
+            if found.len() == MAX {
+                break;
+            }
+        }
+        found
+    }
+
+    /// The line of `data`'s text (or the tag) where `query` (lowercase) is, cut short.
+    fn found_text(&self, data: &ObjectData, query: &str) -> String {
+        let mut texts: Vec<&str> = Vec::new();
+        match &data.kind {
+            ObjectKind::Connector(c) => texts.push(&c.label.text),
+            ObjectKind::Table(table) => {
+                for row in 0..table.rows.len() {
+                    for col in 0..table.cols.len() {
+                        texts.push(table.text(row, col).0);
+                    }
+                }
+            }
+            ObjectKind::Kanban(kanban) => {
+                texts.extend(kanban.columns.iter().map(|c| &*c.title));
+                texts.extend(kanban.cards.iter().map(|c| &*c.text));
+            }
+            ObjectKind::MindMap(map) => texts.extend(map.nodes.iter().map(|n| &*n.text)),
+            kind => texts.extend(kind.text()),
+        }
+        let line = texts
+            .iter()
+            .flat_map(|t| t.lines())
+            .find(|l| l.to_lowercase().contains(query));
+        let text = match line {
+            Some(line) => line.trim().to_owned(),
+            None => {
+                let tag =
+                    self.document.tags().iter().find(|t| {
+                        data.tags.contains(&t.id) && t.name.to_lowercase().contains(query)
+                    });
+                match tag {
+                    Some(tag) => trf("Tagged {}", &[&tag.name]),
+                    // Found across lines: its first line.
+                    None => texts
+                        .iter()
+                        .flat_map(|t| t.lines())
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or_default()
+                        .trim()
+                        .to_owned(),
+                }
+            }
+        };
+        const LONGEST: usize = 60;
+        if text.chars().count() > LONGEST {
+            let cut: String = text.chars().take(LONGEST - 1).collect();
+            cut + "…"
+        } else {
+            text
+        }
+    }
+
+    /// Shows everything on the board, at most at 100%; the start when it is empty.
+    fn zoom_to_fit(&mut self) {
+        let viewport = self.viewport();
+        let content = self
+            .document
+            .objects()
+            .iter()
+            .filter(|o| self.document.is_shown(o.id))
+            .map(|o| o.data.frame().aabb())
+            .reduce(|a, b| a.union(b));
+        match content {
+            Some(area) => {
+                self.camera.fit(area, viewport, FRAME_MARGIN);
+                if self.camera.zoom() > 1.0 {
+                    self.camera.look_at(area.center(), 1.0, viewport);
+                }
+            }
+            None => self.camera.look_at(Point::ZERO, 1.0, viewport),
+        }
+    }
+
     /// Opens the search bar, or gives its field the keyboard again.
     fn open_search(&mut self) {
         self.finish_editing();
@@ -3871,17 +3996,20 @@ impl App {
         search.revision = revision;
     }
 
-    /// Brings the current result into view: pans to it, zooming out only if it does not
-    /// fit.
+    /// Brings the current result into view.
     fn show_search_result(&mut self) {
-        let Some(area) = self
+        if let Some(area) = self
             .search
             .as_ref()
             .and_then(|s| s.hits.get(s.current))
             .map(|h| h.area.aabb())
-        else {
-            return;
-        };
+        {
+            self.show_area(area);
+        }
+    }
+
+    /// Brings `area` (world) into view: pans to it, zooming out only if it does not fit.
+    fn show_area(&mut self, area: Rect) {
         let viewport = self.viewport();
         let zoom = self.camera.zoom();
         let margin = FRAME_MARGIN / zoom;
@@ -5695,7 +5823,9 @@ impl App {
             KeyCode::KeyS if ctrl => self.session.save(&self.document),
             KeyCode::KeyO if ctrl => self.open_board(),
             KeyCode::KeyE if ctrl && modifiers.shift_key() => self.open_export(),
+            KeyCode::KeyP if ctrl && modifiers.shift_key() => self.toggle_palette(),
             KeyCode::KeyP if ctrl => self.print(),
+            KeyCode::KeyK if ctrl => self.toggle_palette(),
             // The UI's size: Ctrl+Alt+= / - / 0 (Ctrl+= and friends zoom the board).
             KeyCode::Equal if ctrl && modifiers.alt_key() => {
                 self.perform(Action::SetUiScale(self.ui_scale + 0.25));
