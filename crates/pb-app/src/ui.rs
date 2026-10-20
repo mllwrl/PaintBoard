@@ -64,6 +64,8 @@ pub enum Action {
     DownloadBoard,
     /// Deletes a board kept in the browser, after asking.
     DeleteStored(std::path::PathBuf),
+    /// Gives a board kept in the browser a new name.
+    RenameStored(std::path::PathBuf, String),
     Save,
     SaveAs,
     ZoomIn,
@@ -845,6 +847,8 @@ pub struct Ui {
     version_name: String,
     /// Time typed for the countdown, like `7` or `2:30`.
     timer_text: String,
+    /// The board kept in the browser being renamed, and the name typed.
+    renaming_board: Option<(std::path::PathBuf, String)>,
     /// Server address and shared link typed in the sharing window.
     server_text: String,
     share_link_text: String,
@@ -891,6 +895,7 @@ impl Ui {
             export_shown: false,
             version_name: String::new(),
             timer_text: String::new(),
+            renaming_board: None,
             server_text: String::new(),
             share_link_text: String::new(),
             share_name: None,
@@ -1006,6 +1011,7 @@ impl Ui {
         let export_shown = &mut self.export_shown;
         let version_name = &mut self.version_name;
         let timer_text = &mut self.timer_text;
+        let renaming_board = &mut self.renaming_board;
         let server_text = &mut self.server_text;
         let share_link_text = &mut self.share_link_text;
         let share_name = &mut self.share_name;
@@ -1048,7 +1054,12 @@ impl Ui {
             if model.focus {
                 focus_bar(ctx, &mut actions);
             } else if panels.shows(Panel::Menu) {
-                board_menu(ctx, model, (version_name, timer_text), &mut actions);
+                let typed = Typed {
+                    version_name,
+                    timer_text,
+                    renaming_board,
+                };
+                board_menu(ctx, model, typed, &mut actions);
             }
             if panels.shows(Panel::Tools) {
                 if model.read_only {
@@ -1235,7 +1246,12 @@ fn panel() -> Frame {
 
 /// The browser keeps boards inside itself: they are opened from this list, and
 /// downloaded to have them as files.
-fn stored_boards_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action>) {
+fn stored_boards_menu(
+    ui: &mut egui::Ui,
+    model: &Model,
+    renaming: &mut Option<(std::path::PathBuf, String)>,
+    actions: &mut Vec<Action>,
+) {
     ui.separator();
     if ui
         .button(tr("Download board"))
@@ -1254,6 +1270,18 @@ fn stored_boards_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action
                 .file_stem()
                 .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
             ui.horizontal(|ui| {
+                if let Some((_, typed)) = renaming.as_mut().filter(|(p, _)| p == path) {
+                    let field = ui.add(egui::TextEdit::singleline(typed).desired_width(160.0));
+                    field.request_focus();
+                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if ui.button(tr("OK")).clicked() || enter {
+                        actions.push(Action::RenameStored(path.clone(), typed.clone()));
+                        *renaming = None;
+                    } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        *renaming = None;
+                    }
+                    return;
+                }
                 let open = model.open_board.as_deref() == Some(path.as_path());
                 if ui.add_enabled(!open, Button::new(&name)).clicked() {
                     actions.push(Action::OpenFile(path.clone()));
@@ -1267,18 +1295,32 @@ fn stored_boards_menu(ui: &mut egui::Ui, model: &Model, actions: &mut Vec<Action
                     actions.push(Action::DeleteStored(path.clone()));
                     ui.close();
                 }
+                if ui
+                    .add(Button::new("✎").small())
+                    .on_hover_text(tr("Rename"))
+                    .clicked()
+                {
+                    *renaming = Some((path.clone(), name.clone()));
+                }
             });
         }
     });
 }
 
-/// The menu bar at the top left; `version_name` and `timer_text` are typed in its menus.
-fn board_menu(
-    ctx: &Context,
-    model: &Model,
-    (version_name, timer_text): (&mut String, &mut String),
-    actions: &mut Vec<Action>,
-) {
+/// What is typed in the menus of the board menu.
+struct Typed<'a> {
+    version_name: &'a mut String,
+    timer_text: &'a mut String,
+    renaming_board: &'a mut Option<(std::path::PathBuf, String)>,
+}
+
+/// The menu bar at the top left.
+fn board_menu(ctx: &Context, model: &Model, typed: Typed, actions: &mut Vec<Action>) {
+    let Typed {
+        version_name,
+        timer_text,
+        renaming_board,
+    } = typed;
     Area::new(Id::unique("board"))
         .fixed_pos(Pos2::new(MARGIN, MARGIN))
         .order(Order::Foreground)
@@ -1319,7 +1361,7 @@ fn board_menu(
                             }
                         }
                         if model.web {
-                            stored_boards_menu(ui, model, actions);
+                            stored_boards_menu(ui, model, renaming_board, actions);
                         }
                         ui.separator();
                         if ui

@@ -1271,6 +1271,7 @@ impl App {
             }
             Action::CopyText(text) => clipboard::set_text(&text),
             Action::OpenFile(path) => self.open_file(path),
+            Action::RenameStored(path, name) => self.rename_stored(&path, &name),
             Action::DeleteStored(path) => {
                 let name = path
                     .file_stem()
@@ -4495,6 +4496,8 @@ impl App {
             if let Some(edit) = &mut self.editing {
                 edit.follow(self.text.engine(), &self.document);
             }
+            #[cfg(target_arch = "wasm32")]
+            self.name_shared_board();
             self.tools.sync(&self.document);
             self.request_redraw();
         }
@@ -4735,6 +4738,49 @@ impl App {
             .map_or_else(String::new, |p| p.to_string_lossy().into_owned())
     }
 
+    /// Renames the board kept in the browser at `from`; its links go with it.
+    fn rename_stored(&mut self, from: &std::path::Path, name: &str) {
+        match self.session.rename_stored(from, name, &self.document) {
+            Ok(to) => {
+                let (from, to) = (from.to_string_lossy(), to.to_string_lossy());
+                if let Some((link, view)) = crate::settings::shared_link(&from) {
+                    crate::settings::save_shared_link(&from, None);
+                    crate::settings::save_shared_link(&to, Some((&link, view.as_deref())));
+                }
+            }
+            Err(err) => dialog::show_error(tr("Could not rename the board"), &err.to_string()),
+        }
+        self.request_redraw();
+    }
+
+    /// A shared board opened from its link is kept under the board's id: once its name
+    /// arrives, it is kept under that instead.
+    #[cfg(target_arch = "wasm32")]
+    fn name_shared_board(&mut self) {
+        let (Some(sharing), Some(title), Some(path)) = (
+            &self.sharing,
+            self.document.title(),
+            self.session.path().map(std::path::Path::to_path_buf),
+        ) else {
+            return;
+        };
+        if path.file_stem().and_then(|s| s.to_str()) != Some(&*sharing.link.board) {
+            return;
+        }
+        // Another board may have the name already.
+        for n in 1..10 {
+            let name = match n {
+                1 => title.clone(),
+                n => format!("{title} ({n})"),
+            };
+            let to = path.with_file_name(format!("{name}.{}", pb_storage::EXTENSION));
+            if !pb_platform::fs::exists(&to) {
+                self.rename_stored(&path, &name);
+                return;
+            }
+        }
+    }
+
     /// The board was saved under another name: its links go with it.
     fn board_renamed(&mut self, before: &str) {
         let after = self.board_key();
@@ -4760,7 +4806,11 @@ impl App {
         let Ok(dir) = pb_platform::fs::boards_dir() else {
             return false;
         };
-        let path = dir.join(format!("{}.{}", link.board, pb_storage::EXTENSION));
+        // Kept under the board's id at first, under its own name once known or renamed.
+        let path = crate::settings::board_with_link(&link.to_string())
+            .map(std::path::PathBuf::from)
+            .filter(|p| pb_platform::fs::exists(p))
+            .unwrap_or_else(|| dir.join(format!("{}.{}", link.board, pb_storage::EXTENSION)));
         let document = self.session.open_or_new(path, &self.document);
         self.replace_document(document);
         // This copy may know the link to look too, from when it made the board.

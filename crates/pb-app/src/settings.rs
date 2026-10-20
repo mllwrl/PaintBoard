@@ -123,6 +123,15 @@ pub fn shared_link(board: &str) -> Option<(String, Option<String>)> {
         .map(|(_, link, view)| (link, (!view.is_empty()).then_some(view)))
 }
 
+/// The file of the board shared by `link` (to edit or to look), if one is remembered.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn board_with_link(link: &str) -> Option<String> {
+    shared_lines()
+        .into_iter()
+        .find(|(_, l, v)| l == link || v == link)
+        .map(|(board, ..)| board)
+}
+
 /// Remembers (or with `None` forgets) the links the board in file `board` is shared by.
 pub fn save_shared_link(board: &str, links: Option<(&str, Option<&str>)>) {
     let mut lines: Vec<_> = shared_lines()
