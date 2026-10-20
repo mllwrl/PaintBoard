@@ -154,6 +154,15 @@ async fn boards_are_shared_and_kept() {
     c.pump().await;
     assert_eq!(c.count(), 2);
     assert_eq!(c.doc.assets().len(), 1);
+    // Counted for monitoring: four joins, the last one still connected.
+    let metrics = shared.metrics.render(1, 1);
+    for line in [
+        "paintboard_joins_total 4\n",
+        "paintboard_connected 1\n",
+        "paintboard_boards_made_total 1\n",
+    ] {
+        assert!(metrics.contains(line), "{metrics}");
+    }
 }
 
 #[tokio::test]

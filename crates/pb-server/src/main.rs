@@ -11,6 +11,8 @@
 //! - `PB_BACKUP`: a folder for a daily copy of the database (the newest 7 are kept);
 //! - `PB_TRUST_PROXY`: set to `1` behind a proxy (Caddy) that puts the client's address
 //!   in `X-Forwarded-For`, so limits per address count clients, not the proxy;
+//! - `PB_METRICS`: if set to `1`, `GET /metrics` shows counts for Prometheus (close it to
+//!   the public at the proxy);
 //! - `PB_PREVIEWS`: if set to `1`, the server fetches the heads of web pages for link
 //!   previews in the web version (see `preview`).
 //!
@@ -18,6 +20,8 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 mod limits;
+#[cfg(not(target_arch = "wasm32"))]
+mod metrics;
 #[cfg(not(target_arch = "wasm32"))]
 mod preview;
 #[cfg(not(target_arch = "wasm32"))]
@@ -61,6 +65,11 @@ async fn main() {
             .expect("not shared yet")
             .limits
             .trust_proxy = true;
+    }
+    if std::env::var("PB_METRICS").is_ok_and(|v| v == "1") {
+        std::sync::Arc::get_mut(&mut shared)
+            .expect("not shared yet")
+            .serve_metrics = true;
     }
     if std::env::var("PB_PREVIEWS").is_ok_and(|v| v == "1") {
         std::sync::Arc::get_mut(&mut shared)

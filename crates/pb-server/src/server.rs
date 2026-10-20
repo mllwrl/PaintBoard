@@ -17,6 +17,7 @@ use pb_core::AssetId;
 use pb_sync::{ClientId, MAX_ASSET, Message, Outgoing, PROTOCOL, Room};
 use tokio::sync::mpsc;
 
+use crate::metrics::bump;
 use crate::store::{Access, Store};
 
 /// How long a new connection has to say which board it wants.
@@ -74,6 +75,9 @@ pub struct Shared {
     pub previews: Option<crate::preview::Previews>,
     /// What one address may do.
     pub limits: crate::limits::Limits,
+    /// Counts for monitoring, served at `/metrics` when `serve_metrics`.
+    pub metrics: crate::metrics::Metrics,
+    pub serve_metrics: bool,
 }
 
 /// A board in memory and the connections to it.
@@ -104,6 +108,8 @@ impl Shared {
             max_boards: None,
             previews: None,
             limits: crate::limits::Limits::default(),
+            metrics: crate::metrics::Metrics::default(),
+            serve_metrics: false,
         })
     }
 
@@ -228,6 +234,7 @@ pub fn router(shared: Arc<Shared>) -> Router {
         .route("/boards", post(create_board).options(allow_other_sites))
         .route("/ws", get(connect))
         .route("/preview", get(preview))
+        .route("/metrics", get(metrics))
         .route(
             "/",
             get(|state, headers| web_file(state, headers, "index.html".to_owned())),
@@ -327,17 +334,23 @@ async fn preview(
         return cors((StatusCode::NOT_FOUND, "this server does not make previews").into_response());
     };
     if !shared.limits.preview(shared.limits.client(peer, &headers)) {
-        return cors(too_many("too many previews, try again in a minute"));
+        return cors(too_many(
+            &shared,
+            "too many previews, try again in a minute",
+        ));
     }
     let Some(url) = query.get("url") else {
         return cors((StatusCode::BAD_REQUEST, "which page?").into_response());
     };
     cors(match previews.head_of(url).await {
-        Ok(head) => (
-            [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-            head,
-        )
-            .into_response(),
+        Ok(head) => {
+            bump(&shared.metrics.previews);
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                head,
+            )
+                .into_response()
+        }
         Err(err) => (StatusCode::BAD_GATEWAY, err).into_response(),
     })
 }
@@ -355,13 +368,39 @@ async fn create_board(
         .limits
         .make_board(shared.limits.client(peer, &headers))
     {
-        return cors(too_many("too many boards made from here, try again later"));
+        return cors(too_many(
+            &shared,
+            "too many boards made from here, try again later",
+        ));
     }
     cors(make_board(&shared, &headers))
 }
 
-fn too_many(why: &'static str) -> Response {
+fn too_many(shared: &Shared, why: &'static str) -> Response {
+    bump(&shared.metrics.limited);
     (StatusCode::TOO_MANY_REQUESTS, why).into_response()
+}
+
+/// Counts for monitoring, when the server shows them.
+async fn metrics(State(shared): State<Arc<Shared>>) -> Response {
+    if !shared.serve_metrics {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let boards = shared
+        .store
+        .lock()
+        .expect("store lock")
+        .board_count()
+        .unwrap_or(0) as u64;
+    let rooms = shared.rooms.lock().expect("rooms lock").len() as u64;
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        shared.metrics.render(boards, rooms),
+    )
+        .into_response()
 }
 
 fn make_board(shared: &Shared, headers: &HeaderMap) -> Response {
@@ -386,6 +425,7 @@ fn make_board(shared: &Shared, headers: &HeaderMap) -> Response {
     match made {
         Ok(new) => {
             log::info!("board {} made", new.board);
+            bump(&shared.metrics.boards_made);
             Json(std::collections::BTreeMap::from([
                 ("board", new.board),
                 ("edit", new.edit),
@@ -407,7 +447,7 @@ async fn connect(
     upgrade: WebSocketUpgrade,
 ) -> Response {
     let Some(counted) = shared.limits.connect(shared.limits.client(peer, &headers)) else {
-        return too_many("too many connections from here");
+        return too_many(&shared, "too many connections from here");
     };
     upgrade
         .max_message_size(MAX_ASSET + (1 << 20))
@@ -438,7 +478,8 @@ async fn receive(socket: &mut WebSocket) -> Option<Result<Message, String>> {
     }
 }
 
-async fn refuse(mut socket: WebSocket, why: &str) {
+async fn refuse(shared: &Shared, mut socket: WebSocket, why: &str) {
+    bump(&shared.metrics.refused);
     send(&mut socket, &Message::Error(why.to_owned())).await;
     let _ = socket.send(ws::Message::Close(None)).await;
 }
@@ -454,10 +495,11 @@ async fn serve(mut socket: WebSocket, shared: Arc<Shared>) {
         assets,
     }))) = hello
     else {
-        return refuse(socket, "expected a greeting").await;
+        return refuse(&shared, socket, "expected a greeting").await;
     };
     if protocol != PROTOCOL {
         return refuse(
+            &shared,
             socket,
             "this server speaks another version: update PaintBoard",
         )
@@ -470,15 +512,15 @@ async fn serve(mut socket: WebSocket, shared: Arc<Shared>) {
         .access(&board, &token);
     let can_edit = match access {
         Ok(Some(access)) => access == Access::Edit,
-        Ok(None) => return refuse(socket, "no such board, or the link is wrong").await,
+        Ok(None) => return refuse(&shared, socket, "no such board, or the link is wrong").await,
         Err(err) => {
             log::error!("access check failed: {err}");
-            return refuse(socket, "the server could not check the link").await;
+            return refuse(&shared, socket, "the server could not check the link").await;
         }
     };
     let live = match shared.room(&board) {
         Ok(live) => live,
-        Err(err) => return refuse(socket, &err).await,
+        Err(err) => return refuse(&shared, socket, &err).await,
     };
     let client = shared.next_client.fetch_add(1, Ordering::Relaxed);
     let (outbox, mut inbox) = mpsc::unbounded_channel();
@@ -499,9 +541,11 @@ async fn serve(mut socket: WebSocket, shared: Arc<Shared>) {
     };
     if let Err(err) = joined {
         shared.unload_if_empty(&board);
-        return refuse(socket, &err).await;
+        return refuse(&shared, socket, &err).await;
     }
     log::info!("{name} ({client}) joined board {board}");
+    bump(&shared.metrics.joins);
+    bump(&shared.metrics.connected);
     let mut bucket = Bucket::new();
 
     loop {
@@ -513,13 +557,21 @@ async fn serve(mut socket: WebSocket, shared: Arc<Shared>) {
                 } else {
                     Err("too many messages: slow down".to_owned())
                 };
+                bump(&shared.metrics.messages);
                 let result = incoming.and_then(|message| {
+                    if let Message::Updates(bytes) | Message::Asset(bytes) = &message {
+                        shared
+                            .metrics
+                            .bytes_in
+                            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                    }
                     let mut live = live.lock().expect("room lock");
                     let out = live.room.receive(client, message)?;
                     dispatch(&live, out);
                     Ok(())
                 });
                 if let Err(err) = result {
+                    bump(&shared.metrics.cut_off);
                     log::info!("{client} on {board}: {err}");
                     send(&mut socket, &Message::Error(err)).await;
                     break;
@@ -541,6 +593,7 @@ async fn serve(mut socket: WebSocket, shared: Arc<Shared>) {
         dispatch(&live, out);
     }
     log::info!("{client} left board {board}");
+    shared.metrics.connected.fetch_sub(1, Ordering::Relaxed);
     shared.unload_if_empty(&board);
 }
 
