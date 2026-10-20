@@ -1593,8 +1593,9 @@ pub struct SharedView {
     pub status: String,
     pub online: bool,
     pub offline: bool,
-    pub can_edit: bool,
+    pub role: pb_core::Role,
     pub edit_link: Option<String>,
+    pub comment_link: Option<String>,
     pub view_link: Option<String>,
     /// The others on the board.
     pub people: Vec<PersonView>,
@@ -1655,8 +1656,16 @@ fn share_window(
                         actions.push(Action::RetrySharing);
                     }
                 });
-                if !shared.can_edit && shared.online {
-                    ui.weak(tr("You can look at this board but not change it."));
+                if shared.online {
+                    match shared.role {
+                        pb_core::Role::View => {
+                            ui.weak(tr("You can look at this board but not change it."));
+                        }
+                        pb_core::Role::Comment => {
+                            ui.weak(tr("You can comment, react and vote here, but not change the board."));
+                        }
+                        pb_core::Role::Edit => {}
+                    }
                 }
                 if !shared.people.is_empty() {
                     ui.horizontal_wrapped(|ui| {
@@ -1711,6 +1720,9 @@ fn share_window(
                 };
                 if let Some(link) = &shared.edit_link {
                     link_row(ui, tr("Link to edit"), tr("Whoever has it can change the board"), link, actions);
+                }
+                if let Some(link) = &shared.comment_link {
+                    link_row(ui, tr("Link to comment"), tr("Whoever has it can comment, react and vote, but not change the board"), link, actions);
                 }
                 if let Some(link) = &shared.view_link {
                     link_row(ui, tr("Link to look"), tr("Whoever has it can only look"), link, actions);

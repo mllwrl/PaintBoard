@@ -12,7 +12,7 @@ mod transport;
 
 pub use client::{Client, Event};
 pub use message::{ClientId, DecodeError, Message, PROTOCOL, Presence};
-pub use room::{MAX_ASSET, MAX_ASSETS_TOTAL, Outgoing, Room};
+pub use room::{MAX_ASSET, MAX_ASSETS_TOTAL, MAX_REMARKS, Outgoing, Room};
 pub use transport::{LocalOnly, Memory, Status, Transport};
 
 #[cfg(test)]

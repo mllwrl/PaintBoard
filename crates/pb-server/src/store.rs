@@ -2,25 +2,36 @@
 
 use std::path::Path;
 
-use pb_core::AssetId;
+use pb_core::{AssetId, Role};
 use rusqlite::{Connection, OptionalExtension, params};
 
-/// What a token lets its holder do with a board.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Access {
-    View,
-    Edit,
+/// How a role is stored.
+fn role_number(role: Role) -> i64 {
+    match role {
+        Role::View => 0,
+        Role::Comment => 1,
+        Role::Edit => 2,
+    }
+}
+
+fn role_of(number: i64) -> Role {
+    match number {
+        2.. => Role::Edit,
+        1 => Role::Comment,
+        _ => Role::View,
+    }
 }
 
 pub struct Store {
     db: Connection,
 }
 
-/// A new board's id and its two links' tokens.
+/// A new board's id and its links' tokens.
 #[derive(Clone, Debug)]
 pub struct NewBoard {
     pub board: String,
     pub edit: String,
+    pub comment: String,
     pub view: String,
 }
 
@@ -65,6 +76,10 @@ const MIGRATIONS: &[&str] = &[
          can_edit INTEGER NOT NULL,
          created INTEGER NOT NULL
      );",
+    // 2: links to comment: what a token allows is its role (0 look, 1 comment, 2 edit);
+    // `can_edit` stays, set for editing links.
+    "ALTER TABLE tokens ADD COLUMN role INTEGER NOT NULL DEFAULT 0;
+     UPDATE tokens SET role = 2 WHERE can_edit = 1;",
 ];
 
 /// Brings `db` to the latest layout, each step whole or not at all. A database from a
@@ -116,11 +131,12 @@ impl Store {
         Ok(Self { db })
     }
 
-    /// Makes an empty board with a link to edit it and one to look at it.
+    /// Makes an empty board with links to edit it, to comment on it and to look at it.
     pub fn create_board(&self) -> rusqlite::Result<NewBoard> {
         let new = NewBoard {
             board: random_hex(12),
             edit: random_hex(16),
+            comment: random_hex(16),
             view: random_hex(16),
         };
         let now = now();
@@ -128,10 +144,21 @@ impl Store {
             "INSERT INTO boards (id, created, updated) VALUES (?1, ?2, ?2)",
             params![new.board, now],
         )?;
-        for (token, edit) in [(&new.edit, true), (&new.view, false)] {
+        for (token, role) in [
+            (&new.edit, Role::Edit),
+            (&new.comment, Role::Comment),
+            (&new.view, Role::View),
+        ] {
             self.db.execute(
-                "INSERT INTO tokens (hash, board, can_edit, created) VALUES (?1, ?2, ?3, ?4)",
-                params![token_hash(token), new.board, edit, now],
+                "INSERT INTO tokens (hash, board, can_edit, created, role)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    token_hash(token),
+                    new.board,
+                    role == Role::Edit,
+                    now,
+                    role_number(role)
+                ],
             )?;
         }
         Ok(new)
@@ -154,16 +181,16 @@ impl Store {
     }
 
     /// What `token` allows on `board`; `None` if nothing.
-    pub fn access(&self, board: &str, token: &str) -> rusqlite::Result<Option<Access>> {
-        let edit: Option<bool> = self
+    pub fn access(&self, board: &str, token: &str) -> rusqlite::Result<Option<Role>> {
+        let role: Option<i64> = self
             .db
             .query_row(
-                "SELECT can_edit FROM tokens WHERE hash = ?1 AND board = ?2",
+                "SELECT role FROM tokens WHERE hash = ?1 AND board = ?2",
                 params![token_hash(token), board],
                 |row| row.get(0),
             )
             .optional()?;
-        Ok(edit.map(|e| if e { Access::Edit } else { Access::View }))
+        Ok(role.map(role_of))
     }
 
     /// The board's stored state, if the board exists: its snapshot (none before the
@@ -252,7 +279,7 @@ mod tests {
         assert_eq!(kept, "old");
         // Run again, nothing happens; a server knowing fewer steps refuses it.
         migrate_with(&mut db, &[MIGRATIONS[0], next]).unwrap();
-        assert!(migrate_with(&mut db, MIGRATIONS).is_err());
+        assert!(migrate_with(&mut db, &MIGRATIONS[..1]).is_err());
         // A failing step leaves the database as it was.
         let mut db = Connection::open_in_memory().unwrap();
         assert!(migrate_with(&mut db, &[MIGRATIONS[0], "CREATE TABLE x (a); nonsense"]).is_err());
@@ -261,12 +288,37 @@ mod tests {
     }
 
     #[test]
+    fn links_from_before_roles_keep_their_access() {
+        let mut db = Connection::open_in_memory().unwrap();
+        migrate_with(&mut db, &MIGRATIONS[..1]).unwrap();
+        db.execute_batch(
+            "INSERT INTO boards (id, created, updated) VALUES ('b', 1, 1);
+             INSERT INTO tokens (hash, board, can_edit, created) VALUES (x'01', 'b', 1, 1);
+             INSERT INTO tokens (hash, board, can_edit, created) VALUES (x'02', 'b', 0, 1);",
+        )
+        .unwrap();
+        migrate(&mut db).unwrap();
+        let roles: Vec<i64> = db
+            .prepare("SELECT role FROM tokens ORDER BY hash")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(roles, [2, 0]);
+    }
+
+    #[test]
     fn tokens_give_their_access_to_their_board_only() {
         let store = Store::in_memory().unwrap();
         let a = store.create_board().unwrap();
         let b = store.create_board().unwrap();
-        assert_eq!(store.access(&a.board, &a.edit).unwrap(), Some(Access::Edit));
-        assert_eq!(store.access(&a.board, &a.view).unwrap(), Some(Access::View));
+        assert_eq!(store.access(&a.board, &a.edit).unwrap(), Some(Role::Edit));
+        assert_eq!(
+            store.access(&a.board, &a.comment).unwrap(),
+            Some(Role::Comment)
+        );
+        assert_eq!(store.access(&a.board, &a.view).unwrap(), Some(Role::View));
         assert_eq!(store.access(&b.board, &a.edit).unwrap(), None);
         assert_eq!(store.access(&a.board, "guess").unwrap(), None);
     }

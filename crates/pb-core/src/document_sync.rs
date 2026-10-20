@@ -28,6 +28,35 @@ impl Document {
         self.doc.peer_id()
     }
 
+    /// Makes this copy's next changes those of a new random peer, one no other copy has
+    /// used: the server takes remarks only from peers it has not seen edit
+    /// ([`Document::own_changes_json`]).
+    pub fn new_peer(&mut self) -> Result<()> {
+        // A new Loro document picks a random peer.
+        self.set_peer(loro::LoroDoc::new().peer_id())
+    }
+
+    /// This copy's own changes from its `from`-th operation on, in Loro's JSON form, and
+    /// where the next call should start; `None` if there are none. Someone who may only
+    /// comment sends these: unlike the binary form, the server can read what they change
+    /// before taking them in.
+    pub fn own_changes_json(&self, from: i32) -> Result<Option<(String, i32)>> {
+        let end = self.doc.oplog_vv();
+        let peer = self.doc.peer_id();
+        let to = end.get(&peer).copied().unwrap_or(0);
+        if to <= from {
+            return Ok(None);
+        }
+        let mut start = end.clone();
+        start.insert(peer, from);
+        let changes = self
+            .doc
+            .export_json_updates_without_peer_compression(&start, &end);
+        let json = serde_json::to_string(&changes)
+            .map_err(|e| Error::Crdt(loro::LoroError::DecodeError(e.to_string().into())))?;
+        Ok(Some((json, to)))
+    }
+
     /// Which changes this copy has, to ask another copy for the rest.
     pub fn sync_version(&self) -> Vec<u8> {
         self.doc.oplog_vv().encode()
@@ -42,6 +71,32 @@ impl Document {
             VersionVector::decode(version)?
         };
         Ok(self.doc.export(ExportMode::updates(&from))?)
+    }
+
+    /// Drops this copy's changes that a copy at `version` lacks, leaving the board as that
+    /// copy has it. For someone who may only comment: what they write must build on the
+    /// server's board alone, or the server could not take it in. Returns whether anything
+    /// was dropped; pictures, the role and sharing stay.
+    pub fn keep_only(&mut self, version: &[u8]) -> Result<bool> {
+        let theirs = if version.is_empty() {
+            VersionVector::default()
+        } else {
+            VersionVector::decode(version)?
+        };
+        let mine = self.doc.oplog_vv();
+        if theirs.includes_vv(&mine) || !mine.includes_vv(&theirs) {
+            return Ok(false);
+        }
+        let at = self.doc.vv_to_frontiers(&theirs);
+        let mut kept = Self::from_loro(self.doc.fork_at(&at)?);
+        kept.assets = std::mem::take(&mut self.assets);
+        kept.role = self.role;
+        let sharing = self.outbox.is_some();
+        *self = kept;
+        if sharing {
+            self.start_sharing();
+        }
+        Ok(true)
     }
 
     /// Merges in changes from another copy. Returns whether the board changed. They are
@@ -438,5 +493,107 @@ mod tests {
             assert_eq!(&*c.label.text, "yes or no?");
             assert_eq!(text_of(doc, card), "An example web page");
         }
+    }
+
+    /// Every write in `json` (from [`Document::own_changes_json`]) is one
+    /// [`crate::commenting_writes`] allows.
+    fn only_commenting(json: &str) -> bool {
+        let schema = loro::JsonSchema::try_from(json).unwrap();
+        schema.changes.iter().flat_map(|c| &c.ops).all(|op| {
+            let loro::ContainerID::Root { name, .. } = &op.container else {
+                return false;
+            };
+            match &op.content {
+                loro::JsonOpContent::Map(loro::JsonMapOp::Insert { key, .. })
+                | loro::JsonOpContent::Map(loro::JsonMapOp::Delete { key }) => {
+                    crate::commenting_writes(name, key)
+                }
+                _ => false,
+            }
+        })
+    }
+
+    #[test]
+    fn people_who_only_comment_change_only_what_the_server_lets_them() {
+        let mut doc = Document::new();
+        let a = rect(&mut doc);
+        doc.apply(Command::StartVoting { limit: 3 }).unwrap();
+        doc.set_role(crate::Role::Comment);
+        doc.new_peer().unwrap();
+        assert!(doc.own_changes_json(0).unwrap().is_none());
+        assert!(matches!(
+            doc.apply(Command::Delete(vec![a])),
+            Err(Error::ReadOnly)
+        ));
+        assert!(doc.apply(Command::EndVoting).is_err());
+        let thread: std::sync::Arc<str> = "t1".into();
+        let comment = |id: &str| crate::Comment {
+            id: id.into(),
+            author: "ann".into(),
+            at_ms: 1,
+            text: "why?".into(),
+        };
+        let commands = [
+            Command::AddComment {
+                thread: thread.clone(),
+                anchor: Some(crate::ThreadAnchor::Object(a)),
+                comment: comment("1"),
+            },
+            Command::AddComment {
+                thread: thread.clone(),
+                anchor: None,
+                comment: comment("2"),
+            },
+            Command::RemoveComment {
+                thread: thread.clone(),
+                comment: "2".into(),
+            },
+            Command::SetResolved {
+                thread: thread.clone(),
+                resolved: true,
+            },
+            Command::React {
+                id: a,
+                reaction: crate::Reaction::ALL[0],
+                author: "ann".into(),
+                on: true,
+            },
+            Command::Vote {
+                id: a,
+                author: "ann".into(),
+                add: true,
+            },
+            Command::Vote {
+                id: a,
+                author: "ann".into(),
+                add: false,
+            },
+            Command::RemoveThread(thread),
+        ];
+        let mut from = 0;
+        for command in commands {
+            assert!(command.allowed_commenting());
+            doc.apply(command).unwrap();
+            let (json, next) = doc.own_changes_json(from).unwrap().unwrap();
+            assert!(only_commenting(&json), "{json}");
+            from = next;
+        }
+        assert!(doc.own_changes_json(from).unwrap().is_none());
+        // An editor's changes are not all like that.
+        let mut editor = Document::new();
+        rect(&mut editor);
+        let (json, _) = editor.own_changes_json(0).unwrap().unwrap();
+        assert!(!only_commenting(&json));
+        // Looking only applies nothing.
+        doc.set_role(crate::Role::View);
+        assert!(
+            doc.apply(Command::React {
+                id: a,
+                reaction: crate::Reaction::ALL[0],
+                author: "ann".into(),
+                on: true,
+            })
+            .is_err()
+        );
     }
 }

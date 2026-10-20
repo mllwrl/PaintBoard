@@ -4441,13 +4441,13 @@ impl App {
                 .ok_or_else(|| tr("The server's answer is not understood.").to_owned())
         });
         match links {
-            Ok((edit, view)) => {
+            Ok(made) => {
                 // The others see the board under the name of its file here.
                 if self.document.title().is_none() && self.session.path().is_some() {
                     let name = self.session.name();
                     self.apply(Command::SetTitle(name.into()));
                 }
-                self.start_sharing(edit, Some(view));
+                self.start_sharing(made.edit, Some(made.view), made.comment);
             }
             Err(err) => {
                 self.share_error = Some(trf("Could not share the board: {}", &[&err]));
@@ -4469,24 +4469,29 @@ impl App {
         };
         self.replace_document(document);
         crate::settings::save_server(&link.server);
-        self.start_sharing(link, None);
+        self.start_sharing(link, None, None);
     }
 
     fn start_sharing(
         &mut self,
         link: crate::sharing::Link,
         view_link: Option<crate::sharing::Link>,
+        comment_link: Option<crate::sharing::Link>,
     ) {
-        let view = view_link.as_ref().map(ToString::to_string);
         crate::settings::save_shared_link(
             &self.board_key(),
-            Some((&link.to_string(), view.as_deref())),
+            Some(&crate::settings::SharedLinks {
+                link: link.to_string(),
+                view: view_link.as_ref().map(ToString::to_string),
+                comment: comment_link.as_ref().map(ToString::to_string),
+            }),
         );
         let proxy = self.proxy.clone();
         self.share_error = None;
         self.sharing = Some(crate::sharing::Sharing::start(
             link,
             view_link,
+            comment_link,
             &self.me,
             move || {
                 let _ = proxy.send_event(UserEvent::Network);
@@ -4498,7 +4503,7 @@ impl App {
         crate::settings::save_shared_link(&self.board_key(), None);
         self.sharing = None;
         self.document.stop_sharing();
-        self.document.set_view_only(false);
+        self.document.set_role(pb_core::Role::Edit);
         self.tools.sync(&self.document);
     }
 
@@ -4633,9 +4638,14 @@ impl App {
         use crate::sharing::Status;
 
         let shared = self.sharing.as_ref().map(|sharing| {
-            let (status, online, offline, can_edit) = match &sharing.status {
-                Status::Connecting => (tr("Connecting…").to_owned(), false, false, true),
-                Status::Online { can_edit } => (
+            let (status, online, offline, role) = match &sharing.status {
+                Status::Connecting => (
+                    tr("Connecting…").to_owned(),
+                    false,
+                    false,
+                    pb_core::Role::Edit,
+                ),
+                Status::Online { role } => (
                     if sharing.people.is_empty() {
                         tr("Online: only you here").to_owned()
                     } else {
@@ -4643,7 +4653,7 @@ impl App {
                     },
                     true,
                     false,
-                    *can_edit,
+                    *role,
                 ),
                 Status::Offline(reason) => (
                     trf(
@@ -4652,9 +4662,10 @@ impl App {
                     ),
                     false,
                     true,
-                    true,
+                    pb_core::Role::Edit,
                 ),
             };
+            let can_edit = role == pb_core::Role::Edit;
             let people = sharing
                 .people
                 .iter()
@@ -4672,14 +4683,20 @@ impl App {
                 .view_link
                 .as_ref()
                 .map(ToString::to_string)
-                .or_else(|| (!can_edit).then(|| sharing.link.to_string()));
+                .or_else(|| (role == pb_core::Role::View).then(|| sharing.link.to_string()));
+            let comment_link = sharing
+                .comment_link
+                .as_ref()
+                .map(ToString::to_string)
+                .or_else(|| (role == pb_core::Role::Comment).then(|| sharing.link.to_string()));
             crate::ui::SharedView {
                 leading: sharing.leading(),
                 status,
                 online,
                 offline,
-                can_edit,
+                role,
                 edit_link: edit_link.filter(|_| can_edit),
+                comment_link,
                 view_link,
                 people,
             }
@@ -4775,11 +4792,7 @@ impl App {
     fn rename_stored(&mut self, from: &std::path::Path, name: &str) {
         match self.session.rename_stored(from, name, &self.document) {
             Ok(to) => {
-                let (from, to) = (from.to_string_lossy(), to.to_string_lossy());
-                if let Some((link, view)) = crate::settings::shared_link(&from) {
-                    crate::settings::save_shared_link(&from, None);
-                    crate::settings::save_shared_link(&to, Some((&link, view.as_deref())));
-                }
+                crate::settings::move_shared_link(&from.to_string_lossy(), &to.to_string_lossy());
             }
             Err(err) => dialog::show_error(tr("Could not rename the board"), &err.to_string()),
         }
@@ -4820,10 +4833,7 @@ impl App {
         if after == before {
             return;
         }
-        if let Some((link, view)) = crate::settings::shared_link(before) {
-            crate::settings::save_shared_link(before, None);
-            crate::settings::save_shared_link(&after, Some((&link, view.as_deref())));
-        }
+        crate::settings::move_shared_link(before, &after);
     }
 
     /// Opens the shared board the page's address is a link to, kept in the browser under
@@ -4846,34 +4856,26 @@ impl App {
             .unwrap_or_else(|| dir.join(format!("{}.{}", link.board, pb_storage::EXTENSION)));
         let document = self.session.open_or_new(path, &self.document);
         self.replace_document(document);
-        // This copy may know the link to look too, from when it made the board.
+        // This copy may know the other links too, from when it made the board.
         match crate::settings::shared_link(&self.board_key()) {
-            Some((known, view)) if known == link.to_string() => {
-                self.resume_sharing_with(known, view)
-            }
-            _ => self.start_sharing(link, None),
+            Some(known) if known.link == link.to_string() => self.resume_sharing_with(&known),
+            _ => self.start_sharing(link, None, None),
         }
         true
     }
 
-    #[cfg(target_arch = "wasm32")]
-    fn resume_sharing_with(&mut self, link: String, view: Option<String>) {
-        if let Some(link) = crate::sharing::Link::parse(&link) {
-            let view = view.as_deref().and_then(crate::sharing::Link::parse);
-            self.start_sharing(link, view);
+    fn resume_sharing_with(&mut self, links: &crate::settings::SharedLinks) {
+        let parse = |l: &Option<String>| l.as_deref().and_then(crate::sharing::Link::parse);
+        if let Some(link) = crate::sharing::Link::parse(&links.link) {
+            self.start_sharing(link, parse(&links.view), parse(&links.comment));
         }
     }
 
     /// Shares the open board again if it was shared when last open.
     fn resume_sharing(&mut self) {
-        let Some((link, view)) = crate::settings::shared_link(&self.board_key()) else {
-            return;
-        };
-        let Some(link) = crate::sharing::Link::parse(&link) else {
-            return;
-        };
-        let view = view.as_deref().and_then(crate::sharing::Link::parse);
-        self.start_sharing(link, view);
+        if let Some(links) = crate::settings::shared_link(&self.board_key()) {
+            self.resume_sharing_with(&links);
+        }
     }
 
     /// The pointer for tools, if it is over the canvas.

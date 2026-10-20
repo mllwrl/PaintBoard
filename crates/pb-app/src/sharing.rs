@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use pb_core::{Document, ObjectId};
+use pb_core::{Document, ObjectId, Role};
 use pb_geom::kurbo::Point;
 use pb_platform::Instant;
 use pb_platform::net::{MaybeSend, Socket, SocketState};
@@ -109,8 +109,8 @@ pub fn origin(address: &str) -> Option<String> {
 }
 
 /// The links of a board just made on `server`, from the server's answer
-/// (`{"board":…,"edit":…,"view":…}`): to edit, and to look only.
-pub fn made_links(server: &str, answer: &str) -> Option<(Link, Link)> {
+/// (`{"board":…,"edit":…,"comment":…,"view":…}`).
+pub fn made_links(server: &str, answer: &str) -> Option<MadeLinks> {
     let field = |key: &str| {
         let start = answer.find(&format!("\"{key}\":\""))? + key.len() + 4;
         answer[start..].split('"').next().map(str::to_owned)
@@ -121,15 +121,28 @@ pub fn made_links(server: &str, answer: &str) -> Option<(Link, Link)> {
         board: board.clone(),
         token,
     };
-    Some((link(field("edit")?), link(field("view")?)))
+    Some(MadeLinks {
+        edit: link(field("edit")?),
+        // Servers from before links to comment do not make one.
+        comment: field("comment").map(link),
+        view: link(field("view")?),
+    })
+}
+
+/// A new board's links: to edit, to comment, to look.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MadeLinks {
+    pub edit: Link,
+    pub comment: Option<Link>,
+    pub view: Link,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
     Connecting,
-    /// Joined; with the right to edit or not.
+    /// Joined, with what right.
     Online {
-        can_edit: bool,
+        role: Role,
     },
     /// Not connected, and why; it tries again unless the server refused for good.
     Offline(String),
@@ -168,8 +181,9 @@ pub fn color_of(client: ClientId) -> u32 {
 pub struct Sharing {
     /// The link this copy joined with.
     pub link: Link,
-    /// The link for looking only, when this copy made the board.
+    /// The links for looking only and for commenting, when this copy made the board.
     pub view_link: Option<Link>,
+    pub comment_link: Option<Link>,
     pub status: Status,
     /// Everyone else on the board, by client.
     pub people: BTreeMap<ClientId, Presence>,
@@ -192,6 +206,7 @@ impl Sharing {
     pub fn start(
         link: Link,
         view_link: Option<Link>,
+        comment_link: Option<Link>,
         name: &str,
         wake: impl Fn() + MaybeSend + 'static,
     ) -> Self {
@@ -203,6 +218,7 @@ impl Sharing {
             client: Client::new(link.board.clone(), link.token.clone(), name),
             link,
             view_link,
+            comment_link,
             status: Status::Connecting,
             people: BTreeMap::new(),
             socket: None,
@@ -250,6 +266,10 @@ impl Sharing {
             SocketState::Connecting => return ticked,
             SocketState::Closed(reason) => {
                 self.went_offline(reason, now);
+                // Comments go straight to the server: none while it is away.
+                if doc.role() == Role::Comment {
+                    doc.set_role(Role::View);
+                }
                 return ticked;
             }
             SocketState::Open => {}
@@ -270,10 +290,10 @@ impl Sharing {
             };
             for event in self.client.receive(message, doc, &mut replies) {
                 match event {
-                    Event::Joined { can_edit, .. } => {
-                        self.status = Status::Online { can_edit };
+                    Event::Joined { role, .. } => {
+                        // The client has limited `doc` to the role already.
+                        self.status = Status::Online { role };
                         self.backoff = BACKOFF;
-                        doc.set_view_only(!can_edit);
                         ticked.changed = true;
                     }
                     Event::Changed => ticked.changed = true,
@@ -291,6 +311,9 @@ impl Sharing {
                         if self.client.joined().is_none() {
                             // Refused (no such board, wrong link): trying again won't help.
                             self.stop(text);
+                            if doc.role() == Role::Comment {
+                                doc.set_role(Role::View);
+                            }
                             return ticked;
                         }
                     }
@@ -445,10 +468,19 @@ mod tests {
 
     #[test]
     fn links_from_the_server_answer() {
-        let (edit, view) =
-            made_links("http://h", r#"{"board":"b1","edit":"e2","view":"v3"}"#).unwrap();
-        assert_eq!(edit.to_string(), "http://h/board/b1?key=e2");
-        assert_eq!(view.to_string(), "http://h/board/b1?key=v3");
+        let made = made_links(
+            "http://h",
+            r#"{"board":"b1","comment":"c4","edit":"e2","view":"v3"}"#,
+        )
+        .unwrap();
+        assert_eq!(made.edit.to_string(), "http://h/board/b1?key=e2");
+        assert_eq!(made.view.to_string(), "http://h/board/b1?key=v3");
+        assert_eq!(
+            made.comment.map(|l| l.to_string()).as_deref(),
+            Some("http://h/board/b1?key=c4")
+        );
+        let older = made_links("http://h", r#"{"board":"b1","edit":"e2","view":"v3"}"#).unwrap();
+        assert_eq!(older.comment, None);
         assert!(made_links("http://h", "forbidden").is_none());
     }
 }

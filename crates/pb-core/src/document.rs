@@ -163,6 +163,18 @@ mod key {
     pub const GROUP: &str = "group";
 }
 
+/// Whether someone who may only comment may write `key` of the root map `map`: exactly
+/// what [`Command::allowed_commenting`](crate::Command::allowed_commenting) commands write
+/// (their own votes, not the voting's settings). The server checks such people's changes
+/// with it.
+pub fn commenting_writes(map: &str, key: &str) -> bool {
+    match map {
+        key::COMMENTS | key::REACTIONS => true,
+        key::VOTING => key.starts_with("v|"),
+        _ => false,
+    }
+}
+
 #[derive(Debug)]
 pub enum Error {
     UnknownObject(ObjectId),
@@ -254,9 +266,9 @@ pub struct Document {
     show_hidden: bool,
     /// The board is protected from changes; rebuilt with `objects`.
     read_only: bool,
-    /// This copy may only look (a shared board opened with a view link): no command at
-    /// all is applied. Not stored.
-    view_only: bool,
+    /// What this copy may do: less than editing for a shared board opened with a link
+    /// to look or to comment. Not stored.
+    role: crate::Role,
     /// The board's layers, bottom to top, the base layer among them; rebuilt with `objects`.
     layers: Vec<Layer>,
     /// The layers of top-level objects and groups not on the base layer.
@@ -451,7 +463,7 @@ impl Document {
             focus: None,
             show_hidden: false,
             read_only: false,
-            view_only: false,
+            role: crate::Role::Edit,
             layers: vec![Layer::base()],
             unit_layers: HashMap::new(),
             active_layer: Layer::BASE.into(),
@@ -719,7 +731,7 @@ impl Document {
     }
 
     pub fn apply(&mut self, command: Command) -> Result<Applied> {
-        if self.view_only || (self.read_only && !command.allowed_read_only()) {
+        if !self.role.allows(&command) || (self.read_only && !command.allowed_read_only()) {
             return Err(Error::ReadOnly);
         }
         let mut applied = Applied::default();
@@ -1359,7 +1371,7 @@ impl Document {
 
     /// Whether the board is protected from changes (see [`Command::allowed_read_only`]).
     pub fn read_only(&self) -> bool {
-        self.read_only || self.view_only
+        self.read_only || self.role != crate::Role::Edit
     }
 
     /// The board's background color, if it was given one (see [`Command::SetBackground`]).
@@ -1380,14 +1392,20 @@ impl Document {
         get_str(&self.doc.get_map(key::META), key::TITLE).filter(|t| !t.trim().is_empty())
     }
 
-    /// Whether this copy may only look, changing nothing (see [`Document::set_view_only`]).
-    pub fn view_only(&self) -> bool {
-        self.view_only
+    /// What this copy may do (see [`Document::set_role`]).
+    pub fn role(&self) -> crate::Role {
+        self.role
     }
 
-    /// Lets this copy only look: for a shared board opened with a view link.
-    pub fn set_view_only(&mut self, view_only: bool) {
-        self.view_only = view_only;
+    /// Whether this copy may only look, changing nothing.
+    pub fn view_only(&self) -> bool {
+        self.role == crate::Role::View
+    }
+
+    /// Lets this copy do only what `role` allows: for a shared board opened with a link
+    /// to look or to comment.
+    pub fn set_role(&mut self, role: crate::Role) {
+        self.role = role;
     }
 
     /// Starts merging the following commands into one undo step, e.g. while a slider is

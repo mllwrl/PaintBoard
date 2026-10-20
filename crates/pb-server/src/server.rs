@@ -18,7 +18,7 @@ use pb_sync::{ClientId, MAX_ASSET, Message, Outgoing, PROTOCOL, Room};
 use tokio::sync::mpsc;
 
 use crate::metrics::bump;
-use crate::store::{Access, Store};
+use crate::store::Store;
 
 /// How long a new connection has to say which board it wants.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -429,6 +429,7 @@ fn make_board(shared: &Shared, headers: &HeaderMap) -> Response {
             Json(std::collections::BTreeMap::from([
                 ("board", new.board),
                 ("edit", new.edit),
+                ("comment", new.comment),
                 ("view", new.view),
             ]))
             .into_response()
@@ -490,6 +491,7 @@ async fn serve(mut socket: WebSocket, shared: Arc<Shared>) {
         protocol,
         board,
         token,
+        session: _,
         name,
         version,
         assets,
@@ -510,8 +512,8 @@ async fn serve(mut socket: WebSocket, shared: Arc<Shared>) {
         .lock()
         .expect("store lock")
         .access(&board, &token);
-    let can_edit = match access {
-        Ok(Some(access)) => access == Access::Edit,
+    let role = match access {
+        Ok(Some(role)) => role,
         Ok(None) => return refuse(&shared, socket, "no such board, or the link is wrong").await,
         Err(err) => {
             log::error!("access check failed: {err}");
@@ -527,7 +529,7 @@ async fn serve(mut socket: WebSocket, shared: Arc<Shared>) {
     let joined = {
         let mut live = live.lock().expect("room lock");
         live.senders.insert(client, outbox);
-        let joined = live.room.join(client, can_edit, &version, &assets);
+        let joined = live.room.join(client, role, &version, &assets);
         match joined {
             Ok(out) => {
                 dispatch(&live, out);
@@ -559,12 +561,15 @@ async fn serve(mut socket: WebSocket, shared: Arc<Shared>) {
                 };
                 bump(&shared.metrics.messages);
                 let result = incoming.and_then(|message| {
-                    if let Message::Updates(bytes) | Message::Asset(bytes) = &message {
-                        shared
-                            .metrics
-                            .bytes_in
-                            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                    }
+                    let size = match &message {
+                        Message::Updates(bytes) | Message::Asset(bytes) => bytes.len(),
+                        Message::Remarks(json) => json.len(),
+                        _ => 0,
+                    };
+                    shared
+                        .metrics
+                        .bytes_in
+                        .fetch_add(size as u64, Ordering::Relaxed);
                     let mut live = live.lock().expect("room lock");
                     let out = live.room.receive(client, message)?;
                     dispatch(&live, out);

@@ -30,19 +30,23 @@ fn real_messages() -> Vec<Vec<u8>> {
             protocol: crate::PROTOCOL,
             board: "b1".into(),
             token: "t".into(),
+            session: String::new(),
             name: "Ann".into(),
             version: vec![1, 2],
             assets: vec![pb_core::AssetId::of(b"x")],
         },
         Message::Welcome {
             client: 1,
-            can_edit: true,
+            role: pb_core::Role::Edit,
             updates: real_update(),
             version: vec![],
             assets: vec![],
         },
         Message::Updates(real_update()),
         Message::Asset(vec![1, 2, 3]),
+        Message::Remarks(
+            r#"{"schema_version":1,"start_version":{},"peers":null,"changes":[]}"#.into(),
+        ),
         Message::Presence(Presence {
             client: 0,
             name: "Bob".into(),
@@ -109,13 +113,15 @@ proptest! {
     ) {
         let mut room = Room::new();
         // A client with a made-up version vector is refused or let in, never a panic.
-        let _ = room.join(1, true, &version, &[]);
-        room.join(2, true, &[], &[]).expect("an empty version joins");
+        let _ = room.join(1, pb_core::Role::Edit, &version, &[]);
+        room.join(2, pb_core::Role::Edit, &[], &[]).expect("an empty version joins");
+        room.join(4, pb_core::Role::Comment, &[], &[]).expect("a commenter joins");
         let messages = real_messages();
         for (which, edits, cut) in sends {
             let bytes = damaged(&messages[which], &edits, cut, &[]);
             if let Ok(message) = Message::decode(&bytes) {
-                let _ = room.receive(2, message);
+                let _ = room.receive(2, message.clone());
+                let _ = room.receive(4, message);
             }
             // Loro updates are taken in whole, even damaged ones that still decode.
             let _ = room.receive(2, Message::Updates(damaged(&real_update(), &edits, cut, &[])));
@@ -123,6 +129,6 @@ proptest! {
         // The room still works: it can be saved and loaded, and someone new can join.
         let snapshot = room.snapshot();
         let mut loaded = Room::load(&snapshot, Vec::new()).expect("a room's own snapshot loads");
-        loaded.join(3, false, &[], &[]).expect("joins after the storm");
+        loaded.join(3, pb_core::Role::View, &[], &[]).expect("joins after the storm");
     }
 }

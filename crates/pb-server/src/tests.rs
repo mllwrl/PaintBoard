@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use kurbo::Rect;
-use pb_core::{Command, Document, ObjectData, ShapeKind, Style};
+use pb_core::{Command, Document, ObjectData, Role, ShapeKind, Style};
 use pb_sync::{Client, Event, Message};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -144,20 +144,41 @@ async fn boards_are_shared_and_kept() {
     let mut v = Peer::join(&addr, &board, &view, doc(3)).await;
     v.pump().await;
     assert_eq!(v.count(), 2);
-    assert_eq!(v.client.joined(), Some(false));
+    assert_eq!(v.client.joined(), Some(Role::View));
+
+    // Commenters comment; the editors see it.
+    let mut c = Peer::join(&addr, &board, &field(&body, "comment"), doc(5)).await;
+    c.pump().await;
+    assert_eq!(c.client.joined(), Some(Role::Comment));
+    c.doc
+        .apply(Command::AddComment {
+            thread: "t".into(),
+            anchor: Some(pb_core::ThreadAnchor::Point(kurbo::Point::ZERO)),
+            comment: pb_core::Comment {
+                id: "1".into(),
+                author: "cat".into(),
+                at_ms: 1,
+                text: "nice".into(),
+            },
+        })
+        .unwrap();
+    c.pump().await;
+    a.pump().await;
+    assert_eq!(a.doc.threads().len(), 1);
+    assert!(!c.events.iter().any(|e| matches!(e, Event::Error(_))));
 
     // Everyone leaves: the board is written and unloaded, then loaded for the next one.
-    drop((a, b, v));
+    drop((a, b, v, c));
     tokio::time::sleep(Duration::from_millis(300)).await;
     shared.save_all();
     let mut c = Peer::join(&addr, &board, &view, doc(4)).await;
     c.pump().await;
     assert_eq!(c.count(), 2);
     assert_eq!(c.doc.assets().len(), 1);
-    // Counted for monitoring: four joins, the last one still connected.
+    // Counted for monitoring: five joins, the last one still connected.
     let metrics = shared.metrics.render(1, 1);
     for line in [
-        "paintboard_joins_total 4\n",
+        "paintboard_joins_total 5\n",
         "paintboard_connected 1\n",
         "paintboard_boards_made_total 1\n",
     ] {
@@ -211,9 +232,15 @@ async fn the_apps_socket_and_requests_work() {
         while let Some(bytes) = socket.try_recv() {
             let events =
                 client.receive(Message::decode(&bytes).unwrap(), &mut doc, &mut Vec::new());
-            joined |= events
-                .iter()
-                .any(|e| matches!(e, Event::Joined { can_edit: true, .. }));
+            joined |= events.iter().any(|e| {
+                matches!(
+                    e,
+                    Event::Joined {
+                        role: Role::Edit,
+                        ..
+                    }
+                )
+            });
         }
         if joined {
             break;

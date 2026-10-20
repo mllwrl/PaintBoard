@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 pb-core.workspace = true
 loro.workspace = true
+log.workspace = true
 
 [dev-dependencies]
 kurbo.workspace = true

@@ -22,6 +22,8 @@ pb-sync = { path = "crates/pb-sync" }
 kurbo = "0.13"
 rstar = "0.12"
 loro = "1.16"
+# Loro's JSON form of changes, which the server checks for people who may only comment.
+serde_json = "1"
 # Pure Rust build: no C or assembly to compile, and it works on wasm32.
 blake3 = { version = "1.8", default-features = false, features = ["std", "pure"] }
 vello = "0.11"

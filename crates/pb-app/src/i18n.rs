@@ -156,7 +156,16 @@ const RU: &[(&str, &str)] = &[
         "You can look at this board but not change it.",
         "Эту доску можно смотреть, но не менять.",
     ),
+    (
+        "You can comment, react and vote here, but not change the board.",
+        "Здесь можно комментировать, ставить реакции и голосовать, но не менять доску.",
+    ),
     ("Here now:", "Сейчас здесь:"),
+    ("Link to comment", "Ссылка для комментариев"),
+    (
+        "Whoever has it can comment, react and vote, but not change the board",
+        "У кого она есть, может комментировать, ставить реакции и голосовать, но не менять доску",
+    ),
     ("Link to edit", "Ссылка для правки"),
     (
         "Whoever has it can change the board",
