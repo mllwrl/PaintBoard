@@ -225,3 +225,50 @@ pub fn save_dark_theme(dark: bool) {
         log::warn!("theme not saved: {err}");
     }
 }
+
+/// File with the accounts signed in, a line each: server, email, session.
+const ACCOUNTS_FILE: &str = "accounts.txt";
+
+fn account_lines() -> Vec<(String, String, String)> {
+    let text = pb_platform::fs::app_data_dir()
+        .and_then(|dir| pb_platform::fs::read(&dir.join(ACCOUNTS_FILE)))
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let server = parts.next()?.to_owned();
+            let email = parts.next()?.to_owned();
+            let session = parts.next().filter(|s| !s.is_empty())?.to_owned();
+            Some((server, email, session))
+        })
+        .collect()
+}
+
+/// The account signed in on `server`: its email and session.
+pub fn account(server: &str) -> Option<(String, String)> {
+    account_lines()
+        .into_iter()
+        .find(|(s, ..)| s == server)
+        .map(|(_, email, session)| (email, session))
+}
+
+/// Remembers (or with `None` forgets) the account signed in on `server`.
+pub fn save_account(server: &str, account: Option<(&str, &str)>) {
+    let mut lines: Vec<_> = account_lines()
+        .into_iter()
+        .filter(|(s, ..)| s != server)
+        .collect();
+    if let Some((email, session)) = account {
+        lines.push((server.to_owned(), email.to_owned(), session.to_owned()));
+    }
+    let text: String = lines
+        .iter()
+        .map(|(s, e, k)| format!("{s}\t{e}\t{k}\n"))
+        .collect();
+    let saved = pb_platform::fs::app_data_dir()
+        .and_then(|dir| pb_platform::fs::write_atomic(&dir.join(ACCOUNTS_FILE), text.as_bytes()));
+    if let Err(err) = saved {
+        log::warn!("account not remembered: {err}");
+    }
+}

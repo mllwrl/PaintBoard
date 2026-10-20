@@ -56,6 +56,21 @@ pub enum Action {
     StopSharing,
     /// Connects to the server again now.
     RetrySharing,
+    /// Signs in on the server (as typed) with this email.
+    SignIn(String, String),
+    CancelSignIn,
+    SignOut,
+    RefreshBoards,
+    /// Opens a board of the account, by id.
+    OpenMyBoard(String),
+    /// Lets someone in to the shared board by email: `edit`, `comment`, `view` or `none`.
+    SetMember(String, String),
+    /// A new link for this role on the shared board; the old one stops working.
+    RenewLink(pb_core::Role),
+    /// Deletes the shared board from the server, after asking.
+    DeleteSharedBoard,
+    /// Deletes the account and the boards it owns from the server, after asking.
+    DeleteAccount,
     /// Puts text on the clipboard (a link to share).
     CopyText(String),
     /// Opens this board (one kept in the browser).
@@ -855,11 +870,8 @@ pub struct Ui {
     timer_text: String,
     /// The board kept in the browser being renamed, and the name typed.
     renaming_board: Option<(std::path::PathBuf, String)>,
-    /// Server address and shared link typed in the sharing window.
-    server_text: String,
-    share_link_text: String,
-    /// The name being typed in the sharing window, while it is.
-    share_name: Option<String>,
+    /// What is typed in the sharing window.
+    share_texts: ShareTexts,
     repaint_at: Option<Instant>,
 }
 
@@ -902,9 +914,7 @@ impl Ui {
             version_name: String::new(),
             timer_text: String::new(),
             renaming_board: None,
-            server_text: String::new(),
-            share_link_text: String::new(),
-            share_name: None,
+            share_texts: ShareTexts::default(),
             repaint_at: None,
         }
     }
@@ -1018,9 +1028,7 @@ impl Ui {
         let version_name = &mut self.version_name;
         let timer_text = &mut self.timer_text;
         let renaming_board = &mut self.renaming_board;
-        let server_text = &mut self.server_text;
-        let share_link_text = &mut self.share_link_text;
-        let share_name = &mut self.share_name;
+        let share_texts = &mut self.share_texts;
         let output = self.ctx.run_pass(input, |ctx| {
             others(ctx, model);
             if let Some(banner) = &model.follow_banner {
@@ -1131,14 +1139,7 @@ impl Ui {
                 boards_window(ctx, model, renaming_board, &mut actions);
             }
             if let Some(view) = &model.share_window {
-                share_window(
-                    ctx,
-                    view,
-                    server_text,
-                    share_link_text,
-                    share_name,
-                    &mut actions,
-                );
+                share_window(ctx, view, share_texts, &mut actions);
             }
             match &model.thread {
                 Some(thread) => thread_panel(ctx, thread, comment_text, &mut actions),
@@ -1574,9 +1575,23 @@ fn board_menu(ctx: &Context, model: &Model, typed: Typed, actions: &mut Vec<Acti
 }
 
 /// What the sharing window shows.
+/// What is typed in the sharing window.
+#[derive(Default)]
+struct ShareTexts {
+    server: String,
+    link: String,
+    /// The name being typed, while it is.
+    name: Option<String>,
+    email: String,
+    /// Someone to let in to the board, and as what.
+    member: String,
+    member_role: String,
+}
+
 pub struct ShareView {
     /// The name the user goes by.
     pub name: String,
+    pub account: AccountView,
     /// Shared: how it is going, the links and who is there.
     pub shared: Option<SharedView>,
     /// The server address last used.
@@ -1584,6 +1599,19 @@ pub struct ShareView {
     /// A board is being made on the server.
     pub making: bool,
     /// What went wrong last.
+    pub error: Option<String>,
+}
+
+/// The account on the server in use.
+pub struct AccountView {
+    /// The server; empty if none is known yet.
+    pub server: String,
+    /// Signed in with this email.
+    pub email: Option<String>,
+    /// Waiting for the link in the email to this address, which shows this code.
+    pub signing_in: Option<(String, Option<String>)>,
+    /// The account's boards: id, title, role.
+    pub boards: Option<Vec<(String, String, String)>>,
     pub error: Option<String>,
 }
 
@@ -1597,6 +1625,8 @@ pub struct SharedView {
     pub edit_link: Option<String>,
     pub comment_link: Option<String>,
     pub view_link: Option<String>,
+    /// People let in by email, when this account owns the board.
+    pub members: Option<Vec<(String, String)>>,
     /// The others on the board.
     pub people: Vec<PersonView>,
 }
@@ -1615,12 +1645,183 @@ fn rgb(color: u32) -> Color32 {
     Color32::from_rgb((color >> 16) as u8, (color >> 8) as u8, color as u8)
 }
 
+/// How a role reads in the sharing window.
+fn role_label(role: &str) -> &'static str {
+    match role {
+        "owner" => tr("owner"),
+        "edit" => tr("can edit"),
+        "comment" => tr("can comment"),
+        _ => tr("can look"),
+    }
+}
+
+/// Signing in, the account's boards, signing out.
+fn account_section(
+    ui: &mut egui::Ui,
+    account: &AccountView,
+    texts: &mut ShareTexts,
+    actions: &mut Vec<Action>,
+) {
+    let server = if account.server.is_empty() {
+        texts.server.trim().to_owned()
+    } else {
+        account.server.clone()
+    };
+    if server.is_empty() {
+        return;
+    }
+    if let Some(email) = &account.email {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(trf("Signed in as {}", &[email]));
+            if ui.small_button(tr("Sign out")).clicked() {
+                actions.push(Action::SignOut);
+            }
+            if ui
+                .small_button(tr("Delete account…"))
+                .on_hover_text(tr(
+                    "Deletes the account and the boards it owns from the server",
+                ))
+                .clicked()
+            {
+                actions.push(Action::DeleteAccount);
+            }
+        });
+        if let Some(boards) = &account.boards {
+            egui::CollapsingHeader::new(trf("My boards ({})", &[&boards.len()]))
+                .id_salt("my boards")
+                .show(ui, |ui| {
+                    if boards.is_empty() {
+                        ui.weak(tr("None yet: boards you share while signed in, and those you are let in to, show here."));
+                    }
+                    egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                        for (board, title, role) in boards {
+                            ui.horizontal(|ui| {
+                                let title = if title.is_empty() { board } else { title };
+                                if ui.link(title).on_hover_text(tr("Open this board")).clicked() {
+                                    actions.push(Action::OpenMyBoard(board.clone()));
+                                }
+                                ui.weak(role_label(role));
+                            });
+                        }
+                    });
+                    if ui.small_button(tr("Refresh")).clicked() {
+                        actions.push(Action::RefreshBoards);
+                    }
+                });
+        }
+    } else if let Some((email, code)) = &account.signing_in {
+        ui.label(trf(
+            "A link to sign in was sent to {}. Open it in the email.",
+            &[email],
+        ));
+        match code {
+            Some(code) => {
+                ui.horizontal(|ui| {
+                    ui.label(tr("The page it opens must show the code"));
+                    ui.strong(code);
+                });
+            }
+            None => {
+                ui.weak(tr("Sending the email…"));
+            }
+        }
+        if ui.button(tr("Cancel")).clicked() {
+            actions.push(Action::CancelSignIn);
+        }
+    } else {
+        ui.label(tr(
+            "Sign in to see your boards in one list and let people in by email.",
+        ));
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut texts.email)
+                    .hint_text("name@example.com")
+                    .desired_width(240.0),
+            );
+            let typed = texts.email.contains('@');
+            if ui.add_enabled(typed, Button::new(tr("Sign in"))).clicked() {
+                actions.push(Action::SignIn(
+                    server.clone(),
+                    texts.email.trim().to_owned(),
+                ));
+            }
+        });
+    }
+    if let Some(error) = &account.error {
+        ui.colored_label(Color32::from_rgb(0xDC, 0x26, 0x26), error);
+    }
+    ui.separator();
+}
+
+/// The owner's list of people let in by email, and a row to let someone in.
+fn members_section(
+    ui: &mut egui::Ui,
+    members: &[(String, String)],
+    texts: &mut ShareTexts,
+    actions: &mut Vec<Action>,
+) {
+    const ROLES: [&str; 3] = ["edit", "comment", "view"];
+    ui.add_space(6.0);
+    ui.label(tr("People let in by email")).on_hover_text(tr(
+        "They open the board from My boards after signing in with that address",
+    ));
+    for (email, role) in members {
+        ui.horizontal(|ui| {
+            ui.label(email);
+            if role == "owner" {
+                ui.weak(role_label(role));
+                return;
+            }
+            let mut chosen = role.clone();
+            egui::ComboBox::from_id_salt(("member role", email))
+                .selected_text(role_label(&chosen))
+                .show_ui(ui, |ui| {
+                    for r in ROLES {
+                        ui.selectable_value(&mut chosen, r.to_owned(), role_label(r));
+                    }
+                });
+            if chosen != *role {
+                actions.push(Action::SetMember(email.clone(), chosen));
+            }
+            if ui.small_button("×").on_hover_text(tr("Remove")).clicked() {
+                actions.push(Action::SetMember(email.clone(), "none".into()));
+            }
+        });
+    }
+    ui.horizontal(|ui| {
+        if texts.member_role.is_empty() {
+            texts.member_role = "edit".into();
+        }
+        ui.add(
+            egui::TextEdit::singleline(&mut texts.member)
+                .hint_text("name@example.com")
+                .desired_width(200.0),
+        );
+        egui::ComboBox::from_id_salt("new member role")
+            .selected_text(role_label(&texts.member_role))
+            .show_ui(ui, |ui| {
+                for r in ROLES {
+                    ui.selectable_value(&mut texts.member_role, r.to_owned(), role_label(r));
+                }
+            });
+        let typed = texts.member.contains('@');
+        if ui
+            .add_enabled(typed, Button::new(tr("Let in")))
+            .on_hover_text(tr("They get an email about it"))
+            .clicked()
+        {
+            actions.push(Action::SetMember(
+                std::mem::take(&mut texts.member).trim().to_owned(),
+                texts.member_role.clone(),
+            ));
+        }
+    });
+}
+
 fn share_window(
     ctx: &Context,
     view: &ShareView,
-    server_text: &mut String,
-    link_text: &mut String,
-    name_text: &mut Option<String>,
+    texts: &mut ShareTexts,
     actions: &mut Vec<Action>,
 ) {
     let mut open = true;
@@ -1634,15 +1835,16 @@ fn share_window(
             ui.set_max_width(460.0);
             ui.horizontal(|ui| {
                 ui.label(tr("Your name"));
-                let name = name_text.get_or_insert_with(|| view.name.clone());
+                let name = texts.name.get_or_insert_with(|| view.name.clone());
                 let field = ui.add(egui::TextEdit::singleline(name).desired_width(200.0))
                     .on_hover_text(tr("Shown to others next to your pointer, comments and votes"));
                 if field.lost_focus() {
                     actions.push(Action::SetName(name.clone()));
-                    *name_text = None;
+                    texts.name = None;
                 }
             });
             ui.separator();
+            account_section(ui, &view.account, texts, actions);
             if let Some(shared) = &view.shared {
                 ui.horizontal(|ui| {
                     let color = if shared.online {
@@ -1708,24 +1910,36 @@ fn share_window(
                     }
                 }
                 ui.add_space(6.0);
-                let link_row = |ui: &mut egui::Ui, label: &str, hint: &str, link: &str, actions: &mut Vec<Action>| {
+                let owner = shared.members.is_some();
+                // The owner sees every link, and can replace each: the old one stops working.
+                let link_row = |ui: &mut egui::Ui, label: &str, hint: &str, link: Option<&String>, role: pb_core::Role, actions: &mut Vec<Action>| {
+                    if link.is_none() && !owner {
+                        return;
+                    }
                     ui.label(label).on_hover_text(hint);
                     ui.horizontal(|ui| {
-                        let mut shown = link.to_owned();
-                        ui.add(egui::TextEdit::singleline(&mut shown).desired_width(340.0));
-                        if ui.button(tr("Copy")).clicked() {
-                            actions.push(Action::CopyText(link.to_owned()));
+                        let mut shown = link.cloned().unwrap_or_default();
+                        ui.add(egui::TextEdit::singleline(&mut shown).desired_width(300.0));
+                        if ui.add_enabled(link.is_some(), Button::new(tr("Copy"))).clicked()
+                            && let Some(link) = link
+                        {
+                            actions.push(Action::CopyText(link.clone()));
+                        }
+                        if owner
+                            && ui
+                                .button(tr("New link"))
+                                .on_hover_text(tr("Makes a new link: the old one stops working"))
+                                .clicked()
+                        {
+                            actions.push(Action::RenewLink(role));
                         }
                     });
                 };
-                if let Some(link) = &shared.edit_link {
-                    link_row(ui, tr("Link to edit"), tr("Whoever has it can change the board"), link, actions);
-                }
-                if let Some(link) = &shared.comment_link {
-                    link_row(ui, tr("Link to comment"), tr("Whoever has it can comment, react and vote, but not change the board"), link, actions);
-                }
-                if let Some(link) = &shared.view_link {
-                    link_row(ui, tr("Link to look"), tr("Whoever has it can only look"), link, actions);
+                link_row(ui, tr("Link to edit"), tr("Whoever has it can change the board"), shared.edit_link.as_ref(), pb_core::Role::Edit, actions);
+                link_row(ui, tr("Link to comment"), tr("Whoever has it can comment, react and vote, but not change the board"), shared.comment_link.as_ref(), pb_core::Role::Comment, actions);
+                link_row(ui, tr("Link to look"), tr("Whoever has it can only look"), shared.view_link.as_ref(), pb_core::Role::View, actions);
+                if let Some(members) = &shared.members {
+                    members_section(ui, members, texts, actions);
                 }
                 ui.add_space(6.0);
                 if ui
@@ -1735,38 +1949,46 @@ fn share_window(
                 {
                     actions.push(Action::StopSharing);
                 }
+                if shared.members.is_some()
+                    && ui
+                        .button(tr("Delete from the server…"))
+                        .on_hover_text(tr("Everyone loses the board; your copy here stays"))
+                        .clicked()
+                {
+                    actions.push(Action::DeleteSharedBoard);
+                }
             } else {
                 ui.label(tr("Put this board on a server to work on it together: everyone with the link sees changes as they are made."));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.label(tr("Server"));
-                    if server_text.is_empty() {
-                        server_text.clone_from(&view.server);
+                    if texts.server.is_empty() {
+                        texts.server.clone_from(&view.server);
                     }
                     ui.add(
-                        egui::TextEdit::singleline(server_text)
+                        egui::TextEdit::singleline(&mut texts.server)
                             .hint_text("boards.example.com")
                             .desired_width(260.0),
                     );
                 });
-                let can_make = !view.making && !server_text.trim().is_empty();
+                let can_make = !view.making && !texts.server.trim().is_empty();
                 let label = if view.making { tr("Making the board…") } else { tr("Share this board") };
                 if ui.add_enabled(can_make, Button::new(label)).clicked() {
-                    actions.push(Action::CreateShared(server_text.trim().to_owned()));
+                    actions.push(Action::CreateShared(texts.server.trim().to_owned()));
                 }
                 ui.separator();
                 ui.label(tr("Or open a board someone shared with you:"));
                 ui.horizontal(|ui| {
                     ui.add(
-                        egui::TextEdit::singleline(link_text)
+                        egui::TextEdit::singleline(&mut texts.link)
                             .hint_text("https://…/board/…?key=…")
                             .desired_width(300.0),
                     );
                     if ui
-                        .add_enabled(!link_text.trim().is_empty(), Button::new(tr("Open")))
+                        .add_enabled(!texts.link.trim().is_empty(), Button::new(tr("Open")))
                         .clicked()
                     {
-                        actions.push(Action::JoinShared(link_text.trim().to_owned()));
+                        actions.push(Action::JoinShared(texts.link.trim().to_owned()));
                     }
                 });
             }

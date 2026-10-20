@@ -3579,6 +3579,7 @@ dependencies = [
  "pb-text",
  "pb-tools",
  "pollster 1.0.1",
+ "serde_json",
  "wasm-bindgen-futures",
  "winit",
 ]

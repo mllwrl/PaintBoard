@@ -575,6 +575,14 @@ async fn serve(mut socket: WebSocket, shared: Arc<Shared>) {
     };
     let role = match access {
         Ok(Some(role)) => role,
+        Ok(None) if token.is_empty() => {
+            return refuse(
+                &shared,
+                socket,
+                "sign in to open this board, or ask for a link",
+            )
+            .await;
+        }
         Ok(None) => return refuse(&shared, socket, "no such board, or the link is wrong").await,
         Err(err) => {
             log::error!("access check failed: {err}");

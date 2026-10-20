@@ -12,6 +12,8 @@ use pb_sync::{Client, ClientId, Event, Message, Presence};
 
 /// A link to a shared board: `https://host/board/<id>?key=<token>`. The key says what
 /// its holder may do, so a link for looking only cannot be turned into one for editing.
+/// Without a key (`https://host/board/<id>`) it opens the board for those let in to it by
+/// their account.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Link {
     /// `http(s)://host[:port]`, without a trailing slash.
@@ -24,16 +26,21 @@ impl Link {
     pub fn parse(text: &str) -> Option<Self> {
         let text = text.trim();
         let (server, rest) = text.split_once("/board/")?;
-        let (board, query) = rest.split_once('?')?;
-        let token = query
-            .split('&')
-            .find_map(|pair| pair.strip_prefix("key="))?
-            .trim_end_matches('/');
+        let (board, token) = match rest.split_once('?') {
+            Some((board, query)) => (
+                board,
+                query
+                    .split('&')
+                    .find_map(|pair| pair.strip_prefix("key="))?
+                    .trim_end_matches('/'),
+            ),
+            None => (rest.trim_end_matches('/'), ""),
+        };
         let server = server.trim_end_matches('/');
         let valid = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric());
         if !(server.starts_with("http://") || server.starts_with("https://"))
             || !valid(board)
-            || !valid(token)
+            || !(token.is_empty() || valid(token))
         {
             return None;
         }
@@ -62,7 +69,11 @@ impl Link {
 
 impl std::fmt::Display for Link {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/board/{}?key={}", self.server, self.board, self.token)
+        write!(f, "{}/board/{}", self.server, self.board)?;
+        if !self.token.is_empty() {
+            write!(f, "?key={}", self.token)?;
+        }
+        Ok(())
     }
 }
 
@@ -208,14 +219,19 @@ impl Sharing {
         view_link: Option<Link>,
         comment_link: Option<Link>,
         name: &str,
+        session: Option<&str>,
         wake: impl Fn() + MaybeSend + 'static,
     ) -> Self {
+        let mut client = Client::new(link.board.clone(), link.token.clone(), name);
+        if let Some(session) = session {
+            client.set_session(session);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         let wake: Waker = std::sync::Arc::new(wake);
         #[cfg(target_arch = "wasm32")]
         let wake: Waker = std::rc::Rc::new(wake);
         let mut sharing = Self {
-            client: Client::new(link.board.clone(), link.token.clone(), name),
+            client,
             link,
             view_link,
             comment_link,
@@ -431,6 +447,10 @@ mod tests {
         let local = Link::parse("http://localhost:8080/board/x?key=y").unwrap();
         assert_eq!(local.socket_url(), "ws://localhost:8080/ws");
         assert_eq!(Link::parse("https://example.com/page"), None);
+        // Without a key: for those let in by their account.
+        let open = Link::parse("https://h/board/b1").unwrap();
+        assert_eq!(open.token, "");
+        assert_eq!(open.to_string(), "https://h/board/b1");
         assert_eq!(Link::parse("ftp://h/board/x?key=y"), None);
         assert_eq!(Link::parse("https://h/board/x?key=y z"), None);
     }

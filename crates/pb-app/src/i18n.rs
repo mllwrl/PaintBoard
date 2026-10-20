@@ -160,6 +160,91 @@ const RU: &[(&str, &str)] = &[
         "You can comment, react and vote here, but not change the board.",
         "Здесь можно комментировать, ставить реакции и голосовать, но не менять доску.",
     ),
+    ("owner", "владелец"),
+    ("can edit", "может править"),
+    ("can comment", "может комментировать"),
+    ("can look", "может смотреть"),
+    ("Sign out", "Выйти"),
+    ("Delete account…", "Удалить аккаунт…"),
+    (
+        "Deletes the account and the boards it owns from the server",
+        "Удаляет аккаунт и его доски с сервера",
+    ),
+    (
+        "None yet: boards you share while signed in, and those you are let in to, show here.",
+        "Пока нет: здесь будут доски, которыми вы поделились после входа, и те, к которым вам открыли доступ.",
+    ),
+    ("Open this board", "Открыть эту доску"),
+    ("Refresh", "Обновить"),
+    (
+        "The page it opens must show the code",
+        "На открывшейся странице должен быть код",
+    ),
+    ("Sending the email…", "Отправляем письмо…"),
+    (
+        "Sign in to see your boards in one list and let people in by email.",
+        "Войдите, чтобы видеть свои доски одним списком и открывать доступ по email.",
+    ),
+    ("Sign in", "Войти"),
+    ("People let in by email", "Доступ по email"),
+    (
+        "They open the board from My boards after signing in with that address",
+        "Они открывают доску из «Мои доски», войдя с этим адресом",
+    ),
+    ("Let in", "Открыть доступ"),
+    (
+        "They get an email about it",
+        "Человеку придёт письмо об этом",
+    ),
+    ("New link", "Новая ссылка"),
+    (
+        "Makes a new link: the old one stops working",
+        "Делает новую ссылку, старая перестаёт работать",
+    ),
+    ("Delete from the server…", "Удалить с сервера…"),
+    (
+        "Everyone loses the board; your copy here stays",
+        "Доска пропадёт у всех; ваша копия здесь останется",
+    ),
+    ("Signed in as {}", "Вы вошли как {}"),
+    ("My boards ({})", "Мои доски ({})"),
+    (
+        "A link to sign in was sent to {}. Open it in the email.",
+        "Ссылка для входа отправлена на {}. Откройте её в письме.",
+    ),
+    (
+        "Delete this board from the server? Everyone loses it; your copy here stays.",
+        "Удалить эту доску с сервера? Она пропадёт у всех; ваша копия здесь останется.",
+    ),
+    ("Delete from the server", "Удалить с сервера"),
+    ("Delete account", "Удалить аккаунт"),
+    (
+        "Delete your account? The boards it owns ({}) are deleted from the server for everyone. Copies of boards opened on this computer stay here: open the others from My boards first to keep them.",
+        "Удалить ваш аккаунт? Его доски ({}) удалятся с сервера у всех. Копии досок, открытых на этом компьютере, останутся здесь: чтобы сохранить остальные, сначала откройте их из «Мои доски».",
+    ),
+    (
+        "The link in the email has expired: sign in again.",
+        "Ссылка в письме больше не работает: войдите заново.",
+    ),
+    (
+        "This server has no accounts: share by links instead.",
+        "На этом сервере нет аккаунтов: делитесь ссылками.",
+    ),
+    ("Signed out: sign in again.", "Вы вышли: войдите снова."),
+    (
+        "Only the board's owner can do that.",
+        "Это может только владелец доски.",
+    ),
+    (
+        "Too many attempts: try again later.",
+        "Слишком много попыток: попробуйте позже.",
+    ),
+    ("That is not an email address.", "Это не адрес email."),
+    (
+        "The server could not send the email.",
+        "Сервер не смог отправить письмо.",
+    ),
+    ("The server did not do it: {}", "Сервер этого не сделал: {}"),
     ("Here now:", "Сейчас здесь:"),
     ("Link to comment", "Ссылка для комментариев"),
     (
@@ -1035,6 +1120,7 @@ mod tests {
             include_str!("app.rs"),
             include_str!("export.rs"),
             include_str!("session.rs"),
+            include_str!("account.rs"),
         ];
         let table = russian();
         let mut missing = Vec::new();

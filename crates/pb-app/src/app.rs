@@ -78,6 +78,8 @@ pub enum UserEvent {
     /// The server answered the request to make a shared board: its address, and the
     /// answer.
     BoardMade(String, Result<String, String>),
+    /// The server answered a request about the account.
+    Account(crate::account::Reply),
     /// A board file was picked to open (later than asked on the web).
     BoardPicked(PathBuf),
     /// Files were picked to add to the board.
@@ -257,6 +259,8 @@ pub struct App {
     recognition: Option<PendingRecognition>,
     /// The board shared through a server, while it is.
     sharing: Option<crate::sharing::Sharing>,
+    /// The account on the sharing server.
+    accounts: crate::account::Accounts,
     /// Whose view this copy follows on a shared board, the camera as following last set
     /// it (moved since: the user took over) and when.
     following: Option<pb_sync::ClientId>,
@@ -292,7 +296,14 @@ impl App {
                 let _ = wake.send_event(UserEvent::Saved);
             });
         }
+        let accounts = {
+            let proxy = proxy.clone();
+            crate::account::Accounts::new(move |reply| {
+                let _ = proxy.send_event(UserEvent::Account(reply));
+            })
+        };
         let mut app = Self {
+            accounts,
             proxy,
             window: None,
             gpu: None,
@@ -1237,6 +1248,57 @@ impl App {
             Action::ToggleShare => {
                 self.share_window = !self.share_window;
                 self.share_error = None;
+                if self.share_window {
+                    self.refresh_account();
+                }
+            }
+            Action::SignIn(server, email) => {
+                self.accounts.use_server(&server);
+                self.accounts.start(&server, &email);
+            }
+            Action::CancelSignIn => self.accounts.cancel(),
+            Action::SignOut => self.accounts.sign_out(),
+            Action::RefreshBoards => self.accounts.refresh_boards(),
+            Action::OpenMyBoard(board) => {
+                if let Some(account) = &self.accounts.account {
+                    let link = format!("{}/board/{board}", account.server);
+                    self.join_shared(&link);
+                }
+            }
+            Action::SetMember(email, role) => {
+                if let Some(sharing) = &self.sharing {
+                    let board = sharing.link.board.clone();
+                    self.accounts.set_member(&board, &email, &role);
+                }
+            }
+            Action::RenewLink(role) => {
+                if let Some(sharing) = &self.sharing {
+                    self.accounts.renew_link(&sharing.link.board, role);
+                }
+            }
+            Action::DeleteSharedBoard => {
+                let question = tr(
+                    "Delete this board from the server? Everyone loses it; your copy here stays.",
+                );
+                if let Some(sharing) = &self.sharing
+                    && dialog::confirm(tr("Delete from the server"), question)
+                {
+                    self.accounts.delete_board(&sharing.link.board);
+                }
+            }
+            Action::DeleteAccount => {
+                let owned = self
+                    .accounts
+                    .boards
+                    .as_ref()
+                    .map_or(0, |b| b.iter().filter(|b| b.role == "owner").count());
+                let question = trf(
+                    "Delete your account? The boards it owns ({}) are deleted from the server for everyone. Copies of boards opened on this computer stay here: open the others from My boards first to keep them.",
+                    &[&owned],
+                );
+                if dialog::confirm(tr("Delete account"), &question) {
+                    self.accounts.delete_account();
+                }
             }
             Action::CreateShared(server) => self.create_shared(&server),
             Action::SetName(name) => {
@@ -4429,7 +4491,15 @@ impl App {
         self.share_error = None;
         let proxy = self.proxy.clone();
         let url = format!("{server}/boards");
-        pb_platform::net::post(&url, None, move |answer| {
+        // Made while signed in, the board is the account's.
+        self.accounts.use_server(&server);
+        let auth = self
+            .accounts
+            .session_for(&server)
+            .map(|s| format!("Bearer {s}"));
+        let headers: Vec<(&str, &str)> =
+            auth.iter().map(|a| ("authorization", a.as_str())).collect();
+        pb_platform::net::fetch("POST", &url, &headers, None, move |answer| {
             let _ = proxy.send_event(UserEvent::BoardMade(server, answer));
         });
     }
@@ -4488,15 +4558,75 @@ impl App {
         );
         let proxy = self.proxy.clone();
         self.share_error = None;
+        self.accounts.use_server(&link.server);
+        let session = self.accounts.session_for(&link.server).map(str::to_owned);
         self.sharing = Some(crate::sharing::Sharing::start(
             link,
             view_link,
             comment_link,
             &self.me,
+            session.as_deref(),
             move || {
                 let _ = proxy.send_event(UserEvent::Network);
             },
         ));
+    }
+
+    /// Asks the server about the account again: its boards, and the open board's members
+    /// if it owns it.
+    fn refresh_account(&mut self) {
+        let server = match &self.sharing {
+            Some(sharing) => sharing.link.server.clone(),
+            None => Some(crate::settings::server())
+                .filter(|s| !s.is_empty())
+                .or_else(page_server)
+                .unwrap_or_default(),
+        };
+        self.accounts.use_server(&server);
+        self.accounts.members = None;
+        if self.accounts.account.is_some() {
+            self.accounts.refresh_boards();
+            if let Some(sharing) = &self.sharing {
+                self.accounts.load_members(&sharing.link.board);
+            }
+        }
+    }
+
+    /// Acts on what the server said about the account.
+    fn account_outcome(&mut self, outcome: crate::account::Outcome) {
+        use crate::account::Outcome;
+        match outcome {
+            Outcome::NewLink(board, role, token) => {
+                let Some(sharing) = &mut self.sharing else {
+                    return;
+                };
+                if sharing.link.board != board {
+                    return;
+                }
+                let link = crate::sharing::Link {
+                    token,
+                    ..sharing.link.clone()
+                };
+                match role {
+                    // Joined with the old link to edit, or by the account: this copy
+                    // keeps the new one (it joins with it next time).
+                    pb_core::Role::Edit => sharing.link = link,
+                    pb_core::Role::Comment => sharing.comment_link = Some(link),
+                    pb_core::Role::View => sharing.view_link = Some(link),
+                }
+                let links = crate::settings::SharedLinks {
+                    link: sharing.link.to_string(),
+                    view: sharing.view_link.as_ref().map(ToString::to_string),
+                    comment: sharing.comment_link.as_ref().map(ToString::to_string),
+                };
+                crate::settings::save_shared_link(&self.board_key(), Some(&links));
+            }
+            Outcome::BoardGone(board) => {
+                if self.sharing.as_ref().is_some_and(|s| s.link.board == board) {
+                    self.stop_sharing();
+                }
+            }
+        }
     }
 
     fn stop_sharing(&mut self) {
@@ -4677,8 +4807,21 @@ impl App {
                     leading: p.leading,
                 })
                 .collect();
-            let edit_link =
-                (sharing.view_link.is_some() || can_edit).then(|| sharing.link.to_string());
+            // A link without a key opens the board only for those let in by account.
+            let edit_link = (!sharing.link.token.is_empty()
+                && (sharing.view_link.is_some() || can_edit))
+                .then(|| sharing.link.to_string());
+            let members = self
+                .accounts
+                .members
+                .as_ref()
+                .filter(|(board, _)| *board == sharing.link.board)
+                .map(|(_, members)| {
+                    members
+                        .iter()
+                        .map(|m| (m.email.clone(), m.role.clone()))
+                        .collect()
+                });
             let view_link = sharing
                 .view_link
                 .as_ref()
@@ -4698,6 +4841,7 @@ impl App {
                 edit_link: edit_link.filter(|_| can_edit),
                 comment_link,
                 view_link,
+                members,
                 people,
             }
         });
@@ -4709,8 +4853,30 @@ impl App {
             };
             (text, s.online)
         });
+        let accounts = &self.accounts;
+        let account = crate::ui::AccountView {
+            server: accounts
+                .account
+                .as_ref()
+                .map(|a| a.server.clone())
+                .or_else(|| self.sharing.as_ref().map(|s| s.link.server.clone()))
+                .unwrap_or_default(),
+            email: accounts.account.as_ref().map(|a| a.email.clone()),
+            signing_in: accounts
+                .signing_in
+                .as_ref()
+                .map(|s| (s.email.clone(), s.code.clone())),
+            boards: accounts.boards.as_ref().map(|boards| {
+                boards
+                    .iter()
+                    .map(|b| (b.board.clone(), b.title.clone(), b.role.clone()))
+                    .collect()
+            }),
+            error: accounts.error.clone(),
+        };
         let window = self.share_window.then(|| crate::ui::ShareView {
             name: self.me.to_string(),
+            account,
             shared,
             server: Some(crate::settings::server())
                 .filter(|s| !s.is_empty())
@@ -5543,6 +5709,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let now = Instant::now();
         self.tick_sharing(now);
+        self.accounts.tick(now);
         self.session.tick(&self.document, now);
         // The GPU reports back between frames: keep them coming until the file is made.
         if self.step_making() {
@@ -5591,6 +5758,7 @@ impl ApplicationHandler<UserEvent> for App {
             timer,
             sampling,
             self.sharing.as_ref().and_then(|s| s.deadline()),
+            self.accounts.deadline(),
         ]
         .into_iter()
         .flatten()
@@ -5621,6 +5789,12 @@ impl ApplicationHandler<UserEvent> for App {
             // Waking up is all it takes: `about_to_wait` ticks the sharing.
             UserEvent::Network => {}
             UserEvent::BoardMade(server, answer) => self.board_made(&server, answer),
+            UserEvent::Account(reply) => {
+                if let Some(outcome) = self.accounts.receive(reply) {
+                    self.account_outcome(outcome);
+                }
+                self.request_redraw();
+            }
             UserEvent::BoardPicked(path) => self.open_file(path),
             UserEvent::FilesDropped(paths, at) => {
                 let at = self.camera.screen_to_world(at);
