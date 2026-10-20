@@ -668,6 +668,16 @@ const RU: &[(&str, &str)] = &[
     ("PNG", "PNG"),
     ("JPEG", "JPEG"),
     ("PDF", "PDF"),
+    ("SVG", "SVG"),
+    ("PDF (pictures)", "PDF (картинками)"),
+    (
+        "Shapes and text as lines, sharp at any size",
+        "Фигуры и текст линиями, чёткие при любом размере",
+    ),
+    (
+        "Each page a picture, as it looks on the board",
+        "Каждая страница — картинка, как на доске",
+    ),
     ("Markdown", "Markdown"),
     (
         "The text: frames as headings, notes as a list",

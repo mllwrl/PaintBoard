@@ -1,11 +1,14 @@
 //! Scene to GPU: camera, culling, level of detail.
 
+mod canvas;
 mod gpu;
 mod grid;
 mod images;
 mod objects;
 mod overlay;
+pub mod vector;
 
+pub use canvas::Canvas;
 pub use gpu::{FrameTarget, Gpu, Offscreen, PendingImage};
 pub use grid::{GridColors, GridStyle, draw_grid};
 pub use images::ImageCache;
@@ -229,6 +232,30 @@ pub fn build_scene(
     }
 
     let transform = Affine::scale(view.scale) * view.camera.transform();
+    draw_objects(scene, view, transform, true, text, images);
+
+    if view.plain {
+        return;
+    }
+    overlay::draw_overlay(
+        scene,
+        view.camera,
+        view.scale,
+        view.overlay,
+        &view.theme.overlay,
+    );
+}
+
+/// Draws the objects `view` shows, back to front, with `transform` from world to output.
+/// `lod`: objects too small to make out are drawn simpler (see [`LOD_BOX`], [`LOD_TEXT`]).
+fn draw_objects(
+    scene: &mut impl Canvas,
+    view: &View<'_>,
+    transform: Affine,
+    lod: bool,
+    text: &mut TextRenderer,
+    images: &mut ImageCache,
+) {
     let visible = view.camera.visible_world_rect(view.viewport);
     let zoom = view.camera.zoom();
     let doc = view.document;
@@ -297,7 +324,7 @@ pub fn build_scene(
             let width = data.style.stroke_width;
             let (_, _, path) = pb_core::connector::layout(c, width, current, obstacles_in);
             let bounds = path.bounds();
-            let readable = bounds.width().max(bounds.height()) * zoom >= LOD_TEXT;
+            let readable = !lod || bounds.width().max(bounds.height()) * zoom >= LOD_TEXT;
             let label = c
                 .label
                 .rect(&path)
@@ -318,11 +345,11 @@ pub fn build_scene(
             continue;
         }
         let on_screen = painted.width().max(painted.height()) * zoom;
-        if on_screen < LOD_BOX {
+        if lod && on_screen < LOD_BOX {
             objects::draw_box(scene, transform, data);
             continue;
         }
-        text.skip = on_screen < LOD_TEXT;
+        text.skip = lod && on_screen < LOD_TEXT;
         let resources = objects::Resources {
             text: &mut *text,
             images: &mut *images,
@@ -353,17 +380,19 @@ pub fn build_scene(
             }
         }
     }
+}
 
-    if view.plain {
-        return;
-    }
-    overlay::draw_overlay(
-        scene,
-        view.camera,
-        view.scale,
-        view.overlay,
-        &view.theme.overlay,
-    );
+/// The objects `view` shows recorded as vector drawing, every detail kept however small;
+/// `view.camera` maps world to the drawing's units (and `view.scale` is not used).
+pub fn draw_vector(
+    view: &View<'_>,
+    text: &mut TextRenderer,
+    images: &mut ImageCache,
+) -> vector::Drawing {
+    let mut drawing = vector::Drawing::default();
+    let transform = view.camera.transform();
+    draw_objects(&mut drawing, view, transform, false, text, images);
+    drawing
 }
 
 #[cfg(test)]

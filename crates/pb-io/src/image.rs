@@ -85,6 +85,58 @@ pub fn decode(bytes: &[u8], max_side: u32) -> Result<Pixels, ImageError> {
     })
 }
 
+/// How an image file is stored, for files that can be copied into another document as
+/// they are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stored {
+    Png,
+    /// With this many color components: 1 gray, 3 color, 4 CMYK.
+    Jpeg {
+        components: u8,
+    },
+}
+
+/// How `bytes` is stored, if it is a PNG or JPEG file that shows the way it is stored (no
+/// camera orientation to apply); `None` for other files.
+pub fn stored(bytes: &[u8]) -> Option<Stored> {
+    let stored = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Stored::Png
+    } else if bytes.starts_with(&[0xFF, 0xD8]) {
+        Stored::Jpeg {
+            components: jpeg_components(bytes)?,
+        }
+    } else {
+        return None;
+    };
+    let orientation = decoder(bytes).ok()?.orientation().ok()?;
+    (orientation == Orientation::NoTransforms).then_some(stored)
+}
+
+/// The number of color components in a JPEG file, from its frame header.
+fn jpeg_components(bytes: &[u8]) -> Option<u8> {
+    let mut at = 2;
+    loop {
+        // Markers may be padded with any number of 0xFF bytes.
+        while *bytes.get(at)? == 0xFF && *bytes.get(at + 1)? == 0xFF {
+            at += 1;
+        }
+        if *bytes.get(at)? != 0xFF {
+            return None;
+        }
+        let marker = *bytes.get(at + 1)?;
+        let length = usize::from(u16::from_be_bytes([
+            *bytes.get(at + 2)?,
+            *bytes.get(at + 3)?,
+        ]));
+        // Start of frame: every 0xC0..=0xCF but DHT (C4), JPG (C8) and DAC (CC).
+        if (0xC0..=0xCF).contains(&marker) && ![0xC4, 0xC8, 0xCC].contains(&marker) {
+            // Length, precision, height and width come before the count.
+            return bytes.get(at + 9).copied();
+        }
+        at += 2 + length;
+    }
+}
+
 /// A PNG file of the pixels (for pictures pasted from the clipboard).
 pub fn encode_png(pixels: &Pixels) -> Result<Vec<u8>, ImageError> {
     let image = image::RgbaImage::from_raw(pixels.width, pixels.height, pixels.rgba.clone())

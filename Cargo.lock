@@ -3571,11 +3571,13 @@ name = "pb-render"
 version = "0.1.0"
 dependencies = [
  "log",
+ "miniz_oxide 0.8.9",
  "pb-core",
  "pb-geom",
  "pb-io",
  "pb-text",
  "pollster 1.0.1",
+ "skrifa 0.44.0",
  "vello",
 ]
 

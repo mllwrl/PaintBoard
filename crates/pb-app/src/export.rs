@@ -1,5 +1,5 @@
-//! The board, a frame or the selection saved as a picture (PNG, JPEG), a PDF, its text
-//! (Markdown) or a table (CSV).
+//! The board, a frame or the selection saved as a picture (PNG, JPEG), a vector drawing
+//! (SVG, PDF), a PDF of pictures, its text (Markdown) or a table (CSV).
 
 use std::collections::{HashMap, HashSet};
 
@@ -9,7 +9,10 @@ use pb_geom::kurbo::{Rect, Size, Vec2};
 use pb_io::image::Pixels;
 use pb_render::vello::Scene;
 use pb_render::vello::peniko::Color;
-use pb_render::{Gpu, GridStyle, ImageCache, Overlay, TextRenderer, Theme, View, build_scene};
+use pb_render::{
+    Gpu, GridStyle, ImageCache, Overlay, TextRenderer, Theme, View, build_scene, draw_vector,
+    vector,
+};
 
 /// What goes into the picture.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -25,7 +28,12 @@ pub enum Scope {
 pub enum Format {
     Png,
     Jpeg,
+    /// Shapes and text as vector drawing.
+    Svg,
+    /// Pages of vector drawing.
     Pdf,
+    /// Pages that are each a JPEG picture.
+    PdfPictures,
     /// The text, as an outline.
     Markdown,
     /// The first table.
@@ -37,7 +45,8 @@ impl Format {
         match self {
             Format::Png => "png",
             Format::Jpeg => "jpg",
-            Format::Pdf => "pdf",
+            Format::Svg => "svg",
+            Format::Pdf | Format::PdfPictures => "pdf",
             Format::Markdown => "md",
             Format::Csv => "csv",
         }
@@ -47,7 +56,8 @@ impl Format {
         match self {
             Format::Png => "PNG image",
             Format::Jpeg => "JPEG image",
-            Format::Pdf => "PDF document",
+            Format::Svg => "SVG image",
+            Format::Pdf | Format::PdfPictures => "PDF document",
             Format::Markdown => "Markdown",
             Format::Csv => "CSV table",
         }
@@ -57,6 +67,16 @@ impl Format {
     pub fn is_text(self) -> bool {
         matches!(self, Format::Markdown | Format::Csv)
     }
+
+    /// Drawn as shapes and text rather than pixels: the size does not apply.
+    pub fn is_vector(self) -> bool {
+        matches!(self, Format::Svg | Format::Pdf)
+    }
+
+    /// A document of pages, which can have a page per frame.
+    pub fn has_pages(self) -> bool {
+        matches!(self, Format::Pdf | Format::PdfPictures)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -65,7 +85,7 @@ pub struct Settings {
     pub format: Format,
     /// Pixels per world unit.
     pub scale: f64,
-    /// PNG only: no background behind the objects.
+    /// PNG and SVG only: no background behind the objects.
     pub transparent: bool,
 }
 
@@ -270,6 +290,17 @@ impl Job {
             job.done = Some(text_file(doc, &job.targets, settings.format, title));
         } else if job.targets.is_empty() {
             job.done = Some(Err("there is nothing to export".into()));
+        } else if settings.format.is_vector() {
+            let (text, images) = (&mut *painters.text, &mut *painters.images);
+            let looks = (painters.theme, painters.me);
+            job.done = Some(vector_file(
+                doc,
+                &job.targets,
+                settings,
+                text,
+                images,
+                looks,
+            ));
         } else {
             job.draw_next(doc, painters);
         }
@@ -337,7 +368,7 @@ impl Job {
             height,
             rgba,
         };
-        if self.settings.format == Format::Pdf {
+        if self.settings.format == Format::PdfPictures {
             let jpeg = encode(&pixels, Format::Jpeg)?;
             self.pages.push((jpeg, width, height, scale));
         } else {
@@ -386,6 +417,63 @@ fn text_file(
     tables.sort_by(|(a, _), (b, _)| a.y0.total_cmp(&b.y0).then(a.x0.total_cmp(&b.x0)));
     let (_, table) = tables.first().ok_or("there is no table to export")?;
     Ok(pb_io::outline::table_csv(table).into_bytes())
+}
+
+/// The SVG drawing of the first target, or a PDF with a page of vector drawing per target.
+/// A board unit is a CSS pixel, as at 100%.
+fn vector_file(
+    doc: &Document,
+    targets: &[Target],
+    settings: &Settings,
+    text: &mut TextRenderer,
+    images: &mut ImageCache,
+    (theme, me): (&Theme, &str),
+) -> Result<Vec<u8>, String> {
+    let filter = pb_core::Filter::default();
+    let votes = HashMap::new();
+    let overlay = Overlay::default();
+    let count = if settings.format == Format::Svg {
+        1
+    } else {
+        targets.len()
+    };
+    let mut pages = Vec::new();
+    for target in &targets[..count] {
+        let pad = if target.margin { MARGIN } else { 0.0 };
+        let origin = target.area.origin() - Vec2::new(pad, pad);
+        let size = Size::new(
+            target.area.width() + 2.0 * pad,
+            target.area.height() + 2.0 * pad,
+        );
+        let camera = Camera::new(origin, 1.0);
+        let view = View {
+            camera: &camera,
+            viewport: size,
+            scale: 1.0,
+            grid: GridStyle::None,
+            theme,
+            document: doc,
+            assets: doc.assets(),
+            overrides: &[],
+            hidden: &[],
+            previews: &[],
+            overlay: &overlay,
+            filter: &filter,
+            me,
+            votes: &votes,
+            plain: true,
+            only: target.only.as_ref(),
+            frame_titles: target.margin,
+        };
+        let drawing = draw_vector(&view, &mut *text, &mut *images);
+        pages.push(vector::Page { drawing, size });
+    }
+    if settings.format == Format::Svg {
+        let page = pages.first().ok_or("there is nothing to export")?;
+        let background = (!settings.transparent).then_some(Color::WHITE);
+        return Ok(vector::svg(&page.drawing, page.size, background).into_bytes());
+    }
+    Ok(vector::pdf(&pages))
 }
 
 /// Starts drawing `target` as `settings` ask, tile by tile.
@@ -456,9 +544,12 @@ fn draw(
 fn encode(pixels: &Pixels, format: Format) -> Result<Vec<u8>, String> {
     let bytes = match format {
         Format::Png => pb_io::image::encode_png(pixels),
-        Format::Jpeg | Format::Pdf | Format::Markdown | Format::Csv => {
-            pb_io::image::encode_jpeg(pixels, 92)
-        }
+        Format::Jpeg
+        | Format::Svg
+        | Format::Pdf
+        | Format::PdfPictures
+        | Format::Markdown
+        | Format::Csv => pb_io::image::encode_jpeg(pixels, 92),
     };
     bytes.map_err(|err| err.to_string())
 }
@@ -466,6 +557,79 @@ fn encode(pixels: &Pixels, format: Format) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A board of every template built in code, side by side.
+    fn template_board() -> Document {
+        use crate::templates::{Builder, Make, TEMPLATES};
+        let mut doc = Document::new();
+        let mut engine = pb_text::TextEngine::new();
+        let mut x = 0.0;
+        for template in &TEMPLATES {
+            let Make::Objects(make) = template.make else {
+                continue;
+            };
+            let mut b = Builder::new(&doc, &mut engine);
+            make(&mut b);
+            let items = b.finish(pb_geom::kurbo::Point::new(x, 0.0));
+            doc.apply(pb_core::Command::Create(items)).unwrap();
+            x += 3000.0;
+        }
+        doc
+    }
+
+    fn vector(doc: &Document, scope: Scope, format: Format) -> Vec<u8> {
+        let settings = Settings {
+            scope,
+            format,
+            ..Settings::default()
+        };
+        let targets = targets(doc, scope, &[]);
+        let mut text = TextRenderer::new();
+        let mut images = ImageCache::default();
+        let theme = Theme::light();
+        let looks = (&theme, "me");
+        vector_file(doc, &targets, &settings, &mut text, &mut images, looks).unwrap()
+    }
+
+    #[test]
+    fn templates_export_as_svg_and_vector_pdf() {
+        let doc = template_board();
+        let svg = String::from_utf8(vector(&doc, Scope::Board, Format::Svg)).unwrap();
+        assert!(svg.starts_with("<?xml"));
+        assert!(svg.trim_end().ends_with("</svg>"));
+        assert_eq!(svg.matches("<g").count(), svg.matches("</g>").count());
+        assert!(svg.matches("<use ").count() > 500);
+        let frames = doc
+            .objects()
+            .iter()
+            .filter(|o| o.data.kind.is_frame())
+            .count();
+        assert!(frames > 1);
+        let pdf = vector(&doc, Scope::Frames, Format::Pdf);
+        assert_eq!(pb_io::pdf::page_count(&pdf).unwrap(), frames);
+    }
+
+    /// Writes the templates board as SVG and PDF, and pictures of them, to
+    /// `PB_VECTOR_OUT`, to look at.
+    #[test]
+    #[ignore = "writes files, run by hand"]
+    fn write_template_board() {
+        let dir = std::path::PathBuf::from(std::env::var("PB_VECTOR_OUT").unwrap());
+        let doc = template_board();
+        let svg = vector(&doc, Scope::Board, Format::Svg);
+        std::fs::write(dir.join("templates.svg"), &svg).unwrap();
+        let drawn = pb_io::svg::draw(&svg, None).unwrap();
+        std::fs::write(dir.join("templates-svg.png"), drawn.png).unwrap();
+        let pdf = vector(&doc, Scope::Frames, Format::Pdf);
+        std::fs::write(dir.join("templates.pdf"), &pdf).unwrap();
+        for (i, page) in pb_io::pdf::render_pages(&pdf, 8)
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            std::fs::write(dir.join(format!("templates-pdf{i}.png")), &page.png).unwrap();
+        }
+    }
 
     #[test]
     fn fit_keeps_the_scale_when_it_fits() {

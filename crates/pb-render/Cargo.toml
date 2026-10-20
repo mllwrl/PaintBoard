@@ -15,6 +15,10 @@ pb-text.workspace = true
 pb-io.workspace = true
 vello.workspace = true
 log.workspace = true
+# Glyph outlines for vector export; the version vello and parley already use.
+skrifa = "0.44"
+# Compressing PDF streams; already used by the PNG decoder.
+miniz_oxide = "0.8"
 
 [dev-dependencies]
 pollster.workspace = true

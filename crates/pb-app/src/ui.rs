@@ -3584,7 +3584,7 @@ fn export_window(
     let gone = match settings.scope {
         Scope::Frame(id) => !model.frames.iter().any(|(f, _)| *f == id),
         // One page per frame needs pages.
-        Scope::Frames => settings.format != Format::Pdf || model.frames.is_empty(),
+        Scope::Frames => !settings.format.has_pages() || model.frames.is_empty(),
         _ => false,
     };
     if gone {
@@ -3641,7 +3641,7 @@ fn export_window(
                                     });
                             });
                         });
-                        let pages = settings.format == Format::Pdf && !model.frames.is_empty();
+                        let pages = settings.format.has_pages() && !model.frames.is_empty();
                         ui.add_enabled_ui(pages, |ui| {
                             ui.radio_value(
                                 &mut settings.scope,
@@ -3657,7 +3657,16 @@ fn export_window(
                     ui.horizontal(|ui| {
                         ui.selectable_value(&mut settings.format, Format::Png, tr("PNG"));
                         ui.selectable_value(&mut settings.format, Format::Jpeg, tr("JPEG"));
-                        ui.selectable_value(&mut settings.format, Format::Pdf, tr("PDF"));
+                        ui.selectable_value(&mut settings.format, Format::Svg, tr("SVG"))
+                            .on_hover_text(tr("Shapes and text as lines, sharp at any size"));
+                        ui.selectable_value(&mut settings.format, Format::Pdf, tr("PDF"))
+                            .on_hover_text(tr("Shapes and text as lines, sharp at any size"));
+                        ui.selectable_value(
+                            &mut settings.format,
+                            Format::PdfPictures,
+                            tr("PDF (pictures)"),
+                        )
+                        .on_hover_text(tr("Each page a picture, as it looks on the board"));
                         ui.separator();
                         ui.selectable_value(&mut settings.format, Format::Markdown, tr("Markdown"))
                             .on_hover_text(tr("The text: frames as headings, notes as a list"));
@@ -3667,7 +3676,8 @@ fn export_window(
                     ui.end_row();
 
                     ui.label(tr("Size"));
-                    ui.add_enabled_ui(!settings.format.is_text(), |ui| {
+                    let pixels = !settings.format.is_text() && !settings.format.is_vector();
+                    ui.add_enabled_ui(pixels, |ui| {
                         ui.horizontal(|ui| {
                             for scale in [1.0, 2.0, 3.0, 4.0] {
                                 ui.selectable_value(
@@ -3685,7 +3695,7 @@ fn export_window(
 
                     ui.label("");
                     ui.add_enabled(
-                        settings.format == Format::Png,
+                        matches!(settings.format, Format::Png | Format::Svg),
                         egui::Checkbox::new(
                             &mut settings.transparent,
                             tr("Transparent background"),

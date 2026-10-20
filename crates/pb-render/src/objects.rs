@@ -8,9 +8,10 @@ use std::sync::Arc;
 
 use pb_geom::ink::{smooth_path, variable_outline};
 use pb_text::{TextAlign, TextEngine, TextLayout};
-use vello::Scene;
 use vello::kurbo::{Affine, BezPath, Cap, Join, Line, Rect, RoundedRect, Shape, Stroke};
-use vello::peniko::{Color, Fill, Mix};
+use vello::peniko::Color;
+
+use crate::canvas::Canvas;
 
 /// Ink never gets thinner than this fraction of its width, however light the pressure.
 const MIN_PRESSURE: f64 = 0.15;
@@ -129,7 +130,7 @@ impl TextRenderer {
     /// Draws `text` with `spans` fitted into `text_box` and aligned in it.
     fn draw_fitted(
         &mut self,
-        scene: &mut Scene,
+        scene: &mut impl Canvas,
         transform: Affine,
         (text, spans): (&Arc<str>, &Spans),
         text_box: TextBox,
@@ -163,7 +164,7 @@ impl Default for TextRenderer {
 /// Draws a laid out text, its top-left corner at `origin` in `transform`. Runs without a
 /// color of their own take `brush`.
 fn draw_text(
-    scene: &mut Scene,
+    scene: &mut impl Canvas,
     transform: Affine,
     origin: (f64, f64),
     layout: &TextLayout,
@@ -172,17 +173,7 @@ fn draw_text(
     let transform = transform * Affine::translate(origin);
     let paint = |b: pb_text::Brush| b.map_or(brush, color);
     for run in &layout.runs {
-        let glyphs = run.glyphs.iter().map(|g| vello::Glyph {
-            id: g.id,
-            x: g.x,
-            y: g.y,
-        });
-        scene
-            .draw_glyphs(&run.font)
-            .font_size(run.size)
-            .transform(transform)
-            .brush(paint(run.brush))
-            .draw(Fill::NonZero, glyphs);
+        scene.glyphs(transform, run, paint(run.brush));
     }
     for d in &layout.decorations {
         let half = f64::from(d.thickness) / 2.0;
@@ -192,7 +183,7 @@ fn draw_text(
             f64::from(d.x1),
             f64::from(d.y) + half,
         );
-        scene.fill(Fill::NonZero, transform, paint(d.brush), None, &bar);
+        scene.fill(transform, paint(d.brush), &bar);
     }
 }
 
@@ -211,7 +202,7 @@ pub(crate) struct Resources<'a> {
 
 /// Draws one object. `transform` maps world to physical pixels.
 pub(crate) fn draw_object(
-    scene: &mut Scene,
+    scene: &mut impl Canvas,
     transform: Affine,
     data: &ObjectData,
     resources: Resources<'_>,
@@ -237,25 +228,19 @@ pub(crate) fn draw_object(
         if data.kind.is_frame() {
             clip = clip.union(FrameData::title_band(data.bounds, zoom));
         }
-        scene.push_layer(
-            Fill::NonZero,
-            Mix::Normal,
-            style.opacity as f32,
-            transform,
-            &clip,
-        );
+        scene.push_layer(style.opacity as f32, transform, &clip);
     }
     match &data.kind {
         ObjectKind::Shape(shape) => {
             let path = shape.kind.outline(data.bounds);
-            scene.fill(Fill::NonZero, transform, color(style.fill), None, &path);
+            scene.fill(transform, color(style.fill), &path);
             if style.stroke_width > 0.0 {
                 let stroke = Stroke::new(style.stroke_width)
                     .with_join(Join::Round)
                     .with_caps(Cap::Round);
-                scene.stroke(&stroke, transform, color(style.stroke), None, &path);
+                scene.stroke(&stroke, transform, color(style.stroke), &path);
                 if let Some(details) = shape.kind.details(data.bounds) {
-                    scene.stroke(&stroke, transform, color(style.stroke), None, &details);
+                    scene.stroke(&stroke, transform, color(style.stroke), &details);
                 }
             }
             if let Some(text_box) = data.text_box() {
@@ -272,7 +257,7 @@ pub(crate) fn draw_object(
         ObjectKind::Text(content) if text.skip => {
             // Too small to read: a faint bar where the text is.
             let bar = color(style.stroke).multiply_alpha(0.3);
-            scene.fill(Fill::NonZero, transform, bar, None, &data.bounds);
+            scene.fill(transform, bar, &data.bounds);
         }
         ObjectKind::Text(content) => {
             let b = data.bounds;
@@ -291,14 +276,8 @@ pub(crate) fn draw_object(
             let b = data.bounds;
             let side = b.width().min(b.height());
             let shadow = b + vello::kurbo::Vec2::new(0.0, side * SHADOW_OFFSET);
-            scene.draw_blurred_rounded_rect(
-                transform,
-                shadow,
-                SHADOW_COLOR,
-                0.0,
-                side * SHADOW_BLUR,
-            );
-            scene.fill(Fill::NonZero, transform, color(style.fill), None, &b);
+            scene.shadow(transform, shadow, SHADOW_COLOR, side * SHADOW_BLUR);
+            scene.fill(transform, color(style.fill), &b);
             if let Some(text_box) = data.text_box() {
                 text.draw_fitted(
                     scene,
@@ -313,7 +292,7 @@ pub(crate) fn draw_object(
         ObjectKind::Connector(_) => {}
         ObjectKind::Table(table) => {
             let b = data.bounds;
-            scene.fill(Fill::NonZero, transform, color(style.fill), None, &b);
+            scene.fill(transform, color(style.fill), &b);
             let brush = color(style.text_color());
             let merged = table.merged();
             // Inside a merged block only its top left cell shows.
@@ -344,7 +323,7 @@ pub(crate) fn draw_object(
                 }
                 grid.extend(b.path_elements(0.1));
                 let stroke = Stroke::new(style.stroke_width);
-                scene.stroke(&stroke, transform, color(style.stroke), None, &grid);
+                scene.stroke(&stroke, transform, color(style.stroke), &grid);
             }
         }
         ObjectKind::Kanban(kanban) => {
@@ -357,7 +336,7 @@ pub(crate) fn draw_object(
                     continue;
                 };
                 let column = RoundedRect::from_rect(rect, radius);
-                scene.fill(Fill::NonZero, transform, color(style.fill), None, &column);
+                scene.fill(transform, color(style.fill), &column);
                 let title = &kanban.columns[col].title;
                 if let Some(text_box) = kanban.title_text_box(b, col) {
                     let spans = pb_core::Kanban::title_spans(title);
@@ -368,9 +347,9 @@ pub(crate) fn draw_object(
                         continue;
                     };
                     let card = RoundedRect::from_rect(rect, radius);
-                    scene.fill(Fill::NonZero, transform, CARD_FILL, None, &card);
+                    scene.fill(transform, CARD_FILL, &card);
                     if style.stroke_width > 0.0 {
-                        scene.stroke(&outline, transform, color(style.stroke), None, &card);
+                        scene.stroke(&outline, transform, color(style.stroke), &card);
                     }
                     let c = &kanban.cards[i];
                     if let Some(text_box) = kanban.card_text_box(b, i) {
@@ -390,14 +369,14 @@ pub(crate) fn draw_object(
             let b = data.bounds;
             let radius = b.height() * 0.06;
             let card = RoundedRect::from_rect(b, radius);
-            scene.fill(Fill::NonZero, transform, color(style.fill), None, &card);
-            scene.push_layer(Fill::NonZero, Mix::Normal, 1.0, transform, &card);
+            scene.fill(transform, color(style.fill), &card);
+            scene.push_layer(1.0, transform, &card);
             let strip = pb_core::Embed::strip(b);
-            scene.fill(Fill::NonZero, transform, EMBED_STRIP, None, &strip);
+            scene.fill(transform, EMBED_STRIP, &strip);
             scene.pop_layer();
             if style.stroke_width > 0.0 {
                 let stroke = Stroke::new(style.stroke_width);
-                scene.stroke(&stroke, transform, color(style.stroke), None, &card);
+                scene.stroke(&stroke, transform, color(style.stroke), &card);
             }
             let [site, title, description, url] = pb_core::Embed::boxes(b);
             let muted = Color::from_rgb8(0x6B, 0x72, 0x80);
@@ -424,21 +403,24 @@ pub(crate) fn draw_object(
         }
         ObjectKind::Frame(frame) => {
             let b = data.bounds;
-            scene.fill(Fill::NonZero, transform, color(style.fill), None, &b);
-            scene.stroke(&Stroke::new(1.0 / zoom), transform, frame_edge, None, &b);
+            scene.fill(transform, color(style.fill), &b);
+            scene.stroke(&Stroke::new(1.0 / zoom), transform, frame_edge, &b);
             if frame_titles && !frame.title.is_empty() {
                 let size = FrameData::TITLE_SIZE / zoom;
                 let layout = text.engine.layout(&frame.title, size, None);
                 let band = FrameData::title_band(b, zoom);
                 let top = b.y0 - FrameData::TITLE_GAP / zoom - layout.height;
                 // A long title is cut at the frame's width.
-                scene.push_clip_layer(Fill::NonZero, transform, &band);
+                scene.push_clip(transform, &band);
                 draw_text(scene, transform, (b.x0, top), &layout, frame_title);
                 scene.pop_layer();
             }
         }
         ObjectKind::Image(image) => match images.get(assets, image.asset) {
-            Some(brush) => draw_image(scene, transform, data.bounds, image, brush),
+            Some(brush) => {
+                let file = assets.get(image.asset).map(|f| &f[..]);
+                draw_image(scene, transform, data.bounds, image, brush, file);
+            }
             None => draw_placeholder(scene, transform, data.bounds),
         },
         ObjectKind::Ink(ink) => {
@@ -452,13 +434,13 @@ pub(crate) fn draw_object(
                     })
                     .collect();
                 let outline = variable_outline(&radii);
-                scene.fill(Fill::NonZero, transform, ink_color, None, &outline);
+                scene.fill(transform, ink_color, &outline);
             } else {
                 let line: Vec<_> = points.iter().map(|(p, _)| *p).collect();
                 let stroke = Stroke::new(style.stroke_width)
                     .with_caps(Cap::Round)
                     .with_join(Join::Round);
-                scene.stroke(&stroke, transform, ink_color, None, &smooth_path(&line));
+                scene.stroke(&stroke, transform, ink_color, &smooth_path(&line));
             }
         }
     }
@@ -470,7 +452,7 @@ pub(crate) fn draw_object(
 /// A connector's line and arrowheads in the outline color, and its label's text in a gap
 /// in the line; `label` is the label with the box of its text.
 pub(crate) fn draw_connector(
-    scene: &mut Scene,
+    scene: &mut impl Canvas,
     transform: Affine,
     style: &Style,
     path: &ConnectorPath,
@@ -486,13 +468,7 @@ pub(crate) fn draw_connector(
     // Opacity applies to the whole connector, so the line under an arrowhead does not show.
     let layered = style.opacity < 1.0;
     if layered {
-        scene.push_layer(
-            Fill::NonZero,
-            Mix::Normal,
-            style.opacity as f32,
-            transform,
-            &area,
-        );
+        scene.push_layer(style.opacity as f32, transform, &area);
     }
     // The line breaks around the label.
     if let Some((_, r)) = label {
@@ -503,9 +479,9 @@ pub(crate) fn draw_connector(
     let stroke = Stroke::new(style.stroke_width.max(0.5))
         .with_caps(Cap::Round)
         .with_join(Join::Round);
-    scene.stroke(&stroke, transform, brush, None, &path.line);
+    scene.stroke(&stroke, transform, brush, &path.line);
     for head in &path.heads {
-        scene.fill(Fill::NonZero, transform, brush, None, head);
+        scene.fill(transform, brush, head);
     }
     if let Some((label, r)) = label {
         scene.pop_layer();
@@ -523,7 +499,7 @@ pub(crate) fn draw_connector(
 }
 
 /// Pushes a clip layer of `area` without `holes` (all in `transform`'s space).
-pub(crate) fn clip_out(scene: &mut Scene, transform: Affine, area: Rect, holes: &[Rect]) {
+pub(crate) fn clip_out(scene: &mut impl Canvas, transform: Affine, area: Rect, holes: &[Rect]) {
     let mut clip = BezPath::new();
     clip.extend(area.path_elements(0.1));
     // Wound the other way, so they are holes whatever the fill rule; vello's clips do not
@@ -535,16 +511,17 @@ pub(crate) fn clip_out(scene: &mut Scene, transform: Affine, area: Rect, holes: 
         clip.line_to((hole.x1, hole.y0));
         clip.close_path();
     }
-    scene.push_clip_layer(Fill::NonZero, transform, &clip);
+    scene.push_clip(transform, &clip);
 }
 
 /// The cropped part of `brush` stretched over `bounds`.
 fn draw_image(
-    scene: &mut Scene,
+    scene: &mut impl Canvas,
     transform: Affine,
     bounds: Rect,
     image: &Image,
     brush: &vello::peniko::ImageBrush,
+    file: Option<&[u8]>,
 ) {
     let (w, h) = (f64::from(brush.image.width), f64::from(brush.image.height));
     let crop = image.crop;
@@ -558,26 +535,20 @@ fn draw_image(
             bounds.height() / (crop.height() * h),
         )
         * Affine::translate((-crop.x0 * w, -crop.y0 * h));
-    scene.fill(
-        Fill::NonZero,
-        transform,
-        brush,
-        Some(brush_transform),
-        &bounds,
-    );
+    scene.image(transform, bounds, brush, brush_transform, file);
 }
 
 /// A gray box with a cross, for an image that cannot be shown.
-fn draw_placeholder(scene: &mut Scene, transform: Affine, b: Rect) {
-    scene.fill(Fill::NonZero, transform, PLACEHOLDER_FILL, None, &b);
+fn draw_placeholder(scene: &mut impl Canvas, transform: Affine, b: Rect) {
+    scene.fill(transform, PLACEHOLDER_FILL, &b);
     let width = b.width().min(b.height()) * 0.01;
     let stroke = Stroke::new(width.max(0.5));
-    scene.stroke(&stroke, transform, PLACEHOLDER_LINE, None, &b);
+    scene.stroke(&stroke, transform, PLACEHOLDER_LINE, &b);
     for line in [
         Line::new((b.x0, b.y0), (b.x1, b.y1)),
         Line::new((b.x1, b.y0), (b.x0, b.y1)),
     ] {
-        scene.stroke(&stroke, transform, PLACEHOLDER_LINE, None, &line);
+        scene.stroke(&stroke, transform, PLACEHOLDER_LINE, &line);
     }
 }
 
@@ -590,7 +561,7 @@ pub fn painted_bounds(data: &ObjectData) -> Rect {
 /// Draws a Markdown document on its page; `transform` maps the object's unrotated
 /// coordinates to physical pixels.
 fn draw_doc(
-    scene: &mut Scene,
+    scene: &mut impl Canvas,
     transform: Affine,
     data: &ObjectData,
     doc: &pb_core::Doc,
@@ -601,10 +572,10 @@ fn draw_doc(
     let style = &data.style;
     let b = data.bounds;
     let page = RoundedRect::from_rect(b, doc.size * 0.3);
-    scene.fill(Fill::NonZero, transform, color(style.fill), None, &page);
+    scene.fill(transform, color(style.fill), &page);
     if style.stroke_width > 0.0 {
         let stroke = Stroke::new(style.stroke_width);
-        scene.stroke(&stroke, transform, color(style.stroke), None, &page);
+        scene.stroke(&stroke, transform, color(style.stroke), &page);
     }
     if text.skip {
         return;
@@ -620,16 +591,16 @@ fn draw_doc(
         match block.kind {
             BlockKind::Code => {
                 let bg = RoundedRect::from_rect(area, doc.size * 0.25);
-                scene.fill(Fill::NonZero, transform, CODE_FILL, None, &bg);
+                scene.fill(transform, CODE_FILL, &bg);
             }
             BlockKind::Quote => {
                 let bar = Rect::new(area.x0, area.y0, area.x0 + doc.size * 0.2, area.y1);
-                scene.fill(Fill::NonZero, transform, DOC_LINE, None, &bar);
+                scene.fill(transform, DOC_LINE, &bar);
             }
             BlockKind::Rule => {
                 let y = area.center().y;
                 let line = Line::new((area.x0, y), (area.x1, y));
-                scene.stroke(&thin, transform, DOC_LINE, None, &line);
+                scene.stroke(&thin, transform, DOC_LINE, &line);
                 continue;
             }
             _ => {}
@@ -650,7 +621,7 @@ fn draw_doc(
 /// Draws a mind map over `data`'s bounds; `transform` maps its unrotated coordinates to
 /// physical pixels.
 fn draw_mindmap(
-    scene: &mut Scene,
+    scene: &mut impl Canvas,
     transform: Affine,
     data: &ObjectData,
     map: &pb_core::MindMap,
@@ -677,7 +648,7 @@ fn draw_mindmap(
         path.curve_to((mid, start.1), (mid, end.1), end);
         let width = if parent.depth == 0 { 3.0 } else { 2.0 } * scale;
         let stroke = Stroke::new(width).with_caps(Cap::Round);
-        scene.stroke(&stroke, transform, branch(child), None, &path);
+        scene.stroke(&stroke, transform, branch(child), &path);
     }
     let ink = color(style.text_color());
     let [r, g, bl, _] = style.fill.to_bytes();
@@ -688,16 +659,16 @@ fn draw_mindmap(
         let radius = (rect.height() / 2.0).min(10.0 * scale);
         let shape = RoundedRect::from_rect(rect, radius);
         let brush = if placed.depth == 0 {
-            scene.fill(Fill::NonZero, transform, color(style.fill), None, &shape);
+            scene.fill(transform, color(style.fill), &shape);
             if dark_root {
                 Color::from_rgb8(0xFF, 0xFF, 0xFF)
             } else {
                 ink
             }
         } else {
-            scene.fill(Fill::NonZero, transform, CARD_FILL, None, &shape);
+            scene.fill(transform, CARD_FILL, &shape);
             let width = if placed.depth == 1 { 2.0 } else { 1.0 } * scale;
-            scene.stroke(&Stroke::new(width), transform, branch(placed), None, &shape);
+            scene.stroke(&Stroke::new(width), transform, branch(placed), &shape);
             ink
         };
         let text_box = map.placed_text_box(&layout, b, placed);
@@ -708,14 +679,8 @@ fn draw_mindmap(
         let center = world(Rect::from_center_size(at, (0.0, 0.0))).center();
         let r = pb_core::MindMap::toggle_radius() * scale;
         let dot = vello::kurbo::Circle::new(center, r);
-        scene.fill(Fill::NonZero, transform, CARD_FILL, None, &dot);
-        scene.stroke(
-            &Stroke::new(1.5 * scale),
-            transform,
-            branch(placed),
-            None,
-            &dot,
-        );
+        scene.fill(transform, CARD_FILL, &dot);
+        scene.stroke(&Stroke::new(1.5 * scale), transform, branch(placed), &dot);
         if placed.hidden > 0 {
             let label: Arc<str> = placed.hidden.to_string().into();
             let size = r * 1.1;
@@ -728,13 +693,7 @@ fn draw_mindmap(
         } else {
             let arm = r * 0.5;
             let line = Line::new((center.x - arm, center.y), (center.x + arm, center.y));
-            scene.stroke(
-                &Stroke::new(1.5 * scale),
-                transform,
-                branch(placed),
-                None,
-                &line,
-            );
+            scene.stroke(&Stroke::new(1.5 * scale), transform, branch(placed), &line);
         }
     }
 }
@@ -747,7 +706,7 @@ const TAG_FONT: f64 = 12.0;
 /// Draws the names of `tags` as colored pills: along the bottom inside a sticky note,
 /// under other objects. `transform` maps world to physical pixels.
 pub(crate) fn draw_tags(
-    scene: &mut Scene,
+    scene: &mut impl Canvas,
     transform: Affine,
     data: &ObjectData,
     tags: &[&pb_core::Tag],
@@ -778,7 +737,7 @@ pub(crate) fn draw_tags(
         }
         let pill = RoundedRect::new(x, y, x + width, y + height, height / 2.0);
         let fill = color(tag.color).multiply_alpha(alpha);
-        scene.fill(Fill::NonZero, transform, fill, None, &pill);
+        scene.fill(transform, fill, &pill);
         let [r, g, bl, _] = tag.color.to_bytes();
         let light = 0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(bl) > 160.0;
         let ink = if light {
@@ -801,7 +760,7 @@ pub(crate) fn draw_tags(
 /// Draws reactions as pills with an icon and a count, right-aligned: along the bottom
 /// inside a sticky note, under other objects. Those by `me` are tinted.
 pub(crate) fn draw_reactions(
-    scene: &mut Scene,
+    scene: &mut impl Canvas,
     transform: Affine,
     data: &ObjectData,
     reactions: &[(pb_core::Reaction, Vec<Arc<str>>)],
@@ -845,28 +804,16 @@ pub(crate) fn draw_reactions(
                 DOC_LINE.multiply_alpha(alpha),
             )
         };
-        scene.fill(Fill::NonZero, transform, fill, None, &pill);
-        scene.stroke(&Stroke::new(size * 0.08), transform, edge, None, &pill);
+        scene.fill(transform, fill, &pill);
+        scene.stroke(&Stroke::new(size * 0.08), transform, edge, &pill);
         let icon_rect =
             Rect::from_center_size((x0 + pad + icon / 2.0, y + height / 2.0), (icon, icon));
         let (icon_fill, icon_stroke) = reaction.icon(icon_rect);
-        scene.fill(
-            Fill::NonZero,
-            transform,
-            tint.multiply_alpha(alpha),
-            None,
-            &icon_fill,
-        );
+        scene.fill(transform, tint.multiply_alpha(alpha), &icon_fill);
         let line = Stroke::new(icon / 8.0)
             .with_caps(Cap::Round)
             .with_join(Join::Round);
-        scene.stroke(
-            &line,
-            transform,
-            tint.multiply_alpha(alpha),
-            None,
-            &icon_stroke,
-        );
+        scene.stroke(&line, transform, tint.multiply_alpha(alpha), &icon_stroke);
         let tx = x0 + pad + icon + size * 0.3;
         draw_text(
             scene,
@@ -887,7 +834,7 @@ const VOTE_TOP: Color = Color::from_rgb8(0xF5, 0x9E, 0x0B);
 /// Draws `count` votes as a round badge on the top right corner of `data`, the same size
 /// on screen at any zoom.
 pub(crate) fn draw_vote_badge(
-    scene: &mut Scene,
+    scene: &mut impl Canvas,
     transform: Affine,
     data: &ObjectData,
     count: u32,
@@ -899,8 +846,8 @@ pub(crate) fn draw_vote_badge(
     let r = VOTE_RADIUS / zoom;
     let dot = vello::kurbo::Circle::new(corner, r);
     let fill = if top { VOTE_TOP } else { VOTE_FILL };
-    scene.fill(Fill::NonZero, transform, fill, None, &dot);
-    scene.stroke(&Stroke::new(2.0 / zoom), transform, CARD_FILL, None, &dot);
+    scene.fill(transform, fill, &dot);
+    scene.stroke(&Stroke::new(2.0 / zoom), transform, CARD_FILL, &dot);
     let label = count.to_string();
     let layout = text.engine.layout(&label, r * 1.1, None);
     let origin = (
@@ -923,14 +870,14 @@ fn paint_padding(data: &ObjectData) -> f64 {
 }
 
 /// An object too small on screen for any detail: a box in its main color.
-pub(crate) fn draw_box(scene: &mut Scene, transform: Affine, data: &ObjectData) {
+pub(crate) fn draw_box(scene: &mut impl Canvas, transform: Affine, data: &ObjectData) {
     let main = match &data.kind {
         ObjectKind::Image(_) => PLACEHOLDER_LINE,
         _ if data.style.fill.to_bytes()[3] > 0 => color(data.style.fill),
         _ => color(data.style.stroke),
     };
     let main = main.multiply_alpha(data.style.opacity as f32);
-    scene.fill(Fill::NonZero, transform, main, None, &data.frame().aabb());
+    scene.fill(transform, main, &data.frame().aabb());
 }
 
 fn color(rgba: Rgba) -> Color {
