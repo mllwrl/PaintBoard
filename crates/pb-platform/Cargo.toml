@@ -49,6 +49,22 @@ wasm-bindgen-futures.workspace = true
 # The origin private file system (OPFS), where the web version keeps its files, and the
 # browser's file picker, downloads and dialogs.
 web-sys = { version = "0.3", features = [
+    # Talktrack sound: the microphone and playing back.
+    "AudioBuffer",
+    "AudioBufferSourceNode",
+    "AudioContext",
+    "AudioDestinationNode",
+    "AudioNode",
+    "AudioProcessingEvent",
+    "AudioScheduledSourceNode",
+    "BaseAudioContext",
+    "MediaDevices",
+    "MediaStream",
+    "MediaStreamAudioSourceNode",
+    "MediaStreamConstraints",
+    "MediaStreamTrack",
+    "Navigator",
+    "ScriptProcessorNode",
     "Blob",
     "BinaryType",
     "BlobPropertyBag",

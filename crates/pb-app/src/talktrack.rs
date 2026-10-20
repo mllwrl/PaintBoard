@@ -46,7 +46,7 @@ impl Recording {
     }
 
     pub fn has_sound(&self) -> bool {
-        self.mic.is_some()
+        self.mic.as_ref().is_some_and(|mic| !mic.refused())
     }
 
     /// Whole seconds recorded.
