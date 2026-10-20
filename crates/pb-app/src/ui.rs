@@ -1010,7 +1010,10 @@ impl Ui {
             new_tag: String::new(),
             link_text: String::new(),
             search_text: String::new(),
-            palette: PaletteState::default(),
+            palette: PaletteState {
+                recent: crate::settings::palette_recent(),
+                ..PaletteState::default()
+            },
             diagram_text: DIAGRAM_EXAMPLE.to_owned(),
             graph_text: (
                 "sin(x); x^2/4 - 1".to_owned(),
@@ -5020,8 +5023,8 @@ struct PaletteState {
     text: String,
     /// The entry picked with the arrow keys, in the list shown.
     picked: usize,
-    /// Entries run lately, last first.
-    recent: Vec<Action>,
+    /// Entries run lately, by their English labels, last first; kept between runs.
+    recent: Vec<String>,
 }
 
 /// What the board allows now, for the commands the palette offers.
@@ -5309,7 +5312,7 @@ fn command_palette(
     let recent: Vec<usize> = state
         .recent
         .iter()
-        .filter_map(|a| entries.iter().position(|e| e.action == *a))
+        .filter_map(|r| entries.iter().position(|e| e.english == *r))
         .collect();
     let found: Vec<PaletteEntry> = objects
         .iter()
@@ -5414,7 +5417,8 @@ fn command_palette(
         actions.push(entry.action.clone());
         // Objects found are not commands to offer again.
         if !matches!(entry.action, Action::ShowArea(_)) {
-            crate::palette::remember(&mut state.recent, entry.action.clone());
+            crate::palette::remember(&mut state.recent, entry.english.clone());
+            crate::settings::save_palette_recent(&state.recent);
         }
     } else if escape || toggle || pressed_elsewhere {
         actions.push(Action::ClosePalette);

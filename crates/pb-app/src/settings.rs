@@ -314,6 +314,26 @@ pub fn save_timer_sound(on: bool) {
     }
 }
 
+/// File with the command palette's entries run lately (see [`crate::palette::parse_recent`]).
+const PALETTE_FILE: &str = "palette-recent.txt";
+
+/// The command palette's entries run lately, by English label, last first.
+pub fn palette_recent() -> Vec<String> {
+    pb_platform::fs::app_data_dir()
+        .and_then(|dir| pb_platform::fs::read(&dir.join(PALETTE_FILE)))
+        .map(|bytes| crate::palette::parse_recent(&String::from_utf8_lossy(&bytes)))
+        .unwrap_or_default()
+}
+
+pub fn save_palette_recent(recent: &[String]) {
+    let text = crate::palette::recent_text(recent);
+    let saved = pb_platform::fs::app_data_dir()
+        .and_then(|dir| pb_platform::fs::write_atomic(&dir.join(PALETTE_FILE), text.as_bytes()));
+    if let Err(err) = saved {
+        log::warn!("palette's recent commands not saved: {err}");
+    }
+}
+
 /// File with what is known about pens (see [`PenSettings::to_words`]).
 const PEN_FILE: &str = "pen.txt";
 

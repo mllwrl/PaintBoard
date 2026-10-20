@@ -76,6 +76,27 @@ pub fn remember<T: PartialEq>(recent: &mut Vec<T>, item: T) {
     recent.truncate(RECENT);
 }
 
+/// Entries run lately as stored: a label a line, last first. Blank lines and repeats are
+/// skipped, and only the first [`RECENT`] kept; labels no longer offered simply match
+/// nothing.
+pub fn parse_recent(text: &str) -> Vec<String> {
+    let mut recent: Vec<String> = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if recent.len() < RECENT && !recent.iter().any(|r| r == line) {
+            recent.push(line.to_owned());
+        }
+    }
+    recent
+}
+
+/// The stored form of entries run lately (see [`parse_recent`]).
+pub fn recent_text(recent: &[String]) -> String {
+    recent
+        .iter()
+        .map(|r| r.replace(['\n', '\r'], " ") + "\n")
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +155,31 @@ mod tests {
         // Typed: still ahead of entries that fit as well, not of better ones.
         assert_eq!(labels("sav", &[2]), ["Save", "Save as…"]);
         assert_eq!(labels("pen", &[0]), ["Pen", "Open…"]);
+    }
+
+    #[test]
+    fn recent_entries_are_stored_a_line_each() {
+        let recent: Vec<String> = ["Pen", "Go to view 3", "Plugin: Two\nlines"]
+            .map(str::to_owned)
+            .into();
+        let text = recent_text(&recent);
+        assert_eq!(text, "Pen\nGo to view 3\nPlugin: Two lines\n");
+        assert_eq!(
+            parse_recent(&text),
+            ["Pen", "Go to view 3", "Plugin: Two lines"]
+        );
+        // Windows line ends, blanks, repeats, too many: tidied up.
+        let text = "Save\r\n\r\n  Pen \r\nSave\r\na\r\nb\r\nc\r\nd\r\n";
+        assert_eq!(parse_recent(text), ["Save", "Pen", "a", "b", "c"]);
+        assert!(parse_recent("").is_empty());
+        // Entries no longer offered match nothing.
+        let gone = parse_recent("Gone\nPen\n");
+        let recent: Vec<usize> = gone
+            .iter()
+            .filter_map(|r| ENTRIES.iter().position(|(_, english)| english == r))
+            .collect();
+        assert_eq!(recent, [3]);
+        assert_eq!(labels("", &recent)[0], "Pen");
     }
 
     #[test]
