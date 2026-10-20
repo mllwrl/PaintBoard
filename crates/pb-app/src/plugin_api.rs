@@ -4,16 +4,17 @@
 //!
 //! An object is `{id, type, x, y, width, height, rotation, fill, stroke, strokeWidth,
 //! opacity, text, tags, locked, parent}` plus, by type: `shape` (its kind) for shapes,
-//! `fontSize` for text, `title` for frames, `from`/`to` (ids or null) for connectors.
-//! Positions are the unrotated top left corner in board units; rotation is in degrees,
+//! `fontSize` for text, `title` for frames, `from`/`to` (ids or null) for connectors,
+//! `cells` (rows of texts) for tables, and `link` (an address or object id) when it has
+//! one. Positions are the unrotated top left corner in board units; rotation is in degrees,
 //! clockwise; colors are `#rrggbb` or `#rrggbbaa`.
 
 use std::sync::Arc;
 
 use pb_core::connector::{Anchor, Cap, Connector, End, Label, Route};
 use pb_core::{
-    Command, Document, FrameData, Object, ObjectData, ObjectId, ObjectKind, Rgba, Shape, ShapeKind,
-    Sticky, Style, StyleChange, Text,
+    Cell, Command, Document, FrameData, Link, Object, ObjectData, ObjectId, ObjectKind, Rgba,
+    Shape, ShapeKind, Sticky, Style, StyleChange, Table, Tag, Text,
 };
 use pb_geom::kurbo::{Point, Rect, Size};
 use serde_json::{Map, Value, json};
@@ -54,6 +55,96 @@ pub fn parse_ids(value: &Value) -> Result<Vec<ObjectId>, String> {
     match value {
         Value::Array(ids) => ids.iter().map(parse_id).collect(),
         one => Ok(vec![parse_id(one)?]),
+    }
+}
+
+/// A link as plugins see it: the address, or the id of the object it goes to.
+fn link_text(link: &Link) -> String {
+    match link {
+        Link::Url(url) => url.to_string(),
+        Link::Object(id) => id.to_string(),
+    }
+}
+
+/// A plugin's `link`: an object id (of an object on the board) or a web or mail address;
+/// `null` for none.
+fn parse_link(value: &Value, doc: &Document) -> Result<Option<Link>, String> {
+    match value {
+        Value::Null => Ok(None),
+        Value::String(text) => {
+            if let Some(id) = ObjectId::parse(text.trim()) {
+                return match doc.get(id).is_some() {
+                    true => Ok(Some(Link::Object(id))),
+                    false => Err(format!("\"link\": no object {id}")),
+                };
+            }
+            Link::from_input(text)
+                .map(Some)
+                .ok_or_else(|| format!("\"link\" should be a web address or an object id: {text}"))
+        }
+        v => Err(format!(
+            "\"link\" should be a web address or an object id, not {v}"
+        )),
+    }
+}
+
+/// Tags by name for what a plugin creates or changes: the board's own, and ones to define
+/// first (in [`TagNames::commands`]) for names the board has no tag for.
+#[derive(Default)]
+pub struct TagNames {
+    new: Vec<Tag>,
+}
+
+impl TagNames {
+    /// The id of the tag called `name` (ignoring case), defining one if there is none.
+    pub fn id(&mut self, doc: &Document, name: &str, color: Option<Rgba>) -> Arc<str> {
+        let same = |t: &&Tag| t.name.to_lowercase() == name.to_lowercase();
+        if let Some(tag) = self.new.iter().find(same) {
+            return tag.id.clone();
+        }
+        if let Some(tag) = doc.tags().iter().find(same) {
+            if let Some(color) = color.filter(|&c| c != tag.color) {
+                self.new.push(Tag {
+                    color,
+                    ..tag.clone()
+                });
+            }
+            return tag.id.clone();
+        }
+        let colors = Tag::COLORS;
+        let n = doc.tags().len() + self.new.len();
+        let tag = Tag {
+            id: doc.new_line_id().into(),
+            name: name.trim().into(),
+            color: color.unwrap_or(colors[n % colors.len()]),
+        };
+        self.new.push(tag.clone());
+        tag.id
+    }
+
+    /// The ids of tags named by a plugin's `tags` (a list of names).
+    fn ids(&mut self, doc: &Document, value: &Value) -> Result<Vec<Arc<str>>, String> {
+        let names = value
+            .as_array()
+            .ok_or("\"tags\" should be a list of tag names")?;
+        let mut ids: Vec<Arc<str>> = Vec::new();
+        for name in names {
+            let name = name
+                .as_str()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .ok_or("\"tags\" should be a list of tag names")?;
+            let id = self.id(doc, name, None);
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
+    }
+
+    /// Commands defining the new tags (and recoloring ones given a new color).
+    pub fn commands(self) -> Vec<Command> {
+        self.new.into_iter().map(Command::DefineTag).collect()
     }
 }
 
@@ -98,6 +189,7 @@ pub fn object_json(doc: &Document, object: &Object) -> Value {
         "tags": tags,
         "locked": doc.is_locked(object.id),
         "parent": object.parent.map(|p| p.to_string()),
+        "link": data.link.as_ref().map(link_text),
     });
     let map = o.as_object_mut().expect("an object");
     let mut set = |key: &str, value: Value| {
@@ -127,6 +219,16 @@ pub fn object_json(doc: &Document, object: &Object) -> Value {
         ObjectKind::Embed(embed) => {
             set("text", (*embed.title).into());
             set("url", (*embed.url).into());
+        }
+        ObjectKind::Table(table) => {
+            let cells: Vec<Vec<&str>> = (0..table.rows.len())
+                .map(|row| {
+                    (0..table.cols.len())
+                        .map(|col| table.text(row, col).0)
+                        .collect()
+                })
+                .collect();
+            set("cells", json!(cells));
         }
         _ => {}
     }
@@ -218,11 +320,13 @@ fn end_of(value: &Value, doc: &Document, name: &str) -> Result<End, String> {
 }
 
 /// A new object from a plugin's description; `center` is where it goes without `x`/`y`.
+/// Tags it names that the board has none of go to `tags`, to define first.
 pub fn new_object(
     item: &Value,
     doc: &Document,
     center: Point,
     measure: &mut Measure,
+    tags: &mut TagNames,
 ) -> Result<ObjectData, String> {
     let props = item.as_object().ok_or("each item should be an object")?;
     let kind = props
@@ -321,16 +425,22 @@ pub fn new_object(
                     route,
                     start_cap: Cap::None,
                     end_cap: if arrow { Cap::Arrow } else { Cap::None },
-                    label: Label::empty(0.5),
+                    label: label(&body, 0.5, measure),
                     bends: Arc::from([]),
                 }),
                 Rect::from_points(from.point(), to.point()),
                 Style::default(),
             )
         }
+        "table" => {
+            let (table, size) = new_table(props, doc, measure)?;
+            let mut style = Table::style();
+            style.font_size = Some(Table::FONT_SIZE);
+            (ObjectKind::Table(table), place(size)?, style)
+        }
         other => {
             return Err(format!(
-                "cannot create \"{other}\": sticky, shape, text, frame or connector"
+                "cannot create \"{other}\": sticky, shape, text, frame, connector or table"
             ));
         }
     };
@@ -341,8 +451,153 @@ pub fn new_object(
         bounds,
         rotation,
         style: change.apply_to(style),
-        tags: Default::default(),
-        link: None,
+        tags: match props.get("tags") {
+            None | Some(Value::Null) => Default::default(),
+            Some(names) => tags.ids(doc, names)?.into(),
+        },
+        link: parse_link(props.get("link").unwrap_or(&Value::Null), doc)?,
+    })
+}
+
+/// A connector's label with `text`, measured, `at` along its line.
+fn label(text: &str, at: f64, measure: &mut Measure) -> Label {
+    if text.is_empty() {
+        return Label::empty(at);
+    }
+    let (width, height) = measure(text, Label::FONT_SIZE, None);
+    Label {
+        text: text.into(),
+        at,
+        size: Size::new(width, height),
+    }
+}
+
+/// A table from a plugin's `rows` (lists of cell texts), and the size its cells need:
+/// `columnWidth` and `rowHeight` if given, else fitted to the text like a pasted table.
+fn new_table(
+    props: &Map<String, Value>,
+    doc: &Document,
+    measure: &mut Measure,
+) -> Result<(Table, Size), String> {
+    use crate::app::{MAX_TABLE_COLS, MAX_TABLE_ROWS, TABLE_CELL_PAD, TABLE_MAX_COLUMN};
+    let wrong = "\"rows\" should be a list of rows, each a list of cell texts";
+    let rows: Vec<Vec<String>> = props
+        .get("rows")
+        .and_then(Value::as_array)
+        .ok_or(wrong)?
+        .iter()
+        .map(|row| {
+            let cells = row.as_array().ok_or(wrong)?;
+            Ok(cells.iter().map(cell_text).collect())
+        })
+        .collect::<Result<_, String>>()?;
+    let row_count = rows.len().max(1);
+    let col_count = rows.iter().map(Vec::len).max().unwrap_or(0).max(1);
+    if row_count > MAX_TABLE_ROWS || col_count > MAX_TABLE_COLS {
+        return Err(format!(
+            "a table can have up to {MAX_TABLE_ROWS} rows and {MAX_TABLE_COLS} columns"
+        ));
+    }
+    let size = Table::FONT_SIZE;
+    let pad = 2.0 * TABLE_CELL_PAD;
+    let (min_w, min_h) = Table::CELL_SIZE;
+    let text = |row: usize, col: usize| {
+        rows.get(row)
+            .and_then(|r| r.get(col))
+            .map_or("", String::as_str)
+    };
+    let widths: Vec<f64> = match number(props, "columnWidth")? {
+        Some(width) => vec![width.max(1.0); col_count],
+        None => (0..col_count)
+            .map(|col| {
+                let widest = (0..row_count)
+                    .map(|row| measure(text(row, col), size, None).0)
+                    .fold(0.0, f64::max);
+                (widest + pad).clamp(min_w * 0.6, TABLE_MAX_COLUMN)
+            })
+            .collect(),
+    };
+    let heights: Vec<f64> = match number(props, "rowHeight")? {
+        Some(height) => vec![height.max(1.0); row_count],
+        None => (0..row_count)
+            .map(|row| {
+                (0..col_count)
+                    .filter(|&col| !text(row, col).is_empty())
+                    .map(|col| measure(text(row, col), size, Some(widths[col] - pad)).1 + pad)
+                    .fold(min_h, f64::max)
+            })
+            .collect(),
+    };
+    let mut table = Table::new(row_count, col_count, || doc.new_line_id());
+    let mut cells = pb_core::table::Cells::new();
+    for (r, line) in table.rows.iter().enumerate() {
+        for (c, col) in table.cols.iter().enumerate() {
+            let text = text(r, c);
+            if !text.is_empty() {
+                let cell = Cell {
+                    text: text.into(),
+                    spans: Default::default(),
+                };
+                cells.insert((line.id.clone(), col.id.clone()), cell);
+            }
+        }
+    }
+    let weigh = |lines: &[pb_core::Line], sizes: &[f64]| -> Arc<[pb_core::Line]> {
+        lines
+            .iter()
+            .zip(sizes)
+            .map(|(line, &weight)| pb_core::Line {
+                weight,
+                ..line.clone()
+            })
+            .collect()
+    };
+    table.rows = weigh(&table.rows, &heights);
+    table.cols = weigh(&table.cols, &widths);
+    table.cells = Arc::new(cells);
+    let size = Size::new(widths.iter().sum(), heights.iter().sum());
+    Ok((table, size))
+}
+
+/// A cell's text from a plugin: strings as they are, other values written out.
+fn cell_text(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        v => v.to_string(),
+    }
+}
+
+/// The command putting `text` in cell (`row`, `col`) of table `id`.
+pub fn cell_command(
+    doc: &Document,
+    id: ObjectId,
+    row: &Value,
+    col: &Value,
+    text: &Value,
+) -> Result<Command, String> {
+    let object = doc.get(id).ok_or_else(|| format!("no object {id}"))?;
+    if doc.is_locked(id) {
+        return Err(format!("object {id} is locked"));
+    }
+    let ObjectKind::Table(table) = &object.data.kind else {
+        return Err(format!("object {id} is not a table"));
+    };
+    let line = |value: &Value, lines: &[pb_core::Line], what: &str| {
+        value
+            .as_u64()
+            .and_then(|i| lines.get(usize::try_from(i).ok()?))
+            .map(|l| l.id.clone())
+            .ok_or_else(|| format!("no {what} {value}: the table has {}", lines.len()))
+    };
+    Ok(Command::SetCell {
+        id,
+        row: line(row, &table.rows, "row")?,
+        col: line(col, &table.cols, "column")?,
+        cell: Cell {
+            text: cell_text(text).into(),
+            spans: Default::default(),
+        },
     })
 }
 
@@ -392,6 +647,12 @@ pub fn update_commands(
     let new_text = text(props, "text")?.or(text(props, "title")?);
     if let Some(new_text) = new_text {
         match &data.kind {
+            ObjectKind::Connector(c) => {
+                commands.push(Command::SetLabel {
+                    id,
+                    label: label(&new_text, c.label.at, measure),
+                });
+            }
             ObjectKind::Sticky(_) | ObjectKind::Shape(_) | ObjectKind::Frame(_) => {
                 commands.push(Command::SetText {
                     id,
@@ -425,6 +686,44 @@ pub fn update_commands(
             change,
         });
     }
+    if let Some(names) = props.get("tags") {
+        let mut tags = TagNames::default();
+        let wanted = match names {
+            Value::Null => Vec::new(),
+            names => tags.ids(doc, names)?,
+        };
+        let add: Vec<_> = wanted
+            .iter()
+            .filter(|t| !data.tags.contains(t))
+            .cloned()
+            .collect();
+        let remove: Vec<_> = data
+            .tags
+            .iter()
+            .filter(|t| !wanted.contains(t))
+            .cloned()
+            .collect();
+        // New tags are defined before they are put on.
+        let mut define = tags.commands();
+        define.append(&mut commands);
+        commands = define;
+        if !add.is_empty() || !remove.is_empty() {
+            commands.push(Command::SetTags {
+                ids: vec![id],
+                add,
+                remove,
+            });
+        }
+    }
+    if let Some(link) = props.get("link") {
+        let link = parse_link(link, doc)?;
+        if link != data.link {
+            commands.push(Command::SetLink {
+                ids: vec![id],
+                link,
+            });
+        }
+    }
     if commands.is_empty() && !props.is_empty() {
         let known = [
             "x",
@@ -438,6 +737,8 @@ pub fn update_commands(
             "stroke",
             "strokeWidth",
             "opacity",
+            "tags",
+            "link",
         ];
         let unknown: Vec<_> = props
             .keys()
@@ -460,9 +761,133 @@ mod tests {
     }
 
     fn create(doc: &mut Document, item: Value) -> ObjectId {
-        let data = new_object(&item, doc, Point::new(0.0, 0.0), &mut measure).unwrap();
+        let mut tags = TagNames::default();
+        let data = new_object(&item, doc, Point::new(0.0, 0.0), &mut measure, &mut tags).unwrap();
+        for command in tags.commands() {
+            doc.apply(command).unwrap();
+        }
         doc.apply(Command::Create(vec![data.into()])).unwrap();
         doc.objects().last().unwrap().id
+    }
+
+    fn update(doc: &mut Document, id: ObjectId, props: Value) {
+        for command in update_commands(doc, id, &props, &mut measure).unwrap() {
+            doc.apply(command).unwrap();
+        }
+    }
+
+    #[test]
+    fn plugins_make_and_fill_tables() {
+        let mut doc = Document::new();
+        let table = create(
+            &mut doc,
+            json!({"type": "table", "rows": [["Name", "Age"], ["Ann", 31], ["Bob"]], "x": 0, "y": 0}),
+        );
+        let o = object_json(&doc, doc.get(table).unwrap());
+        assert_eq!(o["type"], "table");
+        assert_eq!(
+            o["cells"],
+            json!([["Name", "Age"], ["Ann", "31"], ["Bob", ""]])
+        );
+        // Fitted to the text, at least as big as a table's usual cells.
+        let (min_w, min_h) = Table::CELL_SIZE;
+        assert!(o["width"].as_f64().unwrap() >= 2.0 * min_w * 0.6);
+        assert_eq!(o["height"].as_f64(), Some(3.0 * min_h));
+
+        let command = cell_command(&doc, table, &json!(2), &json!(1), &json!("40")).unwrap();
+        doc.apply(command).unwrap();
+        let o = object_json(&doc, doc.get(table).unwrap());
+        assert_eq!(o["cells"][2], json!(["Bob", "40"]));
+        assert!(cell_command(&doc, table, &json!(3), &json!(0), &json!("x")).is_err());
+        assert!(cell_command(&doc, table, &json!(-1), &json!(0), &json!("x")).is_err());
+
+        let fixed = create(
+            &mut doc,
+            json!({"type": "table", "rows": [["a", "b", "c"]], "columnWidth": 50, "rowHeight": 30}),
+        );
+        let b = doc.get(fixed).unwrap().data.bounds;
+        assert_eq!((b.width(), b.height()), (150.0, 30.0));
+        assert!(cell_command(&doc, fixed, &json!(0), &json!(0), &json!("x")).is_ok());
+        let note = create(&mut doc, json!({"type": "sticky"}));
+        assert!(cell_command(&doc, note, &json!(0), &json!(0), &json!("x")).is_err());
+        for bad in [
+            json!({"type": "table"}),
+            json!({"type": "table", "rows": ["a", "b"]}),
+            json!({"type": "table", "rows": [vec!["x"; 51]]}),
+        ] {
+            assert!(
+                new_object(
+                    &bad,
+                    &doc,
+                    Point::ZERO,
+                    &mut measure,
+                    &mut Default::default()
+                )
+                .is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn plugins_tag_link_and_label() {
+        let mut doc = Document::new();
+        let note = create(
+            &mut doc,
+            json!({"type": "sticky", "tags": ["Idea", "idea", "Urgent"]}),
+        );
+        // Names are matched ignoring case: two tags, made once.
+        assert_eq!(doc.tags().len(), 2);
+        let o = object_json(&doc, doc.get(note).unwrap());
+        assert_eq!(o["tags"], json!(["Idea", "Urgent"]));
+        let other = create(
+            &mut doc,
+            json!({"type": "sticky", "tags": ["URGENT"], "link": "example.com/a"}),
+        );
+        assert_eq!(doc.tags().len(), 2);
+        let o = object_json(&doc, doc.get(other).unwrap());
+        assert_eq!(o["tags"], json!(["Urgent"]));
+        assert_eq!(o["link"], "https://example.com/a");
+
+        update(
+            &mut doc,
+            note,
+            json!({"tags": ["Urgent", "Later"], "link": other.to_string()}),
+        );
+        let o = object_json(&doc, doc.get(note).unwrap());
+        assert_eq!(o["tags"], json!(["Urgent", "Later"]));
+        assert_eq!(o["link"], other.to_string());
+        assert_eq!(doc.tags().len(), 3);
+        update(&mut doc, note, json!({"tags": [], "link": null}));
+        let o = object_json(&doc, doc.get(note).unwrap());
+        assert_eq!(
+            (o["tags"].clone(), o["link"].clone()),
+            (json!([]), Value::Null)
+        );
+        for bad in [
+            json!({"link": "not a link"}),
+            json!({"link": "9@9"}),
+            json!({"tags": "Idea"}),
+        ] {
+            assert!(
+                update_commands(&doc, note, &bad, &mut measure).is_err(),
+                "{bad}"
+            );
+        }
+
+        let line = create(
+            &mut doc,
+            json!({"type": "connector", "from": note.to_string(), "to": other.to_string(), "text": "yes"}),
+        );
+        let label = |doc: &Document| match &doc.get(line).unwrap().data.kind {
+            ObjectKind::Connector(c) => c.label.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(&*label(&doc).text, "yes");
+        assert_eq!(label(&doc).size, Size::new(24.0, 19.2));
+        update(&mut doc, line, json!({"text": "no way"}));
+        assert_eq!(object_json(&doc, doc.get(line).unwrap())["text"], "no way");
+        assert_eq!(label(&doc).size, Size::new(48.0, 19.2));
     }
 
     #[test]
@@ -534,7 +959,10 @@ mod tests {
         assert_eq!(doc.get(label).unwrap().data.bounds.width(), 40.0);
 
         assert!(update_commands(&doc, shape, &json!({"fill": "blue"}), &mut measure).is_err());
-        assert!(update_commands(&doc, line, &json!({"title": "x"}), &mut measure).is_err());
+        // Connectors' text is their label; tables have none of their own.
+        assert!(update_commands(&doc, line, &json!({"title": "x"}), &mut measure).is_ok());
+        let table = create(&mut doc, json!({"type": "table", "rows": [["a"]]}));
+        assert!(update_commands(&doc, table, &json!({"text": "x"}), &mut measure).is_err());
         assert!(update_commands(&doc, shape, &json!({"colour": "#000000"}), &mut measure).is_err());
         for bad in [
             json!({"type": "shape", "shape": "blob"}),
@@ -543,7 +971,14 @@ mod tests {
             json!({"type": "sticky", "x": "left"}),
         ] {
             assert!(
-                new_object(&bad, &doc, Point::ZERO, &mut measure).is_err(),
+                new_object(
+                    &bad,
+                    &doc,
+                    Point::ZERO,
+                    &mut measure,
+                    &mut Default::default()
+                )
+                .is_err(),
                 "{bad}"
             );
         }

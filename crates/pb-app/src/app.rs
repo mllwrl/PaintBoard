@@ -7,7 +7,7 @@ use pb_core::{
     Style, Text, ZOrder,
 };
 use pb_geom::Camera;
-use pb_geom::kurbo::{Point, Size, Vec2};
+use pb_geom::kurbo::{Point, Rect, Size, Vec2};
 use pb_platform::Instant;
 use pb_platform::{clipboard, dialog, handwriting};
 use pb_render::vello::Scene;
@@ -99,6 +99,10 @@ pub enum UserEvent {
     DevPluginPicked(PathBuf),
     /// A board file was picked to open (later than asked on the web).
     BoardPicked(PathBuf),
+    /// PaintBoard was started again, with this file to open (or none): this copy opens it
+    /// and comes to the front instead.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    StartedAgain(Option<PathBuf>),
     /// Files were picked to add to the board.
     FilesPicked(Vec<PathBuf>),
     /// Files were dropped on the page at this point (physical pixels; the web only).
@@ -219,6 +223,8 @@ pub struct App {
     picking_link: Option<ObjectId>,
     /// Searching the board, while the search bar is open.
     search: Option<Search>,
+    /// Objects found for the command palette, while it is open.
+    palette: Option<Vec<(String, Rect)>>,
     /// The right-click menu, where it was opened: on screen (logical pixels) and on the
     /// board.
     context_menu: Option<(Point, Point)>,
@@ -240,6 +246,10 @@ pub struct App {
     playback: Option<Playback>,
     /// What the board's countdown showed when last drawn.
     timer_drawn: Option<crate::ui::TimerView>,
+    /// Shortcuts that may ask something in a window of the system, done after the next
+    /// frame like the UI's buttons: asked while a key is handled, Windows leaves that window
+    /// hidden and the app waits on it for good.
+    deferred: Vec<Action>,
     /// The voting results window is open.
     show_results: bool,
     /// The camera gliding to a new place.
@@ -284,6 +294,8 @@ pub struct App {
     notices: Vec<(String, String, Instant)>,
     /// When plugins developed from their folders are looked at for changes next.
     plugin_check_at: Option<Instant>,
+    /// The sound a plugin played last, kept until it is over.
+    plugin_sound: Option<(pb_platform::audio::Player, Instant)>,
     /// Whose view this copy follows on a shared board, the camera as following last set
     /// it (moved since: the user took over) and when.
     following: Option<pb_sync::ClientId>,
@@ -324,6 +336,14 @@ impl App {
                 let _ = wake.send_event(UserEvent::Saved);
             });
         }
+        // Later starts hand their files to this copy.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let proxy = proxy.clone();
+            pb_platform::instance::listen(move |file| {
+                let _ = proxy.send_event(UserEvent::StartedAgain(file));
+            });
+        }
         let accounts = {
             let proxy = proxy.clone();
             crate::account::Accounts::new(move |reply| {
@@ -336,6 +356,7 @@ impl App {
             plugins_window: false,
             notices: Vec::new(),
             plugin_check_at: None,
+            plugin_sound: None,
             proxy,
             window: None,
             gpu: None,
@@ -374,6 +395,7 @@ impl App {
             picking_link: None,
             search: None,
             focus_search: false,
+            palette: None,
             context_menu: None,
             show_shortcuts: false,
             show_templates: false,
@@ -385,6 +407,7 @@ impl App {
             playback: None,
             camera_glide: None,
             timer_drawn: None,
+            deferred: Vec::new(),
             show_results: false,
             diagram: None,
             graph: None,
@@ -898,6 +921,7 @@ impl App {
             thread: self.thread_view(),
             threads: self.thread_list(),
             show_resolved: self.show_resolved,
+            palette: self.palette.clone(),
             search: self.search.as_ref().map(|s| SearchInfo {
                 count: s.hits.len(),
                 current: s.current,
@@ -906,10 +930,10 @@ impl App {
             }),
         };
         self.focus_search = false;
-        let actions = match &mut self.ui {
-            Some(ui) => ui.run(&window, &model),
-            None => Vec::new(),
-        };
+        let mut actions = std::mem::take(&mut self.deferred);
+        if let Some(ui) = &mut self.ui {
+            actions.extend(ui.run(&window, &model));
+        }
         if let Some(gpu) = &mut self.gpu {
             let ui = &mut self.ui;
             let background = self
@@ -1424,6 +1448,7 @@ impl App {
                     },
                 );
             }
+            Action::InstallPluginFiles(paths) => self.install_plugin(paths),
             Action::LoadDevPlugin => {
                 let proxy = self.proxy.clone();
                 pb_platform::dialog::pick_files(
@@ -1796,6 +1821,15 @@ impl App {
             Action::Search(query) => self.search_for(query),
             Action::SearchStep(forward) => self.search_step(forward),
             Action::CloseSearch => self.search = None,
+            Action::TogglePalette => self.toggle_palette(),
+            Action::ClosePalette => self.palette = None,
+            Action::PaletteQuery(query) => {
+                if self.palette.is_some() {
+                    self.palette = Some(self.palette_objects(&query));
+                }
+            }
+            Action::ShowArea(area) => self.show_area(area),
+            Action::ZoomToFit => self.zoom_to_fit(),
             Action::PostComment(text) => self.post_comment(text),
             Action::DeleteComment(comment) => {
                 if let Some(thread) = self.thread_panel.as_ref().and_then(|p| p.thread.clone()) {
@@ -2893,6 +2927,7 @@ impl App {
         self.context_menu = None;
         self.thread_panel = None;
         self.search = None;
+        self.palette = None;
         let doc = match self.document.version_view(&id) {
             Ok(doc) => doc,
             Err(err) => {
@@ -3371,6 +3406,7 @@ impl App {
         self.context_menu = None;
         self.thread_panel = None;
         self.search = None;
+        self.palette = None;
         self.show_templates = false;
         self.show_shortcuts = false;
         // The presentation shows whole frames, and ends where focus mode began.
@@ -3449,6 +3485,7 @@ impl App {
         self.tools.cancel();
         self.context_menu = None;
         self.search = None;
+        self.palette = None;
         // A hair larger, so what was picked keeps its center inside however it rounds.
         let area = area.inflate(1.0, 1.0);
         self.document.set_focus(Some(area));
@@ -3822,6 +3859,115 @@ impl App {
         }
     }
 
+    /// Opens the command palette, or closes it.
+    fn toggle_palette(&mut self) {
+        if self.palette.take().is_none() {
+            self.finish_editing();
+            self.context_menu = None;
+            self.palette = Some(Vec::new());
+        }
+    }
+
+    /// The objects whose text has `query` (two letters or more), for the command palette:
+    /// a line of the text found and where it is. Frames are offered by title already.
+    fn palette_objects(&self, query: &str) -> Vec<(String, Rect)> {
+        /// How many objects the palette offers.
+        const MAX: usize = 5;
+        let query = query.trim().to_lowercase();
+        if query.chars().count() < 2 {
+            return Vec::new();
+        }
+        let mut found: Vec<(String, Rect)> = Vec::new();
+        let mut seen = Vec::new();
+        for hit in pb_core::search::search(&self.document, &query) {
+            let Some(object) = self.document.get(hit.id) else {
+                continue;
+            };
+            if object.data.kind.is_frame() || seen.contains(&hit.id) {
+                continue;
+            }
+            seen.push(hit.id);
+            found.push((self.found_text(&object.data, &query), hit.area.aabb()));
+            if found.len() == MAX {
+                break;
+            }
+        }
+        found
+    }
+
+    /// The line of `data`'s text (or the tag) where `query` (lowercase) is, cut short.
+    fn found_text(&self, data: &ObjectData, query: &str) -> String {
+        let mut texts: Vec<&str> = Vec::new();
+        match &data.kind {
+            ObjectKind::Connector(c) => texts.push(&c.label.text),
+            ObjectKind::Table(table) => {
+                for row in 0..table.rows.len() {
+                    for col in 0..table.cols.len() {
+                        texts.push(table.text(row, col).0);
+                    }
+                }
+            }
+            ObjectKind::Kanban(kanban) => {
+                texts.extend(kanban.columns.iter().map(|c| &*c.title));
+                texts.extend(kanban.cards.iter().map(|c| &*c.text));
+            }
+            ObjectKind::MindMap(map) => texts.extend(map.nodes.iter().map(|n| &*n.text)),
+            kind => texts.extend(kind.text()),
+        }
+        let line = texts
+            .iter()
+            .flat_map(|t| t.lines())
+            .find(|l| l.to_lowercase().contains(query));
+        let text = match line {
+            Some(line) => line.trim().to_owned(),
+            None => {
+                let tag =
+                    self.document.tags().iter().find(|t| {
+                        data.tags.contains(&t.id) && t.name.to_lowercase().contains(query)
+                    });
+                match tag {
+                    Some(tag) => trf("Tagged {}", &[&tag.name]),
+                    // Found across lines: its first line.
+                    None => texts
+                        .iter()
+                        .flat_map(|t| t.lines())
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or_default()
+                        .trim()
+                        .to_owned(),
+                }
+            }
+        };
+        const LONGEST: usize = 60;
+        if text.chars().count() > LONGEST {
+            let cut: String = text.chars().take(LONGEST - 1).collect();
+            cut + "…"
+        } else {
+            text
+        }
+    }
+
+    /// Shows everything on the board, at most at 100%; the start when it is empty.
+    fn zoom_to_fit(&mut self) {
+        let viewport = self.viewport();
+        let content = self
+            .document
+            .objects()
+            .iter()
+            .filter(|o| self.document.is_shown(o.id))
+            .map(|o| o.data.frame().aabb())
+            .reduce(|a, b| a.union(b));
+        match content {
+            Some(area) => {
+                self.camera.fit(area, viewport, FRAME_MARGIN);
+                if self.camera.zoom() > 1.0 {
+                    self.camera.look_at(area.center(), 1.0, viewport);
+                }
+            }
+            None => self.camera.look_at(Point::ZERO, 1.0, viewport),
+        }
+    }
+
     /// Opens the search bar, or gives its field the keyboard again.
     fn open_search(&mut self) {
         self.finish_editing();
@@ -3871,17 +4017,20 @@ impl App {
         search.revision = revision;
     }
 
-    /// Brings the current result into view: pans to it, zooming out only if it does not
-    /// fit.
+    /// Brings the current result into view.
     fn show_search_result(&mut self) {
-        let Some(area) = self
+        if let Some(area) = self
             .search
             .as_ref()
             .and_then(|s| s.hits.get(s.current))
             .map(|h| h.area.aabb())
-        else {
-            return;
-        };
+        {
+            self.show_area(area);
+        }
+    }
+
+    /// Brings `area` (world) into view: pans to it, zooming out only if it does not fit.
+    fn show_area(&mut self, area: Rect) {
         let viewport = self.viewport();
         let zoom = self.camera.zoom();
         let margin = FRAME_MARGIN / zoom;
@@ -5166,6 +5315,23 @@ impl App {
         }
     }
 
+    /// PaintBoard was started again with `file`: shows the window, then opens the board
+    /// or offers to install the plugin, as when this copy was started with it. That may
+    /// ask something in a window of the system, so it is done after the next frame.
+    fn started_again(&mut self, file: Option<PathBuf>) {
+        if let Some(window) = &self.window {
+            window.set_minimized(false);
+            window.focus_window();
+        }
+        match file {
+            Some(f) if has_extension(&f, pb_plugin::package::EXTENSION) => {
+                self.defer(Action::InstallPluginFiles(vec![f]));
+            }
+            Some(f) => self.defer(Action::OpenFile(f)),
+            None => self.request_redraw(),
+        }
+    }
+
     fn new_board(&mut self) {
         self.finish_editing();
         self.end_style_drag();
@@ -5664,6 +5830,12 @@ impl App {
         }
     }
 
+    /// Does `action` after the next frame (see [`App::deferred`]).
+    fn defer(&mut self, action: Action) {
+        self.deferred.push(action);
+        self.request_redraw();
+    }
+
     fn handle_key(&mut self, event: &KeyEvent) -> bool {
         let PhysicalKey::Code(code) = event.physical_key else {
             return false;
@@ -5689,13 +5861,13 @@ impl App {
         let viewport = self.viewport();
         // Physical keys, so shortcuts work the same on any keyboard layout.
         match code {
-            KeyCode::KeyS if ctrl && modifiers.shift_key() => {
-                self.session.save_as(&self.document);
-            }
-            KeyCode::KeyS if ctrl => self.session.save(&self.document),
-            KeyCode::KeyO if ctrl => self.open_board(),
-            KeyCode::KeyE if ctrl && modifiers.shift_key() => self.open_export(),
-            KeyCode::KeyP if ctrl => self.print(),
+            KeyCode::KeyS if ctrl && modifiers.shift_key() => self.defer(Action::SaveAs),
+            KeyCode::KeyS if ctrl => self.defer(Action::Save),
+            KeyCode::KeyO if ctrl => self.defer(Action::Open),
+            KeyCode::KeyE if ctrl && modifiers.shift_key() => self.defer(Action::OpenExport),
+            KeyCode::KeyP if ctrl && modifiers.shift_key() => self.toggle_palette(),
+            KeyCode::KeyP if ctrl => self.defer(Action::Print),
+            KeyCode::KeyK if ctrl => self.toggle_palette(),
             // The UI's size: Ctrl+Alt+= / - / 0 (Ctrl+= and friends zoom the board).
             KeyCode::Equal if ctrl && modifiers.alt_key() => {
                 self.perform(Action::SetUiScale(self.ui_scale + 0.25));
@@ -5706,7 +5878,7 @@ impl App {
             KeyCode::Digit0 if ctrl && modifiers.alt_key() => {
                 self.perform(Action::SetUiScale(1.0));
             }
-            KeyCode::KeyN if ctrl => self.new_board(),
+            KeyCode::KeyN if ctrl => self.defer(Action::NewBoard),
             KeyCode::KeyZ if ctrl && modifiers.shift_key() => self.redo(),
             KeyCode::KeyZ if ctrl => self.undo(),
             KeyCode::KeyY if ctrl => self.redo(),
@@ -5815,7 +5987,7 @@ impl App {
                 };
                 self.mark_cells(mark);
             }
-            KeyCode::Delete | KeyCode::Backspace => self.delete_selected(),
+            KeyCode::Delete | KeyCode::Backspace => self.defer(Action::Delete),
             KeyCode::ArrowLeft => self.nudge(-1.0, 0.0),
             KeyCode::ArrowRight => self.nudge(1.0, 0.0),
             KeyCode::ArrowUp => self.nudge(0.0, -1.0),
@@ -5957,6 +6129,16 @@ impl ApplicationHandler<UserEvent> for App {
         } else {
             self.plugin_check_at = None;
         }
+        if self.plugins.deadline().is_some_and(|at| at <= now) {
+            self.with_plugins(|plugins, app| plugins.tick(app, now));
+        }
+        if self
+            .plugin_sound
+            .as_ref()
+            .is_some_and(|(_, end)| *end <= now)
+        {
+            self.plugin_sound = None;
+        }
         let shown = self.notices.len();
         self.notices.retain(|(_, _, until)| *until > now);
         if self.notices.len() != shown {
@@ -6013,6 +6195,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.sharing.as_ref().and_then(|s| s.deadline()),
             self.accounts.deadline(),
             self.plugin_check_at,
+            self.plugins.deadline(),
             notice_end,
         ]
         .into_iter()
@@ -6075,6 +6258,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.request_redraw();
             }
             UserEvent::BoardPicked(path) => self.open_file(path),
+            UserEvent::StartedAgain(file) => self.started_again(file),
             UserEvent::FilesDropped(paths, at) => {
                 let at = self.camera.screen_to_world(at);
                 self.insert_files(&paths, Some(at));
@@ -6621,13 +6805,13 @@ fn is_table_file(path: &std::path::Path) -> bool {
 }
 
 /// Most rows and columns a table made from a file or paste gets; the rest is cut.
-const MAX_TABLE_ROWS: usize = 500;
-const MAX_TABLE_COLS: usize = 50;
+pub(crate) const MAX_TABLE_ROWS: usize = 500;
+pub(crate) const MAX_TABLE_COLS: usize = 50;
 
 /// Space around cell text, and the widest a column of a pasted table starts out, in world
 /// units at 100%.
-const TABLE_CELL_PAD: f64 = 8.0;
-const TABLE_MAX_COLUMN: f64 = 280.0;
+pub(crate) const TABLE_CELL_PAD: f64 = 8.0;
+pub(crate) const TABLE_MAX_COLUMN: f64 = 280.0;
 
 /// Whether `path` is a Markdown or plain text file, added as a document.
 fn is_document_file(path: &std::path::Path) -> bool {
@@ -6842,6 +7026,23 @@ impl crate::plugins::Host for App {
             self.document.begin_undo_group();
         } else {
             self.document.end_undo_group();
+        }
+    }
+
+    fn play_sound(&mut self, name: &str) {
+        let Some(samples) = crate::sounds::sound(name) else {
+            return;
+        };
+        let length = std::time::Duration::from_secs_f64(
+            samples.len() as f64 / f64::from(crate::sounds::RATE),
+        );
+        match pb_platform::audio::Player::start(samples.into(), crate::sounds::RATE, 0.0) {
+            // A little longer than the sound, so the speakers play it to the end.
+            Ok(player) => {
+                let end = Instant::now() + length + std::time::Duration::from_millis(500);
+                self.plugin_sound = Some((player, end));
+            }
+            Err(err) => log::warn!("plugin sound: {err}"),
         }
     }
 

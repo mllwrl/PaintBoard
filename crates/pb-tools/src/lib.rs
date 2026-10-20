@@ -1071,8 +1071,13 @@ impl Tools {
                 if pointer.shift {
                     let from = *straight_from.get_or_insert(points.len() - 1);
                     points.truncate(from + 1);
-                    if pointer.screen_distance(points[from].0) >= ink::MIN_STEP {
-                        points.push((pointer.world, pressure));
+                    // One width all along, the firmest so far: a line from where a stylus
+                    // touched down would start from next to no pressure.
+                    let firm = points.iter().map(|&(_, p)| p).fold(pressure, f64::max);
+                    points[from].1 = firm;
+                    let start = points[from].0;
+                    if pointer.screen_distance(start) >= ink::MIN_STEP {
+                        points.push((ink::straighten(start, pointer.world), firm));
                     }
                     return true;
                 }

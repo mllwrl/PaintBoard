@@ -56,12 +56,13 @@ folder, so any zip tool makes one too: zip the folder (or its contents) and rena
 Permissions:
 
 - `board:read`: read objects, the selection, the view and tags; get `selectionchange` and `boardchange` events.
-- `board:write`: create, change and remove objects.
+- `board:write`: create, change and remove objects; fill table cells, define tags, group
+  and ungroup.
 - `network:example.com,api.example.org`: `paintboard.net.fetch` from these hosts (and their subdomains).
 - `clipboard`: put text on the clipboard.
 
-A plugin without permissions can still add commands, show its panel, notify and keep
-values in its storage.
+A plugin without permissions can still add commands, show its panel, notify, play sounds,
+wait, and keep values in its storage.
 
 ## How it runs
 
@@ -98,3 +99,29 @@ await paintboard.ui.showPanel(
 
 Item types: `text`, `separator`, `input` (`multiline` for several lines), `button`, `list`.
 Showing the panel again replaces it (to update a list, say); `closePanel()` hides it.
+
+## Tables, tags, links and groups
+
+```js
+const [table] = await paintboard.board.create({
+  type: "table",
+  rows: [["Name", "Age"], ["Ann", "31"]], // optional: columnWidth, rowHeight
+  tags: ["People"],                       // tags are made if the board has none by that name
+  link: "https://example.com/people",     // or the id of an object to go to
+});
+await paintboard.board.setCell(table, 1, 1, "32");          // row and column from 0
+const t = await paintboard.board.getObject(table);          // t.cells: [["Name", "Age"], ["Ann", "32"]]
+await paintboard.board.defineTag({ name: "Done", color: "#22a06b" });
+await paintboard.board.update(table, { tags: ["People", "Done"], link: null });
+const group = await paintboard.board.group([table, other]);
+await paintboard.board.ungroup(group);
+```
+
+A connector's `text` is its label, in `create` and `update` alike.
+
+## Sounds and waiting
+
+`paintboard.ui.playSound(name)` plays one of the built-in sounds: `"chime"`, `"beep"`,
+`"done"` or `"alarm"`. `await paintboard.ui.after(ms)` waits (up to a day); `setTimeout`
+and `clearTimeout` work too (on the desktop they are made from `after`). Waits end when
+the plugin is switched off or reloaded. See [`examples/countdown`](examples/countdown).

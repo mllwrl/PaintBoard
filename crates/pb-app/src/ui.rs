@@ -74,6 +74,8 @@ pub enum Action {
     /// Opens or closes the plugins window.
     TogglePlugins,
     InstallPlugin,
+    /// Offers to install the plugin in these files.
+    InstallPluginFiles(Vec<std::path::PathBuf>),
     /// Runs a plugin from its own folder, reloading it as it changes (desktop).
     LoadDevPlugin,
     SetPluginEnabled(String, bool),
@@ -87,7 +89,7 @@ pub enum Action {
     PackPlugin(String),
     /// Puts text on the clipboard (a link to share).
     CopyText(String),
-    /// Opens this board (one kept in the browser).
+    /// Opens this board (one kept in the browser, or a file PaintBoard was started with).
     OpenFile(std::path::PathBuf),
     /// Lets the browser download the board as a file (web only).
     DownloadBoard,
@@ -278,6 +280,15 @@ pub enum Action {
     /// Shows the next search result, or the previous one.
     SearchStep(bool),
     CloseSearch,
+    /// Opens the command palette, or closes it (Ctrl+K).
+    TogglePalette,
+    ClosePalette,
+    /// Looks on the board for objects with this text, to offer in the palette.
+    PaletteQuery(String),
+    /// Brings this area of the board (world) into view, like a search result.
+    ShowArea(kurbo::Rect),
+    /// Shows everything on the board, at most at 100%.
+    ZoomToFit,
     /// Links the selected object to a typed or pasted address or anchor.
     SetLink(String),
     /// Links the selected object to another object.
@@ -497,6 +508,9 @@ pub struct Model<'a> {
     pub filter: &'a pb_core::Filter,
     /// The search bar, when it is open.
     pub search: Option<SearchInfo>,
+    /// The command palette, when it is open: objects whose text fits what is typed, each
+    /// with a line of its text and its area on the board.
+    pub palette: Option<Vec<(String, kurbo::Rect)>>,
     /// The right-click menu, when it is open.
     pub context_menu: Option<ContextMenuInfo>,
     pub show_shortcuts: bool,
@@ -901,6 +915,8 @@ pub struct Ui {
     link_text: String,
     /// Text typed into the search bar.
     search_text: String,
+    /// What is typed in the command palette, and what it remembers.
+    palette: PaletteState,
     /// Mermaid text in the diagram window, kept between openings.
     diagram_text: String,
     /// The graph window's formulas and x range.
@@ -952,6 +968,7 @@ impl Ui {
             new_tag: String::new(),
             link_text: String::new(),
             search_text: String::new(),
+            palette: PaletteState::default(),
             diagram_text: DIAGRAM_EXAMPLE.to_owned(),
             graph_text: (
                 "sin(x); x^2/4 - 1".to_owned(),
@@ -1071,6 +1088,7 @@ impl Ui {
         let new_tag = &mut self.new_tag;
         let link_text = &mut self.link_text;
         let search_text = &mut self.search_text;
+        let palette = &mut self.palette;
         let diagram_text = &mut self.diagram_text;
         let graph_text = &mut self.graph_text;
         let comment_text = &mut self.comment_text;
@@ -1163,6 +1181,13 @@ impl Ui {
             }
             if model.show_shortcuts {
                 shortcuts_window(ctx, &mut actions);
+            }
+            match &model.palette {
+                Some(objects) => command_palette(ctx, model, objects, palette, &mut actions),
+                None => {
+                    palette.text.clear();
+                    palette.picked = 0;
+                }
             }
             if let Some(error) = &model.diagram {
                 diagram_window(ctx, error.as_deref(), diagram_text, &mut actions);
@@ -1575,13 +1600,13 @@ fn board_menu(ctx: &Context, model: &Model, typed: Typed, actions: &mut Vec<Acti
                     }
                     ui.menu_button(tr("Plugins"), |ui| plugins_menu(ui, model, actions));
                     ui.menu_button(tr("Talktracks"), |ui| talktracks_menu(ui, model, actions));
-                    ui.menu_button(tr("History"), |ui| {
+                    menu_with_fields(ui, tr("History"), |ui| {
                         history_menu(ui, model, version_name, actions)
                     });
                     ui.menu_button(tr("Vote"), |ui| {
                         voting_menu(ui, model.voting, &mut *actions)
                     });
-                    ui.menu_button(tr("Timer"), |ui| {
+                    menu_with_fields(ui, tr("Timer"), |ui| {
                         timer_menu(ui, model.view_only, timer_text, actions)
                     });
                     if ui
@@ -1604,6 +1629,13 @@ fn board_menu(ctx: &Context, model: &Model, typed: Typed, actions: &mut Vec<Acti
                         .clicked()
                     {
                         actions.push(Action::OpenSearch);
+                    }
+                    if ui
+                        .button(tr("Commands"))
+                        .on_hover_text(tr("Command palette: any command, frame or text (Ctrl+K)"))
+                        .clicked()
+                    {
+                        actions.push(Action::TogglePalette);
                     }
                     if ui
                         .button("?")
@@ -3834,6 +3866,16 @@ pub fn parse_timer(text: &str) -> Option<u64> {
     (1000..=TIMER_MAX).contains(&ms).then_some(ms)
 }
 
+/// A menu with fields to type in: clicking inside it (into a field, say) keeps it open, so
+/// its buttons close it themselves.
+fn menu_with_fields(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
+    let config = egui::containers::menu::MenuConfig::new()
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    egui::containers::menu::MenuButton::new(label)
+        .config(config)
+        .ui(ui, add);
+}
+
 /// Countdowns of a few usual lengths, and one of the length typed in `text`.
 fn timer_menu(ui: &mut egui::Ui, view_only: bool, text: &mut String, actions: &mut Vec<Action>) {
     ui.weak(tr("Everyone on the board sees it"));
@@ -4695,6 +4737,10 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         "Board",
         &[
             ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+            (
+                "Ctrl+K, Ctrl+Shift+P",
+                "Command palette: any command, frame or text",
+            ),
             ("Ctrl+F", "Find"),
             ("Ctrl+N / O / S", "New / open / save"),
             ("Ctrl+Shift+S", "Save as"),
@@ -4847,6 +4893,381 @@ fn search_bar(ctx: &Context, info: SearchInfo, text: &mut String, actions: &mut 
                 });
             });
         });
+}
+
+/// What the command palette keeps between frames.
+#[derive(Default)]
+struct PaletteState {
+    /// What is typed.
+    text: String,
+    /// The entry picked with the arrow keys, in the list shown.
+    picked: usize,
+    /// Entries run lately, last first.
+    recent: Vec<Action>,
+}
+
+/// What the board allows now, for the commands the palette offers.
+#[derive(Clone, Copy, Debug, Default)]
+struct PaletteCan {
+    read_only: bool,
+    view_only: bool,
+    undo: bool,
+    redo: bool,
+    present: bool,
+    /// Something is selected; and several things, a group, something locked.
+    selection: bool,
+    several: bool,
+    group: bool,
+    locked: bool,
+    voting: Option<VotingView>,
+    timer: bool,
+    recording: bool,
+}
+
+/// What the menus and the tools offer, for the command palette: the English label, the
+/// keys, the action, and whether it can be done now.
+fn palette_commands(can: PaletteCan) -> Vec<(&'static str, &'static str, Action, bool)> {
+    let edit = !can.read_only;
+    let selected = can.selection;
+    let free = selected && edit && !can.locked;
+    let voting = can.voting.is_some_and(|v| v.open);
+    let voted = can.voting.is_some_and(|v| !v.open);
+    let timer = !can.view_only;
+    let tool = |kind| Action::Tool(kind);
+    vec![
+        ("New board", "Ctrl+N", Action::NewBoard, true),
+        ("Open…", "Ctrl+O", Action::Open, true),
+        ("Save", "Ctrl+S", Action::Save, true),
+        ("Save as…", "Ctrl+Shift+S", Action::SaveAs, true),
+        ("Insert file…", "", Action::InsertImage, edit),
+        ("Diagram from text…", "", Action::OpenDiagram, edit),
+        ("Graph of a function…", "", Action::OpenGraph, edit),
+        ("Export…", "Ctrl+Shift+E", Action::OpenExport, true),
+        ("Print…", "Ctrl+P", Action::Print, true),
+        ("Read-only", "", Action::ToggleReadOnly, true),
+        ("Undo", "Ctrl+Z", Action::Undo, can.undo),
+        ("Redo", "Ctrl+Y", Action::Redo, can.redo),
+        ("Select all", "Ctrl+A", Action::SelectAll, true),
+        ("Copy", "Ctrl+C", Action::Copy, selected),
+        ("Cut", "Ctrl+X", Action::Cut, free),
+        ("Duplicate", "Ctrl+D", Action::Duplicate, selected && edit),
+        ("Delete", "Delete", Action::Delete, free),
+        (
+            "Bring to front",
+            "Ctrl+Shift+]",
+            Action::Reorder(ZOrder::Front),
+            free,
+        ),
+        (
+            "Send to back",
+            "Ctrl+Shift+[",
+            Action::Reorder(ZOrder::Back),
+            free,
+        ),
+        ("Group", "Ctrl+G", Action::Group, free && can.several),
+        (
+            "Ungroup",
+            "Ctrl+Shift+G",
+            Action::Ungroup,
+            free && can.group,
+        ),
+        (
+            "Lock / unlock",
+            "Ctrl+Shift+L",
+            Action::ToggleLock,
+            selected && edit,
+        ),
+        (
+            "Hide / show",
+            "Ctrl+Shift+H",
+            Action::ToggleHidden,
+            selected && edit,
+        ),
+        (
+            "Focus on the selection or the view",
+            "Shift+F",
+            Action::ToggleFocus,
+            true,
+        ),
+        ("Find", "Ctrl+F", Action::OpenSearch, true),
+        ("Present", "F5", Action::Present, can.present),
+        ("Templates", "", Action::ToggleTemplates, edit),
+        ("Share", "", Action::ToggleShare, true),
+        ("Manage plugins…", "", Action::TogglePlugins, true),
+        ("Keyboard shortcuts", "F1", Action::ToggleShortcuts, true),
+        (
+            "Record talktrack",
+            "",
+            Action::StartRecording,
+            !can.recording,
+        ),
+        ("Save version", "", Action::SaveVersion(String::new()), true),
+        ("Start voting", "", Action::StartVoting(5), !voting),
+        ("End voting", "", Action::EndVoting, voting),
+        ("Voting results", "", Action::ToggleResults, voted),
+        ("Clear votes", "", Action::ClearVotes, voted),
+        (
+            "Timer: 5 minutes",
+            "",
+            Action::StartTimer(5 * 60_000),
+            timer,
+        ),
+        (
+            "Timer: 10 minutes",
+            "",
+            Action::StartTimer(10 * 60_000),
+            timer,
+        ),
+        (
+            "Pause or resume the timer",
+            "",
+            Action::PauseTimer,
+            timer && can.timer,
+        ),
+        (
+            "Close the timer",
+            "",
+            Action::CloseTimer,
+            timer && can.timer,
+        ),
+        ("Zoom in", "Ctrl+=", Action::ZoomIn, true),
+        ("Zoom out", "Ctrl+−", Action::ZoomOut, true),
+        ("Zoom to 100%", "Ctrl+0", Action::ZoomReset, true),
+        ("Zoom to fit", "", Action::ZoomToFit, true),
+        ("Grid style", "G", Action::NextGrid, true),
+        ("Snap to grid", "Shift+G", Action::ToggleSnap, true),
+        ("Minimap", "", Action::ToggleMinimap, true),
+        ("Layers", "", Action::ToggleLayers, true),
+        ("Dark theme", "", Action::ToggleTheme, true),
+        (
+            "Language: English / Russian",
+            "",
+            Action::ToggleLanguage,
+            true,
+        ),
+        ("High contrast", "", Action::ToggleHighContrast, true),
+        ("Full screen", "F11", Action::ToggleFullscreen, true),
+        ("Clean board", "Ctrl+\\", Action::ToggleClean, true),
+        ("Select", "V", tool(ToolKind::Select), true),
+        (
+            "Rectangle",
+            "R",
+            tool(ToolKind::Shape(ShapeKind::Rectangle)),
+            edit,
+        ),
+        (
+            "Ellipse",
+            "O",
+            tool(ToolKind::Shape(ShapeKind::Ellipse)),
+            edit,
+        ),
+        ("Text", "T", tool(ToolKind::Text), edit),
+        ("Sticky note", "N", tool(ToolKind::Sticky), edit),
+        ("Connector", "L", tool(ToolKind::Connector), edit),
+        ("Pen", "P", tool(ToolKind::Pen), edit),
+        ("Marker", "M", tool(ToolKind::Marker), edit),
+        ("Eraser", "E", tool(ToolKind::Eraser), edit),
+        ("Comment", "C", tool(ToolKind::Comment), true),
+        ("Frame", "F", tool(ToolKind::Frame), edit),
+        ("Table", "", tool(ToolKind::Table), edit),
+        ("Kanban board", "K", tool(ToolKind::Kanban), edit),
+        ("Mind map", "", tool(ToolKind::MindMap), edit),
+        ("Markdown document", "D", tool(ToolKind::Doc), edit),
+    ]
+}
+
+/// An entry of the command palette.
+struct PaletteEntry {
+    /// As shown, and in English.
+    label: String,
+    english: String,
+    /// Keys or a word about it, shown at the right.
+    hint: String,
+    action: Action,
+}
+
+/// Everything the command palette offers now, but objects on the board: commands, frames
+/// and plugins' commands.
+fn palette_entries(model: &Model) -> Vec<PaletteEntry> {
+    let selection = model.selection.as_ref();
+    let can = PaletteCan {
+        read_only: model.read_only,
+        view_only: model.view_only,
+        undo: model.can_undo,
+        redo: model.can_redo,
+        present: model.can_present,
+        selection: selection.is_some(),
+        several: selection.is_some_and(|s| s.several),
+        group: selection.is_some_and(|s| s.has_group),
+        locked: selection.is_some_and(|s| s.locked),
+        voting: model.voting,
+        timer: model.timer.is_some(),
+        recording: model.recording.is_some(),
+    };
+    let mut entries: Vec<PaletteEntry> = palette_commands(can)
+        .into_iter()
+        .filter(|(.., on)| *on)
+        .map(|(label, keys, action, _)| PaletteEntry {
+            label: tr(label).to_owned(),
+            english: label.to_owned(),
+            hint: keys.to_owned(),
+            action,
+        })
+        .collect();
+    for (id, title) in &model.frames {
+        let title = if title.trim().is_empty() {
+            tr("Untitled frame")
+        } else {
+            title
+        };
+        entries.push(PaletteEntry {
+            label: trf("Go to frame: {}", &[&title]),
+            english: format!("Go to frame: {title}"),
+            hint: String::new(),
+            action: Action::GoToFrame(*id),
+        });
+    }
+    if !model.read_only {
+        for c in &model.plugin_commands {
+            let label = format!("{}: {}", c.plugin_name, c.title);
+            entries.push(PaletteEntry {
+                english: label.clone(),
+                label,
+                hint: tr("Plugin").to_owned(),
+                action: Action::RunPluginCommand(c.plugin.clone(), c.id.clone()),
+            });
+        }
+    }
+    entries
+}
+
+/// The command palette at the top middle (Ctrl+K): a field to type in and the commands,
+/// frames and objects that fit, to run with Enter or a click.
+fn command_palette(
+    ctx: &Context,
+    model: &Model,
+    objects: &[(String, kurbo::Rect)],
+    state: &mut PaletteState,
+    actions: &mut Vec<Action>,
+) {
+    let entries = palette_entries(model);
+    let labels: Vec<(&str, &str)> = entries
+        .iter()
+        .map(|e| (e.label.as_str(), e.english.as_str()))
+        .collect();
+    let recent: Vec<usize> = state
+        .recent
+        .iter()
+        .filter_map(|a| entries.iter().position(|e| e.action == *a))
+        .collect();
+    let found: Vec<PaletteEntry> = objects
+        .iter()
+        .map(|(text, area)| PaletteEntry {
+            label: text.clone(),
+            english: text.clone(),
+            hint: tr("On the board").to_owned(),
+            action: Action::ShowArea(*area),
+        })
+        .collect();
+    let shown: Vec<&PaletteEntry> = crate::palette::rank(&state.text, &labels, &recent)
+        .into_iter()
+        .map(|i| &entries[i])
+        .chain(&found)
+        .collect();
+
+    // The field keeps the keyboard: these keys move through the list and run or close.
+    use egui::{Key, Modifiers};
+    let (up, down, enter, escape, toggle) = ctx.input_mut(|i| {
+        let up = i.consume_key(Modifiers::SHIFT, Key::Tab)
+            | i.consume_key(Modifiers::NONE, Key::ArrowUp);
+        let down = i.consume_key(Modifiers::NONE, Key::Tab)
+            | i.consume_key(Modifiers::NONE, Key::ArrowDown);
+        let enter = i.consume_key(Modifiers::NONE, Key::Enter);
+        let escape = i.consume_key(Modifiers::NONE, Key::Escape);
+        let toggle = i.consume_key(Modifiers::COMMAND, Key::K)
+            | i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::P);
+        (up, down, enter, escape, toggle)
+    });
+    let count = shown.len();
+    if count > 0 {
+        if down {
+            state.picked = (state.picked + 1) % count;
+        }
+        if up {
+            state.picked = (state.picked + count - 1) % count;
+        }
+    }
+    state.picked = state.picked.min(count.saturating_sub(1));
+    let mut run = enter.then_some(state.picked).filter(|_| count > 0);
+
+    let screen = ctx.content_rect();
+    let width = (screen.width() - 2.0 * MARGIN - 16.0).clamp(160.0, 480.0);
+    let area = Area::new(Id::unique("command palette"))
+        .fixed_pos(Pos2::new(screen.center().x, MARGIN + 52.0))
+        .pivot(Align2::CENTER_TOP)
+        .order(Order::Foreground)
+        .show(ctx, |ui| {
+            panel().show(ui, |ui| {
+                ui.set_width(width);
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut state.text)
+                        .id(Id::unique("command palette field"))
+                        .hint_text(tr("Type a command, a frame or text on the board"))
+                        .desired_width(f32::INFINITY)
+                        .event_filter(egui::EventFilter {
+                            tab: true,
+                            horizontal_arrows: true,
+                            vertical_arrows: true,
+                            escape: true,
+                        }),
+                );
+                field.request_focus();
+                if field.changed() {
+                    state.picked = 0;
+                    actions.push(Action::PaletteQuery(state.text.clone()));
+                }
+                ui.add_space(4.0);
+                if shown.is_empty() {
+                    ui.weak(tr("Nothing found"));
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        for (i, entry) in shown.iter().enumerate() {
+                            let picked = i == state.picked;
+                            let button = Button::selectable(picked, entry.label.as_str())
+                                .shortcut_text(entry.hint.as_str())
+                                .min_size(Vec2::new(ui.available_width(), 0.0));
+                            let row = ui.add(button);
+                            if row.clicked() {
+                                run = Some(i);
+                            }
+                            if picked && (up || down) {
+                                row.scroll_to_me(None);
+                            }
+                        }
+                    });
+            });
+        });
+    let layer = area.response.layer_id;
+    if ctx.memory(|m| m.areas().top_layer_id(Order::Foreground)) != Some(layer) {
+        ctx.move_to_top(layer);
+        ctx.request_repaint();
+    }
+    let pressed_elsewhere = ctx.input(|i| i.pointer.any_pressed())
+        && ctx
+            .pointer_interact_pos()
+            .is_some_and(|p| !area.response.rect.contains(p));
+    if let Some(entry) = run.and_then(|i| shown.get(i)) {
+        actions.push(Action::ClosePalette);
+        actions.push(entry.action.clone());
+        // Objects found are not commands to offer again.
+        if !matches!(entry.action, Action::ShowArea(_)) {
+            crate::palette::remember(&mut state.recent, entry.action.clone());
+        }
+    } else if escape || toggle || pressed_elsewhere {
+        actions.push(Action::ClosePalette);
+    }
 }
 
 /// Tags and fill colors to show only some objects, and managing the board's tags.
@@ -5760,6 +6181,11 @@ mod tests {
                 }
             }
         }
+        texts.extend(
+            palette_commands(PaletteCan::default())
+                .into_iter()
+                .map(|(label, ..)| label),
+        );
         for template in &crate::templates::TEMPLATES {
             texts.push(template.name);
             texts.push(template.description);

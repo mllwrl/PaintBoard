@@ -1,0 +1,10 @@
+{
+  "id": "paintboard.countdown",
+  "name": "Countdown",
+  "version": "1.0.0",
+  "author": "PaintBoard",
+  "description": "A panel to count down some minutes; when the time is up it chimes and says so. Needs no permissions.",
+  "api": 1,
+  "permissions": [],
+  "main": "main.js"
+}

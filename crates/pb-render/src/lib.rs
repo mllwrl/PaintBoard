@@ -182,7 +182,8 @@ pub struct View<'a> {
     pub frame_titles: bool,
 }
 
-/// Objects smaller than this on screen (logical pixels) are drawn as plain boxes.
+/// Objects smaller than this on screen (logical pixels) are drawn as plain boxes, except
+/// pictures and pen strokes (see [`objects::boxed_when_tiny`]).
 const LOD_BOX: f64 = 6.0;
 
 /// Objects smaller than this on screen (logical pixels) are drawn without their text,
@@ -340,7 +341,7 @@ pub fn build_scene(
             continue;
         }
         let on_screen = painted.width().max(painted.height()) * zoom;
-        if on_screen < LOD_BOX {
+        if on_screen < LOD_BOX && objects::boxed_when_tiny(data) {
             objects::draw_box(scene, transform, data);
             continue;
         }
