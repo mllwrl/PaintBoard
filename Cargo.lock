@@ -3617,6 +3617,8 @@ dependencies = [
  "kurbo",
  "loro",
  "pb-core",
+ "pb-geom",
+ "proptest",
 ]
 
 [[package]]

@@ -16,4 +16,6 @@ pub use room::{MAX_ASSET, MAX_ASSETS_TOTAL, Outgoing, Room};
 pub use transport::{LocalOnly, Memory, Status, Transport};
 
 #[cfg(test)]
+mod fuzz_tests;
+#[cfg(test)]
 mod tests;

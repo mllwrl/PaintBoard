@@ -14,3 +14,5 @@ loro.workspace = true
 
 [dev-dependencies]
 kurbo.workspace = true
+pb-geom.workspace = true
+proptest.workspace = true
