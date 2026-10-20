@@ -235,7 +235,8 @@ pub struct Document {
     /// Cached objects in paint order (back to front, groups flattened), brought up to date
     /// after every change (see [`Self::refresh`]).
     objects: Vec<Object>,
-    index: HashMap<ObjectId, usize>,
+    /// Where each object is in `objects`.
+    index: IdMap<usize>,
     groups: HashMap<ObjectId, Group>,
     /// Top-level objects and groups in z-order.
     roots: Vec<ObjectId>,
@@ -291,6 +292,39 @@ pub struct Document {
     #[cfg(test)]
     full_refreshes: usize,
 }
+
+/// A quick hash for object ids, which are a replica's random number and a count: the
+/// paint order of every object found in an area is looked up by id.
+#[derive(Clone, Copy, Default)]
+struct IdHasher(u64);
+
+impl IdHasher {
+    fn add(&mut self, n: u64) {
+        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(0xf135_7aea_2e62_a9c5);
+    }
+}
+
+impl std::hash::Hasher for IdHasher {
+    fn finish(&self) -> u64 {
+        self.0.rotate_left(26)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.add(u64::from(b));
+        }
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.add(n);
+    }
+
+    fn write_i32(&mut self, n: i32) {
+        self.add(u64::from(n as u32));
+    }
+}
+
+type IdMap<V> = HashMap<ObjectId, V, std::hash::BuildHasherDefault<IdHasher>>;
 
 /// An object in the spatial index: its world bounds (outline included) and its id. Ids,
 /// not places in paint order, so objects can come and go without touching the others.
@@ -465,7 +499,7 @@ impl Document {
             tree,
             undo,
             objects: Vec::new(),
-            index: HashMap::new(),
+            index: IdMap::default(),
             groups: HashMap::new(),
             roots: Vec::new(),
             nodes: HashMap::new(),
