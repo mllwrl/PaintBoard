@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use pb_core::{Command, Document, ObjectId};
 use pb_geom::kurbo::Rect;
+use pb_platform::Instant;
 use pb_plugin::{Engine, Manifest, Message, Permission};
 use serde_json::{Value, json};
 
@@ -22,6 +23,10 @@ const STORAGE_LIMIT: usize = 1 << 20;
 /// Calls answered for a plugin before the app stops to draw: a plugin calling in a loop
 /// cannot freeze the app.
 const CALLS_PER_TURN: usize = 2000;
+
+/// Waits (`paintboard.ui.after`) a plugin may have going at once, and the longest one.
+const TIMERS: usize = 1000;
+const LONGEST_WAIT_MS: f64 = 24.0 * 3600.0 * 1000.0;
 
 /// A command a plugin added to the Plugins menu.
 #[derive(Clone, Debug, PartialEq)]
@@ -84,6 +89,8 @@ pub trait Host {
     fn fetch(&mut self, plugin: &str, id: u64, url: &str, options: &Value);
     /// Commands that follow merge into one step for Ctrl+Z, until `group(false)`.
     fn group(&mut self, on: bool);
+    /// Plays the sound called `name` (one of [`crate::sounds::NAMES`]).
+    fn play_sound(&mut self, name: &str);
     /// Wakes the app to take in what plugins posted (in the browser, later).
     fn waker(&self) -> Box<dyn Fn()>;
 }
@@ -97,6 +104,8 @@ pub struct Plugins {
     /// Where plugins' `paintboard.storage` is kept; in memory (`kept`) without one.
     data_dir: Option<PathBuf>,
     kept: std::collections::HashMap<String, serde_json::Map<String, Value>>,
+    /// Plugins' waits (`paintboard.ui.after`): plugin id, call id, when it is over.
+    timers: Vec<(String, u64, Instant)>,
 }
 
 fn plugins_dir() -> Option<PathBuf> {
@@ -166,7 +175,8 @@ pub fn describe(permission: &Permission) -> String {
 
 fn required(call: &str) -> Option<Permission> {
     match call {
-        "board.create" | "board.update" | "board.remove" => Some(Permission::BoardWrite),
+        "board.create" | "board.update" | "board.remove" | "board.setCell" | "board.defineTag"
+        | "board.group" | "board.ungroup" => Some(Permission::BoardWrite),
         c if c.starts_with("board.") => Some(Permission::BoardRead),
         "clipboard.writeText" => Some(Permission::Clipboard),
         _ => None,
@@ -271,6 +281,7 @@ impl Plugins {
 
     /// Runs plugin `i`'s script.
     fn start(&mut self, host: &mut dyn Host, i: usize) {
+        self.forget_timers(i);
         let plugin = &mut self.list[i];
         plugin.commands.clear();
         plugin.panel = None;
@@ -295,10 +306,37 @@ impl Plugins {
     }
 
     fn stop(&mut self, i: usize) {
+        self.forget_timers(i);
         let plugin = &mut self.list[i];
         plugin.engine = None;
         plugin.commands.clear();
         plugin.panel = None;
+    }
+
+    /// Drops plugin `i`'s waits: they belong to a run of it that is over.
+    fn forget_timers(&mut self, i: usize) {
+        let id = &self.list[i].manifest.id;
+        self.timers.retain(|(plugin, _, _)| plugin != id);
+    }
+
+    /// When the next of plugins' waits is over.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.timers.iter().map(|(_, _, at)| *at).min()
+    }
+
+    /// Ends plugins' waits that are over by `now`.
+    pub fn tick(&mut self, host: &mut dyn Host, now: Instant) {
+        let (due, waiting) = std::mem::take(&mut self.timers)
+            .into_iter()
+            .partition(|(_, _, at)| *at <= now);
+        self.timers = waiting;
+        for (plugin, id, _) in due {
+            if let Some(i) = self.index(&plugin) {
+                host.group(true);
+                self.deliver(host, i, &pb_plugin::answer(id, Ok(Value::Null)));
+                host.group(false);
+            }
+        }
     }
 
     /// Installs (or replaces) a plugin from its files: `manifest.json` and its script
@@ -673,6 +711,36 @@ impl Plugins {
                 }?;
                 host.apply(commands).map(|_| Value::Null)
             }),
+            "board.setCell" => crate::plugin_api::parse_id(&arg(0))
+                .and_then(|id| crate::plugin_api::cell_command(host.document(), id, &arg(1), &arg(2), &arg(3)))
+                .and_then(|command| host.apply(vec![command]))
+                .map(|_| Value::Null),
+            "board.defineTag" => define_tag(host, &arg(0)),
+            "board.group" => crate::plugin_api::parse_ids(&arg(0)).and_then(|ids| {
+                let doc = host.document();
+                let mut ids: Vec<_> = ids.into_iter().filter(|id| doc.contains(*id)).collect();
+                ids.dedup();
+                if ids.len() < 2 {
+                    return Err("group takes two or more objects on the board".to_owned());
+                }
+                let created = host.apply(vec![Command::Group(ids)])?;
+                Ok(created.first().map_or(Value::Null, |id| json!(id.to_string())))
+            }),
+            "board.ungroup" => crate::plugin_api::parse_ids(&arg(0)).and_then(|ids| {
+                // An object stands for the group directly containing it.
+                let doc = host.document();
+                let mut groups = Vec::new();
+                for id in ids {
+                    let group = if doc.get(id).is_some() { doc.parent(id) } else { Some(id).filter(|&g| doc.contains(g)) };
+                    if let Some(group) = group.filter(|g| !groups.contains(g)) {
+                        groups.push(group);
+                    }
+                }
+                if groups.is_empty() {
+                    return Ok(Value::Null);
+                }
+                host.apply(vec![Command::Ungroup(groups)]).map(|_| Value::Null)
+            }),
             "board.remove" => crate::plugin_api::parse_ids(&arg(0)).and_then(|ids| {
                 let ids: Vec<_> = ids.into_iter().filter(|id| host.document().get(*id).is_some()).collect();
                 if ids.is_empty() {
@@ -707,6 +775,26 @@ impl Plugins {
                 let name = self.list[i].manifest.name.clone();
                 host.notify(&name, &text);
                 Ok(Value::Null)
+            }
+            "ui.playSound" => {
+                let name = arg(0).as_str().unwrap_or_default().to_owned();
+                if crate::sounds::NAMES.contains(&name.as_str()) {
+                    host.play_sound(&name);
+                    Ok(Value::Null)
+                } else {
+                    Err(format!("no sound \"{name}\": one of {}", crate::sounds::NAMES.join(", ")))
+                }
+            }
+            "ui.after" => {
+                let id = self.list[i].manifest.id.clone();
+                let ms = arg(0).as_f64().filter(|ms| ms.is_finite()).unwrap_or(0.0);
+                if self.timers.iter().filter(|(p, _, _)| *p == id).count() >= TIMERS {
+                    Err(format!("too many waits at once (up to {TIMERS})"))
+                } else {
+                    let wait = std::time::Duration::from_secs_f64(ms.clamp(0.0, LONGEST_WAIT_MS) / 1000.0);
+                    self.timers.push((id, call_id, Instant::now() + wait));
+                    return Reply::Later;
+                }
             }
             "storage.get" => {
                 let key = arg(0).as_str().unwrap_or_default().to_owned();
@@ -783,17 +871,21 @@ impl Plugins {
         let (view, _) = host.view();
         let center = view.center();
         let mut contents = Vec::new();
+        let mut tags = crate::plugin_api::TagNames::default();
         {
             let (doc, mut measure) = host.measured();
             for item in items {
-                contents
-                    .push(crate::plugin_api::new_object(item, doc, center, &mut *measure)?.into());
+                let data =
+                    crate::plugin_api::new_object(item, doc, center, &mut *measure, &mut tags)?;
+                contents.push(data.into());
             }
         }
         if contents.is_empty() {
             return Ok(json!([]));
         }
-        let created = host.apply(vec![Command::Create(contents)])?;
+        let mut commands = tags.commands();
+        commands.push(Command::Create(contents));
+        let created = host.apply(commands)?;
         Ok(json!(
             created.iter().map(ToString::to_string).collect::<Vec<_>>()
         ))
@@ -811,6 +903,27 @@ impl Plugins {
             })
             .collect()
     }
+}
+
+/// Adds the tag `{name, color}` to the board (or recolors the one with that name); its id.
+fn define_tag(host: &mut dyn Host, tag: &Value) -> Result<Value, String> {
+    let name = match tag {
+        Value::String(name) => Some(name.as_str()),
+        tag => tag.get("name").and_then(Value::as_str),
+    };
+    let name = name
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .ok_or("a tag needs a name")?;
+    let color = match tag.get("color") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(color)) => Some(crate::plugin_api::parse_color(color)?),
+        Some(other) => return Err(format!("not a color: {other}")),
+    };
+    let mut tags = crate::plugin_api::TagNames::default();
+    let id = tags.id(host.document(), name, color);
+    host.apply(tags.commands())?;
+    Ok(json!(&*id))
 }
 
 /// Asks before installing: what the plugin is and what it may do.
@@ -846,6 +959,18 @@ mod tests {
         doc: Document,
         selection: Vec<ObjectId>,
         notes: Vec<String>,
+        sounds: Vec<String>,
+    }
+
+    impl Fake {
+        fn new() -> Self {
+            Self {
+                doc: Document::new(),
+                selection: Vec::new(),
+                notes: Vec::new(),
+                sounds: Vec::new(),
+            }
+        }
     }
 
     impl Host for Fake {
@@ -887,6 +1012,9 @@ mod tests {
                 self.doc.end_undo_group();
             }
         }
+        fn play_sound(&mut self, name: &str) {
+            self.sounds.push(name.to_owned());
+        }
         fn waker(&self) -> Box<dyn Fn()> {
             Box::new(|| {})
         }
@@ -927,11 +1055,7 @@ mod tests {
 
     #[test]
     fn a_command_changes_the_board_in_one_step() {
-        let mut host = Fake {
-            doc: Document::new(),
-            selection: Vec::new(),
-            notes: Vec::new(),
-        };
+        let mut host = Fake::new();
         let mut plugins = Plugins::default();
         let i = plugins.add(
             &mut host,
@@ -947,6 +1071,7 @@ mod tests {
                 &host.doc,
                 pb_geom::kurbo::Point::ZERO,
                 &mut |_: &str, _, _| (1.0, 1.0),
+                &mut Default::default(),
             )
             .unwrap();
             host.doc.apply(Command::Create(vec![data.into()])).unwrap();
@@ -975,11 +1100,7 @@ mod tests {
 
     #[test]
     fn plugins_get_only_what_they_may() {
-        let mut host = Fake {
-            doc: Document::new(),
-            selection: Vec::new(),
-            notes: Vec::new(),
-        };
+        let mut host = Fake::new();
         let mut plugins = Plugins::default();
         let i = plugins.add(
             &mut host,
@@ -1011,14 +1132,76 @@ mod tests {
         assert!(host.doc.objects().is_empty());
     }
 
+    #[test]
+    fn plugins_tag_group_fill_tables_play_and_wait() {
+        let mut host = Fake::new();
+        let mut plugins = Plugins::default();
+        let i = plugins.add(
+            &mut host,
+            r#"{"id":"t.more","name":"More","version":"1","api":1,"permissions":["board:read","board:write"]}"#,
+            r##"paintboard.ui.addCommand({ id: "go", title: "Go" }, async () => {
+                 const tag = await paintboard.board.defineTag({ name: "Done", color: "#00ff00" });
+                 const again = await paintboard.board.defineTag("done");
+                 const [a, b, t] = await paintboard.board.create([
+                   { type: "sticky", text: "a", tags: ["Done"] },
+                   { type: "sticky", text: "b", x: 300 },
+                   { type: "table", rows: [["x", "y"]] },
+                 ]);
+                 await paintboard.board.setCell(t, 0, 1, "z");
+                 const g = await paintboard.board.group([a, b]);
+                 const grouped = await paintboard.board.getObject(a);
+                 const table = await paintboard.board.getObject(t);
+                 console.log(tag === again, grouped.parent === g, table.cells[0].join());
+                 await paintboard.board.ungroup(a);
+                 console.log(String((await paintboard.board.getObject(a)).parent));
+                 await paintboard.ui.playSound("chime");
+                 try { await paintboard.ui.playSound("trumpet"); } catch (e) { console.log(e.message); }
+                 await paintboard.ui.after(50);
+                 console.log("waited");
+                 setTimeout((word) => console.log(word), 10, "timeout");
+                 clearTimeout(setTimeout(() => console.log("cleared"), 10));
+               });"##,
+        );
+        plugins.run_command(&mut host, "t.more", "go");
+        let log = |plugins: &Plugins| -> Vec<String> {
+            plugins.list[i].log.iter().map(|(_, t)| t.clone()).collect()
+        };
+        assert_eq!(plugins.list[i].error, None, "{:?}", log(&plugins));
+        assert_eq!(
+            log(&plugins),
+            [
+                "true true x,z",
+                "null",
+                "no sound \"trumpet\": one of chime, beep, done, alarm"
+            ]
+        );
+        assert_eq!(host.doc.tags().len(), 1);
+        assert_eq!(
+            crate::plugin_api::color_text(host.doc.tags()[0].color),
+            "#00ff00"
+        );
+        assert_eq!(host.sounds, ["chime"]);
+        // The wait is over only once its time has come.
+        let at = plugins.deadline().unwrap();
+        plugins.tick(&mut host, at - std::time::Duration::from_millis(40));
+        assert_eq!(log(&plugins).len(), 3);
+        plugins.tick(&mut host, at);
+        assert_eq!(log(&plugins)[3..], ["waited"]);
+        while let Some(at) = plugins.deadline() {
+            plugins.tick(&mut host, at);
+        }
+        assert_eq!(log(&plugins)[3..], ["waited", "timeout"]);
+        // Waits end with the plugin's run.
+        plugins.run_command(&mut host, "t.more", "go");
+        assert!(plugins.deadline().is_some());
+        plugins.stop(i);
+        assert_eq!(plugins.deadline(), None);
+    }
+
     /// Every call the prelude makes is one the app answers.
     #[test]
     fn the_app_knows_every_call() {
-        let mut host = Fake {
-            doc: Document::new(),
-            selection: Vec::new(),
-            notes: Vec::new(),
-        };
+        let mut host = Fake::new();
         let mut plugins = Plugins::default();
         let i = plugins.add(
             &mut host,
@@ -1029,6 +1212,18 @@ mod tests {
         for name in pb_plugin::call_names() {
             if let Reply::Now(Err(err)) = plugins.call(&mut host, i, 1, name, &[]) {
                 assert!(!err.starts_with("no such call"), "{name}: {err}");
+            }
+            // Calls that change the board need the permission to.
+            let writes = [
+                "create",
+                "update",
+                "remove",
+                "setCell",
+                "defineTag",
+                "group",
+            ];
+            if name.starts_with("board.") && writes.iter().any(|w| name.contains(w)) {
+                assert_eq!(required(name), Some(Permission::BoardWrite), "{name}");
             }
         }
     }
@@ -1057,13 +1252,23 @@ mod tests {
                     json!({ "button": "add", "values": { "lines": "one\ntwo\n\nthree", "color": "green" } }),
                 ),
             ),
+            (
+                include_str!("../../../packaging/plugins/examples/table-from-csv/manifest.json"),
+                include_str!("../../../packaging/plugins/examples/table-from-csv/main.js"),
+                "open",
+                Some(
+                    json!({ "button": "make", "values": { "csv": "Name;Age\r\nAnn;31\n\"Smith; \"\"Bob\"\"\";40\n" } }),
+                ),
+            ),
+            (
+                include_str!("../../../packaging/plugins/examples/countdown/manifest.json"),
+                include_str!("../../../packaging/plugins/examples/countdown/main.js"),
+                "open",
+                Some(json!({ "button": "start", "values": { "minutes": "0,05" } })),
+            ),
         ];
         for (manifest, source, command, panel) in examples {
-            let mut host = Fake {
-                doc: Document::new(),
-                selection: Vec::new(),
-                notes: Vec::new(),
-            };
+            let mut host = Fake::new();
             let mut ids = Vec::new();
             for (text, fill) in [("b", "#ffeb7a"), ("a", "#a8d8ff"), ("c", "#ffeb7a")] {
                 let data = crate::plugin_api::new_object(
@@ -1071,6 +1276,7 @@ mod tests {
                     &host.doc,
                     pb_geom::kurbo::Point::ZERO,
                     &mut |_: &str, _, _| (1.0, 1.0),
+                    &mut Default::default(),
                 )
                 .unwrap();
                 host.doc.apply(Command::Create(vec![data.into()])).unwrap();
@@ -1084,6 +1290,13 @@ mod tests {
             if let Some(event) = panel {
                 assert!(plugins.list[i].panel.is_some());
                 plugins.panel_event(&mut host, &id, event);
+            }
+            // Time passes for plugins that wait.
+            for _ in 0..100 {
+                let Some(at) = plugins.deadline() else {
+                    break;
+                };
+                plugins.tick(&mut host, at);
             }
             let errors: Vec<_> = plugins.list[i]
                 .log
@@ -1104,9 +1317,9 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            match command {
-                "number" => assert_eq!(texts, ["1. b", "2. a", "3. c"]),
-                "arrange" => {
+            match id.as_str() {
+                "paintboard.number-stickies" => assert_eq!(texts, ["1. b", "2. a", "3. c"]),
+                "paintboard.stickies-by-color" => {
                     // Two columns, a heading over each.
                     assert_eq!(texts.len(), 5);
                     let xs: Vec<f64> = host.doc.objects()[..3]
@@ -1116,7 +1329,23 @@ mod tests {
                     assert_eq!(xs[0], xs[2]);
                     assert!(xs[1] > xs[0]);
                 }
-                _ => assert_eq!(&texts[3..], ["one", "two", "three"]),
+                "paintboard.quick-notes" => assert_eq!(&texts[3..], ["one", "two", "three"]),
+                "paintboard.table-from-csv" => {
+                    let table = host.doc.objects().last().unwrap();
+                    let table = crate::plugin_api::object_json(&host.doc, table);
+                    assert_eq!(
+                        table["cells"],
+                        json!([["Name", "Age"], ["Ann", "31"], ["Smith; \"Bob\"", "40"]])
+                    );
+                    assert_eq!(host.selection.len(), 1);
+                }
+                "paintboard.countdown" => {
+                    assert_eq!(host.notes, ["Time is up!"]);
+                    assert_eq!(host.sounds, ["chime"]);
+                    let panel = plugins.list[i].panel.as_ref().unwrap().to_string();
+                    assert!(panel.contains("Time is up."), "{panel}");
+                }
+                other => panic!("{other} not checked"),
             }
         }
     }

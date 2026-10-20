@@ -40,6 +40,8 @@ declare namespace paintboard {
     locked: boolean;
     /** The group directly containing it. */
     parent: Id | null;
+    /** Where its link goes: a web or mail address, or the id of an object on the board. */
+    link: string | null;
     /** Text of stickies, shapes, text objects and documents; a frame's title; a
      * connector's label; a web card's title. */
     text?: string;
@@ -54,6 +56,9 @@ declare namespace paintboard {
     to?: Id | null;
     /** Web cards only. */
     url?: string;
+    /** Tables only: the text of each cell, row by row (merged cells show their text in
+     * the top left one). */
+    cells?: string[][];
   }
 
   /** Which objects `getObjects` returns; all of them without a filter. */
@@ -76,6 +81,10 @@ declare namespace paintboard {
     stroke?: Color;
     strokeWidth?: number;
     opacity?: number;
+    /** Names of tags to put on it; tags the board does not have yet are added. */
+    tags?: string[];
+    /** A web or mail address, or the id of an object to go to (a frame, say). */
+    link?: string;
   }
 
   type NewObject =
@@ -90,6 +99,18 @@ declare namespace paintboard {
         route?: "straight" | "elbow" | "curved";
         /** An arrowhead at the end; true by default. */
         arrow?: boolean;
+        /** A label in the middle of the line. */
+        text?: string;
+      })
+    | (NewBase & {
+        type: "table";
+        /** The cells' text, row by row; shorter rows are filled with empty cells. Up to
+         * 500 rows and 50 columns. */
+        rows: string[][];
+        /** Every column this wide; without it each fits its text. */
+        columnWidth?: number;
+        /** Every row this high; without it each fits its text. */
+        rowHeight?: number;
       });
 
   /** What `update` can change. */
@@ -99,13 +120,18 @@ declare namespace paintboard {
     width?: number;
     height?: number;
     rotation?: number;
-    /** Stickies, shapes and text objects; a frame's title. */
+    /** Stickies, shapes and text objects; a frame's title; a connector's label. */
     text?: string;
     title?: string;
     fill?: Color;
     stroke?: Color;
     strokeWidth?: number;
     opacity?: number;
+    /** The names of all the tags it should carry (others are taken off); tags the board
+     * does not have yet are added. */
+    tags?: string[];
+    /** A web or mail address, or an object's id; `null` removes the link. */
+    link?: string | null;
   }
 
   interface Viewport {
@@ -132,10 +158,19 @@ declare namespace paintboard {
     function getViewport(): Promise<Viewport>;
     function zoomTo(ids: Id | Id[]): Promise<void>;
     function getTags(): Promise<Tag[]>;
+    /** Adds a tag to the board, or gives the tag with that name (in any case) the color;
+     * resolves to its id. Without a color a new tag gets the next of the usual ones. */
+    function defineTag(tag: { name: string; color?: Color }): Promise<string>;
     /** Creates objects in one step; resolves to their ids. */
     function create(items: NewObject | NewObject[]): Promise<Id[]>;
     function update(id: Id, changes: Changes): Promise<void>;
     function remove(ids: Id | Id[]): Promise<void>;
+    /** Puts `text` in a table's cell; `row` and `col` count from 0. */
+    function setCell(id: Id, row: number, col: number, text: string): Promise<void>;
+    /** Groups two or more objects (or groups); resolves to the new group's id. */
+    function group(ids: Id[]): Promise<Id>;
+    /** Dissolves groups; an object's id stands for the group directly containing it. */
+    function ungroup(ids: Id | Id[]): Promise<void>;
   }
 
   interface Command {
@@ -179,6 +214,11 @@ declare namespace paintboard {
     function closePanel(): Promise<void>;
     /** A short message at the bottom of the window. */
     function notify(text: string): Promise<void>;
+    /** Plays one of PaintBoard's short sounds. Needs no permission. */
+    function playSound(name: "chime" | "beep" | "done" | "alarm"): Promise<void>;
+    /** Resolves after `ms` milliseconds (up to a day). `setTimeout` and `clearTimeout`
+     * work too, on the desktop through this. */
+    function after(ms: number): Promise<void>;
   }
 
   /** Values kept for the plugin between runs, up to 1 MB in all. */

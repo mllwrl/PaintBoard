@@ -284,6 +284,8 @@ pub struct App {
     notices: Vec<(String, String, Instant)>,
     /// When plugins developed from their folders are looked at for changes next.
     plugin_check_at: Option<Instant>,
+    /// The sound a plugin played last, kept until it is over.
+    plugin_sound: Option<(pb_platform::audio::Player, Instant)>,
     /// Whose view this copy follows on a shared board, the camera as following last set
     /// it (moved since: the user took over) and when.
     following: Option<pb_sync::ClientId>,
@@ -336,6 +338,7 @@ impl App {
             plugins_window: false,
             notices: Vec::new(),
             plugin_check_at: None,
+            plugin_sound: None,
             proxy,
             window: None,
             gpu: None,
@@ -5950,6 +5953,16 @@ impl ApplicationHandler<UserEvent> for App {
         } else {
             self.plugin_check_at = None;
         }
+        if self.plugins.deadline().is_some_and(|at| at <= now) {
+            self.with_plugins(|plugins, app| plugins.tick(app, now));
+        }
+        if self
+            .plugin_sound
+            .as_ref()
+            .is_some_and(|(_, end)| *end <= now)
+        {
+            self.plugin_sound = None;
+        }
         let shown = self.notices.len();
         self.notices.retain(|(_, _, until)| *until > now);
         if self.notices.len() != shown {
@@ -6006,6 +6019,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.sharing.as_ref().and_then(|s| s.deadline()),
             self.accounts.deadline(),
             self.plugin_check_at,
+            self.plugins.deadline(),
             notice_end,
         ]
         .into_iter()
@@ -6614,13 +6628,13 @@ fn is_table_file(path: &std::path::Path) -> bool {
 }
 
 /// Most rows and columns a table made from a file or paste gets; the rest is cut.
-const MAX_TABLE_ROWS: usize = 500;
-const MAX_TABLE_COLS: usize = 50;
+pub(crate) const MAX_TABLE_ROWS: usize = 500;
+pub(crate) const MAX_TABLE_COLS: usize = 50;
 
 /// Space around cell text, and the widest a column of a pasted table starts out, in world
 /// units at 100%.
-const TABLE_CELL_PAD: f64 = 8.0;
-const TABLE_MAX_COLUMN: f64 = 280.0;
+pub(crate) const TABLE_CELL_PAD: f64 = 8.0;
+pub(crate) const TABLE_MAX_COLUMN: f64 = 280.0;
 
 /// Whether `path` is a Markdown or plain text file, added as a document.
 fn is_document_file(path: &std::path::Path) -> bool {
@@ -6835,6 +6849,23 @@ impl crate::plugins::Host for App {
             self.document.begin_undo_group();
         } else {
             self.document.end_undo_group();
+        }
+    }
+
+    fn play_sound(&mut self, name: &str) {
+        let Some(samples) = crate::sounds::sound(name) else {
+            return;
+        };
+        let length = std::time::Duration::from_secs_f64(
+            samples.len() as f64 / f64::from(crate::sounds::RATE),
+        );
+        match pb_platform::audio::Player::start(samples.into(), crate::sounds::RATE, 0.0) {
+            // A little longer than the sound, so the speakers play it to the end.
+            Ok(player) => {
+                let end = Instant::now() + length + std::time::Duration::from_millis(500);
+                self.plugin_sound = Some((player, end));
+            }
+            Err(err) => log::warn!("plugin sound: {err}"),
         }
     }
 

@@ -90,6 +90,25 @@
 
   const list = (items) => (Array.isArray(items) ? items : [items]);
 
+  // Waits are kept by the app, which wakes the plugin when one is over.
+  const after = (ms) => call("ui.after", Number(ms) || 0);
+  // QuickJS on the desktop has no timers of its own: these stand in for them.
+  if (typeof globalThis.setTimeout !== "function") {
+    const live = new Set();
+    let handles = 0;
+    globalThis.setTimeout = (handler, ms, ...args) => {
+      const handle = ++handles;
+      live.add(handle);
+      after(ms).then(() => {
+        if (live.delete(handle) && typeof handler === "function") run(() => handler(...args));
+      });
+      return handle;
+    };
+    globalThis.clearTimeout = (handle) => {
+      live.delete(handle);
+    };
+  }
+
   globalThis.paintboard = Object.freeze({
     apiVersion: 1,
     /** Calls `handler` on "selectionchange" or "boardchange". */
@@ -105,9 +124,13 @@
       getViewport: () => call("board.getViewport"),
       zoomTo: (ids) => call("board.zoomTo", list(ids)),
       getTags: () => call("board.getTags"),
+      defineTag: (tag) => call("board.defineTag", tag),
       create: (items) => call("board.create", list(items)),
       update: (id, props) => call("board.update", id, props),
       remove: (ids) => call("board.remove", list(ids)),
+      setCell: (id, row, col, text) => call("board.setCell", id, row, col, String(text)),
+      group: (ids) => call("board.group", list(ids)),
+      ungroup: (ids) => call("board.ungroup", list(ids)),
     }),
     ui: Object.freeze({
       /** Adds a command to the Plugins menu (and the object menu with `selection: true`). */
@@ -121,6 +144,9 @@
       },
       closePanel: () => call("ui.closePanel"),
       notify: (text) => call("ui.notify", String(text)),
+      playSound: (name) => call("ui.playSound", String(name)),
+      /** Resolves after `ms` milliseconds. */
+      after,
     }),
     storage: Object.freeze({
       get: (key) => call("storage.get", String(key)),

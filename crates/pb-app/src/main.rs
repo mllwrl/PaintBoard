@@ -16,6 +16,7 @@ mod plugins;
 mod session;
 mod settings;
 mod sharing;
+mod sounds;
 mod talktrack;
 mod templates;
 mod ui;

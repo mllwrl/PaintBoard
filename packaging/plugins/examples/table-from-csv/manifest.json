@@ -1,0 +1,14 @@
+{
+  "id": "paintboard.table-from-csv",
+  "name": "Table from CSV",
+  "version": "1.0.0",
+  "author": "PaintBoard",
+  "description": "A panel to paste CSV or spreadsheet cells, or to give the address of a CSV file on GitHub: it becomes a table on the board.",
+  "api": 1,
+  "permissions": [
+    "board:read",
+    "board:write",
+    "network:raw.githubusercontent.com,gist.githubusercontent.com"
+  ],
+  "main": "main.js"
+}
