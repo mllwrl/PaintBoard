@@ -240,6 +240,10 @@ pub struct App {
     playback: Option<Playback>,
     /// What the board's countdown showed when last drawn.
     timer_drawn: Option<crate::ui::TimerView>,
+    /// Shortcuts that may ask something in a window of the system, done after the next
+    /// frame like the UI's buttons: asked while a key is handled, Windows leaves that window
+    /// hidden and the app waits on it for good.
+    deferred: Vec<Action>,
     /// The voting results window is open.
     show_results: bool,
     /// The camera gliding to a new place.
@@ -385,6 +389,7 @@ impl App {
             playback: None,
             camera_glide: None,
             timer_drawn: None,
+            deferred: Vec::new(),
             show_results: false,
             diagram: None,
             graph: None,
@@ -906,10 +911,10 @@ impl App {
             }),
         };
         self.focus_search = false;
-        let actions = match &mut self.ui {
-            Some(ui) => ui.run(&window, &model),
-            None => Vec::new(),
-        };
+        let mut actions = std::mem::take(&mut self.deferred);
+        if let Some(ui) = &mut self.ui {
+            actions.extend(ui.run(&window, &model));
+        }
         if let Some(gpu) = &mut self.gpu {
             let ui = &mut self.ui;
             let background = self
@@ -5664,6 +5669,12 @@ impl App {
         }
     }
 
+    /// Does `action` after the next frame (see [`App::deferred`]).
+    fn defer(&mut self, action: Action) {
+        self.deferred.push(action);
+        self.request_redraw();
+    }
+
     fn handle_key(&mut self, event: &KeyEvent) -> bool {
         let PhysicalKey::Code(code) = event.physical_key else {
             return false;
@@ -5689,13 +5700,11 @@ impl App {
         let viewport = self.viewport();
         // Physical keys, so shortcuts work the same on any keyboard layout.
         match code {
-            KeyCode::KeyS if ctrl && modifiers.shift_key() => {
-                self.session.save_as(&self.document);
-            }
-            KeyCode::KeyS if ctrl => self.session.save(&self.document),
-            KeyCode::KeyO if ctrl => self.open_board(),
-            KeyCode::KeyE if ctrl && modifiers.shift_key() => self.open_export(),
-            KeyCode::KeyP if ctrl => self.print(),
+            KeyCode::KeyS if ctrl && modifiers.shift_key() => self.defer(Action::SaveAs),
+            KeyCode::KeyS if ctrl => self.defer(Action::Save),
+            KeyCode::KeyO if ctrl => self.defer(Action::Open),
+            KeyCode::KeyE if ctrl && modifiers.shift_key() => self.defer(Action::OpenExport),
+            KeyCode::KeyP if ctrl => self.defer(Action::Print),
             // The UI's size: Ctrl+Alt+= / - / 0 (Ctrl+= and friends zoom the board).
             KeyCode::Equal if ctrl && modifiers.alt_key() => {
                 self.perform(Action::SetUiScale(self.ui_scale + 0.25));
@@ -5706,7 +5715,7 @@ impl App {
             KeyCode::Digit0 if ctrl && modifiers.alt_key() => {
                 self.perform(Action::SetUiScale(1.0));
             }
-            KeyCode::KeyN if ctrl => self.new_board(),
+            KeyCode::KeyN if ctrl => self.defer(Action::NewBoard),
             KeyCode::KeyZ if ctrl && modifiers.shift_key() => self.redo(),
             KeyCode::KeyZ if ctrl => self.undo(),
             KeyCode::KeyY if ctrl => self.redo(),
@@ -5815,7 +5824,7 @@ impl App {
                 };
                 self.mark_cells(mark);
             }
-            KeyCode::Delete | KeyCode::Backspace => self.delete_selected(),
+            KeyCode::Delete | KeyCode::Backspace => self.defer(Action::Delete),
             KeyCode::ArrowLeft => self.nudge(-1.0, 0.0),
             KeyCode::ArrowRight => self.nudge(1.0, 0.0),
             KeyCode::ArrowUp => self.nudge(0.0, -1.0),
