@@ -291,6 +291,9 @@ pub struct Tools {
     marker: InkStyle,
     /// Where the eraser hovers, to show its size.
     eraser_at: Option<(Point, f64)>,
+    /// The tool picked, while a pen's eraser end (or side button) has the eraser stand in
+    /// for it.
+    pen_eraser: Option<ToolKind>,
     /// Route of new connectors.
     connector_route: Route,
     /// Where a connector would start, while the connector tool hovers.
@@ -327,6 +330,7 @@ impl Default for Tools {
             pen: InkStyle::PEN,
             marker: InkStyle::MARKER,
             eraser_at: None,
+            pen_eraser: None,
             connector_route: Route::default(),
             connect_hover: None,
             cells: None,
@@ -337,11 +341,41 @@ impl Default for Tools {
 }
 
 impl Tools {
+    /// The tool acting on the board: the eraser while a pen's eraser end stands in.
     pub fn active(&self) -> ToolKind {
         self.active
     }
 
+    /// The tool picked, as the toolbar shows it.
+    pub fn chosen(&self) -> ToolKind {
+        self.pen_eraser.unwrap_or(self.active)
+    }
+
+    /// Has the eraser stand in for the picked tool (a pen turned over, or its side button
+    /// held), or the picked tool come back. The selection is kept. Returns whether it
+    /// changed.
+    pub fn set_pen_eraser(&mut self, on: bool) -> bool {
+        match (on, self.pen_eraser) {
+            (true, None) => {
+                self.pen_eraser = Some(self.active);
+                self.active = ToolKind::Eraser;
+            }
+            (false, Some(tool)) => {
+                self.pen_eraser = None;
+                self.active = tool;
+                self.eraser_at = None;
+            }
+            _ => return false,
+        }
+        self.gesture = None;
+        self.hover = None;
+        self.hover_grip = None;
+        self.connect_hover = None;
+        true
+    }
+
     pub fn set_active(&mut self, tool: ToolKind) {
+        self.pen_eraser = None;
         if let ToolKind::Shape(shape) = tool {
             self.last_shape = shape;
         }

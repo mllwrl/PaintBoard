@@ -201,8 +201,12 @@ pub struct App {
     style_drag: bool,
     /// Pressure of a pen touching the screen or tablet; `None` for a mouse.
     pen_pressure: Option<f64>,
-    /// The pen or finger acting as the mouse on the canvas, while it touches the screen.
-    touch: Option<u64>,
+    /// What pen and finger touches mean: drawing, erasing, moving the board, nothing.
+    stylus: crate::stylus::Stylus,
+    /// The moment pen and finger times count from.
+    stylus_clock: Instant,
+    /// Whether a pen was ever seen here, and whether fingers move the board.
+    pen: crate::settings::PenSettings,
     text: TextRenderer,
     images: ImageCache,
     /// Pages of books (PDFs shown a page at a time) rendered and on their way.
@@ -403,7 +407,9 @@ impl App {
             canvas_drag: false,
             style_drag: false,
             pen_pressure: None,
-            touch: None,
+            stylus: crate::stylus::Stylus::default(),
+            stylus_clock: Instant::now(),
+            pen: crate::settings::pen(),
             text: TextRenderer::new(),
             images,
             books: Books::default(),
@@ -948,18 +954,18 @@ impl App {
             })
             .collect();
         if matches!(
-            self.tools.active(),
+            self.tools.chosen(),
             ToolKind::Frame
                 | ToolKind::Table
                 | ToolKind::Kanban
                 | ToolKind::MindMap
                 | ToolKind::Doc
         ) {
-            self.last_structure = self.tools.active();
+            self.last_structure = self.tools.chosen();
         }
         // The pen's options open whenever a pen or marker is picked (button or key).
-        if self.ink_panel_for != Some(self.tools.active()) {
-            self.ink_panel_for = Some(self.tools.active());
+        if self.ink_panel_for != Some(self.tools.chosen()) {
+            self.ink_panel_for = Some(self.tools.chosen());
             self.ink_panel = true;
         }
         let (share_window, share_badge) = self.share_model();
@@ -1038,12 +1044,12 @@ impl App {
             stored_boards: Session::stored_boards(),
             open_board: self.session.path().map(Path::to_path_buf),
             frames,
-            tool: self.tools.active(),
+            tool: self.tools.chosen(),
             last_shape: self.tools.last_shape(),
             last_structure: self.last_structure,
             ink: self
                 .tools
-                .ink_style(self.tools.active() == ToolKind::Marker),
+                .ink_style(self.tools.chosen() == ToolKind::Marker),
             ink_panel: self.ink_panel,
             sticky_color: self.sticky_color,
             connector_route: self.tools.connector_route(),
@@ -1110,6 +1116,7 @@ impl App {
             dark: self.theme.dark,
             ui_scale: self.ui_scale,
             high_contrast: self.high_contrast,
+            fingers_navigate: self.pen.fingers_navigate(),
             export: self.show_export.then(|| ExportInfo {
                 has_selection: !self.tools.selection().is_empty(),
             }),
@@ -2043,6 +2050,10 @@ impl App {
                 }
             }
             Action::RunInstaller => self.run_installer(),
+            Action::ToggleFingerNavigation => {
+                self.pen.fingers_move = Some(!self.pen.fingers_navigate());
+                crate::settings::save_pen(self.pen);
+            }
             Action::ToggleHighContrast => {
                 self.set_view(self.ui_scale, !self.high_contrast);
                 crate::settings::save_view(self.ui_scale, self.high_contrast);
@@ -6564,51 +6575,126 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        self.handle_window_event(event_loop, event, true);
+        match event {
+            WindowEvent::Touch(touch) => self.on_touch(event_loop, touch),
+            // The mouse is back: a pen's eraser end no longer stands in for the tool.
+            WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. } => {
+                if self.tools.set_pen_eraser(false) {
+                    self.request_redraw();
+                }
+                self.handle_window_event(event_loop, event, true);
+            }
+            _ => self.handle_window_event(event_loop, event, true),
+        }
     }
 }
 
 impl App {
     /// Windows delivers pens and touch screens as touch events only: winit takes their
-    /// pointer messages, so Windows makes no mouse messages from them. The first pen or
-    /// finger drives the canvas like the left mouse button, with the pen's pressure. egui
-    /// has had the touch event itself, so these mouse events are not passed to it again.
-    ///
-    /// TODO: more fingers for pinch zoom and two-finger panning on touch screens.
-    fn touch_as_mouse(&mut self, event_loop: &ActiveEventLoop, touch: Touch) {
-        if self.touch.is_some_and(|id| id != touch.id) {
-            return;
-        }
-        let device_id = touch.device_id;
-        let moved = WindowEvent::CursorMoved {
-            device_id,
-            position: touch.location,
+    /// pointer messages, so Windows makes no mouse messages from them. [`crate::stylus`]
+    /// says what each means: a pen drives the canvas like the left mouse button, with its
+    /// pressure (erasing when turned over or with its side button held); fingers are
+    /// ignored near a pen, move the board, or act as the mouse. A palm's touches do not
+    /// reach egui either; the others do, and the mouse events made from them are not
+    /// passed to it again.
+    fn on_touch(&mut self, event_loop: &ActiveEventLoop, touch: Touch) {
+        use crate::stylus::{Kind, Out, Phase, Sample};
+        let info = pb_platform::pen::info(touch.id);
+        let kind = match info.map(|i| i.kind) {
+            Some(pb_platform::pen::PointerKind::Pen) => Kind::Pen,
+            _ => Kind::Touch,
         };
-        let button = |state| WindowEvent::MouseInput {
+        if kind == Kind::Pen && !self.pen.seen {
+            self.pen.seen = true;
+            crate::settings::save_pen(self.pen);
+        }
+        let sample = Sample {
+            id: touch.id,
+            kind,
+            eraser: info.is_some_and(|i| i.eraser),
+            barrel: info.is_some_and(|i| i.barrel),
+            phase: match touch.phase {
+                TouchPhase::Started => Phase::Down,
+                TouchPhase::Moved => Phase::Move,
+                TouchPhase::Ended => Phase::Up,
+                TouchPhase::Cancelled => Phase::Cancel,
+            },
+            pos: Point::new(touch.location.x, touch.location.y),
+            time: self.stylus_clock.elapsed().as_secs_f64(),
+        };
+        let fingers_navigate = self.pen.fingers_navigate();
+        let Some(outs) = self.stylus.feed(sample, fingers_navigate) else {
+            return;
+        };
+        self.handle_window_event(event_loop, WindowEvent::Touch(touch), true);
+        let device_id = touch.device_id;
+        let moved = |pos: Point| WindowEvent::CursorMoved {
+            device_id,
+            position: winit::dpi::PhysicalPosition::new(pos.x, pos.y),
+        };
+        let button = |state, button| WindowEvent::MouseInput {
             device_id,
             state,
-            button: MouseButton::Left,
+            button,
         };
         let pressure = touch.force.map(|f| f.normalized());
-        match touch.phase {
-            TouchPhase::Started => {
-                self.touch = Some(touch.id);
-                self.pen_pressure = pressure;
-                self.handle_window_event(event_loop, moved, false);
-                self.handle_window_event(event_loop, button(ElementState::Pressed), false);
-            }
-            TouchPhase::Moved => {
-                // A pen also reports moves while it hovers above the screen.
-                if self.touch.is_some() {
-                    self.pen_pressure = pressure;
+        let scale = self.scale();
+        for out in outs {
+            match out {
+                Out::Hover { pos, erase } => {
+                    if self.tools.set_pen_eraser(erase) {
+                        self.request_redraw();
+                    }
+                    self.handle_window_event(event_loop, moved(pos), false);
                 }
-                self.handle_window_event(event_loop, moved, false);
-            }
-            TouchPhase::Ended | TouchPhase::Cancelled => {
-                self.handle_window_event(event_loop, moved, false);
-                self.handle_window_event(event_loop, button(ElementState::Released), false);
-                self.touch = None;
-                self.pen_pressure = None;
+                Out::Press { pos, erase } => {
+                    self.tools.set_pen_eraser(erase);
+                    self.pen_pressure = pressure;
+                    self.handle_window_event(event_loop, moved(pos), false);
+                    let press = button(ElementState::Pressed, MouseButton::Left);
+                    self.handle_window_event(event_loop, press, false);
+                }
+                Out::Drag(pos) => {
+                    self.pen_pressure = pressure;
+                    self.handle_window_event(event_loop, moved(pos), false);
+                }
+                Out::Release(pos) => {
+                    self.handle_window_event(event_loop, moved(pos), false);
+                    let release = button(ElementState::Released, MouseButton::Left);
+                    self.handle_window_event(event_loop, release, false);
+                    self.pen_pressure = None;
+                }
+                Out::Cancel => {
+                    self.tools.cancel();
+                    self.canvas_drag = false;
+                    self.pen_pressure = None;
+                    self.request_redraw();
+                }
+                Out::ContextMenu(pos) => {
+                    self.handle_window_event(event_loop, moved(pos), false);
+                    for state in [ElementState::Pressed, ElementState::Released] {
+                        let click = button(state, MouseButton::Right);
+                        self.handle_window_event(event_loop, click, false);
+                    }
+                }
+                Out::Pan(delta) => {
+                    if self.playback.is_none() {
+                        self.camera.pan(delta / scale);
+                        self.request_redraw();
+                    }
+                }
+                Out::Zoom {
+                    center,
+                    factor,
+                    pan,
+                } => {
+                    if self.playback.is_none() {
+                        self.camera.pan(pan / scale);
+                        let center = Point::new(center.x / scale, center.y / scale);
+                        self.camera.zoom_at(center, factor);
+                        self.request_redraw();
+                    }
+                }
             }
         }
     }
@@ -6862,10 +6948,8 @@ impl App {
                     true
                 }
             }
-            WindowEvent::Touch(touch) => {
-                self.touch_as_mouse(event_loop, touch);
-                false
-            }
+            // Turned into mouse events by `on_touch`.
+            WindowEvent::Touch(_) => false,
             WindowEvent::DroppedFile(path) => {
                 self.dropped.push(path);
                 false

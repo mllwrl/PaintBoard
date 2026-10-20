@@ -969,6 +969,34 @@ fn eraser_removes_touched_strokes_only() {
     assert!(tools.eraser().is_some());
 }
 
+#[test]
+fn pen_eraser_stands_in_for_the_picked_tool() {
+    let mut doc = Document::new();
+    let mut tools = Tools::default();
+    tools.set_active(ToolKind::Pen);
+    let stroke = draw(&mut tools, &doc, &[at(0.0, 0.0), at(100.0, 0.0)]).unwrap();
+    let stroke = doc.apply(stroke).unwrap().created[0];
+    assert!(tools.set_pen_eraser(true));
+    assert!(!tools.set_pen_eraser(true));
+    assert_eq!(tools.active(), ToolKind::Eraser);
+    assert_eq!(tools.chosen(), ToolKind::Pen);
+    tools.pointer_down(&doc, at(50.0, -30.0));
+    tools.pointer_move(&doc, at(50.0, 30.0));
+    assert_eq!(
+        tools.pointer_up(&doc, at(50.0, 30.0)),
+        Some(Command::Delete(vec![stroke]))
+    );
+    // Turned back: the pen draws again.
+    assert!(tools.set_pen_eraser(false));
+    assert_eq!(tools.active(), ToolKind::Pen);
+    assert!(tools.eraser().is_none());
+    // Picking a tool ends the stand-in.
+    tools.set_pen_eraser(true);
+    tools.set_active(ToolKind::Marker);
+    assert_eq!(tools.chosen(), ToolKind::Marker);
+    assert!(!tools.set_pen_eraser(false));
+}
+
 // Connectors
 
 fn the_connector(doc: &Document) -> (ObjectId, Connector) {

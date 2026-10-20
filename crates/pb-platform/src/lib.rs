@@ -10,6 +10,7 @@ pub mod fs;
 pub mod handwriting;
 pub mod instance;
 pub mod net;
+pub mod pen;
 pub mod web;
 
 /// A monotonic clock that also works in the browser, where `std::time::Instant` panics.

@@ -245,6 +245,8 @@ pub enum Action {
     /// Sets the UI's size relative to normal.
     SetUiScale(f32),
     ToggleHighContrast,
+    /// Switches "pen draws, fingers move the board".
+    ToggleFingerNavigation,
     /// Opens the window for saving a picture of the board.
     OpenExport,
     CloseExport,
@@ -563,6 +565,8 @@ pub struct Model<'a> {
     /// The UI's size relative to normal, and whether high contrast is on.
     pub ui_scale: f32,
     pub high_contrast: bool,
+    /// "Pen draws, fingers move the board" is on.
+    pub fingers_navigate: bool,
     /// The export window is open.
     pub export: Option<ExportInfo>,
     /// Saved versions, newest first.
@@ -2711,6 +2715,18 @@ fn view_controls(ctx: &Context, model: &Model, actions: &mut Vec<Action>) -> Rec
                         {
                             actions.push(Action::ToggleHighContrast);
                         }
+                        if ui
+                            .add(Button::selectable(
+                                model.fingers_navigate,
+                                tr("Pen draws, fingers move the board"),
+                            ))
+                            .on_hover_text(tr(
+                                "On a touch screen with a pen: one finger pans, two zoom",
+                            ))
+                            .clicked()
+                        {
+                            actions.push(Action::ToggleFingerNavigation);
+                        }
                         ui.separator();
                         let fullscreen = Button::selectable(model.fullscreen, tr("Full screen"))
                             .shortcut_text("F11");
@@ -4825,6 +4841,19 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("L (presenting)", "Laser pointer"),
         ],
     ),
+    (
+        "Pen and touch",
+        &[
+            ("Pen eraser end", "Erase, whatever tool is picked"),
+            ("Pen side button + stroke", "Erase"),
+            ("Pen side button + tap", "Right-click menu"),
+            ("One finger", "Pan (with fingers moving the board)"),
+            (
+                "Two fingers",
+                "Zoom and pan (with fingers moving the board)",
+            ),
+        ],
+    ),
 ];
 
 /// Whether shortcut keys say more than key names, like "Enter, double click": those are
@@ -5105,6 +5134,12 @@ fn palette_commands(can: PaletteCan) -> Vec<(&'static str, &'static str, Action,
             true,
         ),
         ("High contrast", "", Action::ToggleHighContrast, true),
+        (
+            "Pen draws, fingers move the board",
+            "",
+            Action::ToggleFingerNavigation,
+            true,
+        ),
         ("Full screen", "F11", Action::ToggleFullscreen, true),
         ("Clean board", "Ctrl+\\", Action::ToggleClean, true),
         (

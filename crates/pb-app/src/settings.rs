@@ -291,3 +291,89 @@ pub fn save_account(server: &str, account: Option<(&str, &str)>) {
         log::warn!("account not remembered: {err}");
     }
 }
+
+/// File with what is known about pens (see [`PenSettings::to_words`]).
+const PEN_FILE: &str = "pen.txt";
+
+/// Whether a pen was ever used on this machine, and whether fingers move the board.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PenSettings {
+    /// A pen has been seen.
+    pub seen: bool,
+    /// "Pen draws, fingers move the board", if picked; when not, it is on once a pen has
+    /// been seen.
+    pub fingers_move: Option<bool>,
+}
+
+impl PenSettings {
+    /// Whether fingers move the board rather than act as the mouse.
+    pub fn fingers_navigate(self) -> bool {
+        self.fingers_move.unwrap_or(self.seen)
+    }
+
+    pub fn from_words(text: &str) -> Self {
+        let mut pen = Self::default();
+        for word in text.split_whitespace() {
+            match word {
+                "seen" => pen.seen = true,
+                "fingers-move" => pen.fingers_move = Some(true),
+                "fingers-draw" => pen.fingers_move = Some(false),
+                _ => {}
+            }
+        }
+        pen
+    }
+
+    pub fn to_words(self) -> String {
+        let mut words = Vec::new();
+        if self.seen {
+            words.push("seen");
+        }
+        match self.fingers_move {
+            Some(true) => words.push("fingers-move"),
+            Some(false) => words.push("fingers-draw"),
+            None => {}
+        }
+        words.join(" ")
+    }
+}
+
+pub fn pen() -> PenSettings {
+    pb_platform::fs::app_data_dir()
+        .and_then(|dir| pb_platform::fs::read(&dir.join(PEN_FILE)))
+        .map(|bytes| PenSettings::from_words(&String::from_utf8_lossy(&bytes)))
+        .unwrap_or_default()
+}
+
+pub fn save_pen(pen: PenSettings) {
+    let saved = pb_platform::fs::app_data_dir().and_then(|dir| {
+        pb_platform::fs::write_atomic(&dir.join(PEN_FILE), pen.to_words().as_bytes())
+    });
+    if let Err(err) = saved {
+        log::warn!("pen settings not saved: {err}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PenSettings;
+
+    #[test]
+    fn fingers_move_the_board_once_a_pen_is_seen_unless_picked() {
+        let fresh = PenSettings::default();
+        assert!(!fresh.fingers_navigate());
+        let seen = PenSettings {
+            seen: true,
+            ..fresh
+        };
+        assert!(seen.fingers_navigate());
+        let picked = PenSettings {
+            fingers_move: Some(false),
+            ..seen
+        };
+        assert!(!picked.fingers_navigate());
+        for pen in [fresh, seen, picked] {
+            assert_eq!(PenSettings::from_words(&pen.to_words()), pen);
+        }
+    }
+}

@@ -520,6 +520,34 @@ const RU: &[(&str, &str)] = &[
     ),
     ("High contrast", "Высокий контраст"),
     (
+        "Pen draws, fingers move the board",
+        "Перо рисует, пальцы двигают доску",
+    ),
+    (
+        "On a touch screen with a pen: one finger pans, two zoom",
+        "На сенсорном экране с пером: один палец двигает доску, два — масштабируют",
+    ),
+    ("Pen and touch", "Перо и касания"),
+    ("Pen eraser end", "Перо обратной стороной"),
+    (
+        "Erase, whatever tool is picked",
+        "Стереть, какой бы инструмент ни был выбран",
+    ),
+    ("Pen side button + stroke", "Боковая кнопка пера + штрих"),
+    ("Erase", "Стереть"),
+    ("Pen side button + tap", "Боковая кнопка пера + касание"),
+    ("Right-click menu", "Контекстное меню"),
+    ("One finger", "Один палец"),
+    (
+        "Pan (with fingers moving the board)",
+        "Сдвинуть доску (когда пальцы двигают доску)",
+    ),
+    ("Two fingers", "Два пальца"),
+    (
+        "Zoom and pan (with fingers moving the board)",
+        "Масштаб и сдвиг (когда пальцы двигают доску)",
+    ),
+    (
         "Black or white text and clear outlines",
         "Чёрный или белый текст и чёткие рамки",
     ),
