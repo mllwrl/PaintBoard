@@ -53,6 +53,9 @@ struct VersionView {
 const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub enum UserEvent {
+    /// A picture finished decoding on a background thread.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    ImagesReady,
     /// GPU initialization finished (asynchronous on the web).
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     GpuReady(Box<Gpu>),
@@ -360,6 +363,17 @@ impl App {
                 let _ = proxy.send_event(UserEvent::StartedAgain(file));
             });
         }
+        // Pictures are decoded on worker threads, which wake the app when one is ready;
+        // the web has no threads and decodes a picture a frame.
+        #[cfg(not(target_arch = "wasm32"))]
+        let images = {
+            let proxy = proxy.clone();
+            ImageCache::background(move || {
+                let _ = proxy.send_event(UserEvent::ImagesReady);
+            })
+        };
+        #[cfg(target_arch = "wasm32")]
+        let images = ImageCache::progressive();
         let accounts = {
             let proxy = proxy.clone();
             crate::account::Accounts::new(move |reply| {
@@ -391,7 +405,7 @@ impl App {
             pen_pressure: None,
             touch: None,
             text: TextRenderer::new(),
-            images: ImageCache::default(),
+            images,
             books: Books::default(),
             dropped: Vec::new(),
             editing: None,
@@ -6460,6 +6474,7 @@ impl ApplicationHandler<UserEvent> for App {
             } => self.finish_preview(id, &url, replace_title, result),
             // Waking up is all it takes: `about_to_wait` ticks the session.
             UserEvent::Saved => {}
+            UserEvent::ImagesReady => self.request_redraw(),
             UserEvent::Paste(at) => self.paste_now(at),
             // Waking up is all it takes: `about_to_wait` ticks the sharing.
             UserEvent::Network => {}
@@ -6654,6 +6669,11 @@ impl App {
             }
             WindowEvent::RedrawRequested => {
                 self.redraw();
+                // The web decodes a picture a frame: more frames until all are shown.
+                #[cfg(target_arch = "wasm32")]
+                if self.images.busy() {
+                    self.request_redraw();
+                }
                 false
             }
             WindowEvent::Resized(size) => {

@@ -11,7 +11,7 @@ pub mod vector;
 pub use canvas::Canvas;
 pub use gpu::{FrameTarget, Gpu, Offscreen, PendingImage};
 pub use grid::{GridColors, GridStyle, draw_grid};
-pub use images::ImageCache;
+pub use images::{ImageCache, Picture};
 pub use objects::{TextRenderer, fitted_font_size, painted_bounds, text_align};
 pub use overlay::{
     COMMENT_PIN_RADIUS, LINK_BADGE_RADIUS, Overlay, OverlayColors, PAGE_TURN_RADIUS,
@@ -243,6 +243,7 @@ pub fn build_scene(
     images: &mut ImageCache,
 ) {
     scene.reset();
+    images.begin_frame();
     if !view.plain {
         draw_grid(
             scene,

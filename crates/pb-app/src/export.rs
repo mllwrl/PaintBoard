@@ -293,6 +293,8 @@ impl Job {
         } else if settings.format.is_vector() {
             let (text, images) = (&mut *painters.text, &mut *painters.images);
             let looks = (painters.theme, painters.me);
+            // Files get every picture, not placeholders for those still decoding.
+            let was = images.set_blocking(true);
             job.done = Some(vector_file(
                 doc,
                 &job.targets,
@@ -301,6 +303,7 @@ impl Job {
                 images,
                 looks,
             ));
+            images.set_blocking(was);
         } else {
             job.draw_next(doc, painters);
         }
@@ -522,12 +525,15 @@ fn draw(
                 only: target.only.as_ref(),
                 frame_titles: target.margin,
             };
+            // Files get every picture, not placeholders for those still decoding.
+            let was = painters.images.set_blocking(true);
             build_scene(
                 &mut scene,
                 &view,
                 &mut *painters.text,
                 &mut *painters.images,
             );
+            painters.images.set_blocking(was);
             let pending = painters.gpu.start_image(&scene, w, h, background)?;
             tiles.push((left, top, w, pending));
         }

@@ -426,7 +426,7 @@ pub(crate) fn draw_object(
                 (b.width() / crop.width()).max(b.height() / crop.height()) * scale
             }
         }) {
-            Some(brush) => {
+            crate::Picture::Ready(brush) => {
                 let file = assets.get(image.asset).map(|f| &f[..]);
                 draw_image(scene, transform, data.bounds, image, brush, file);
                 // A PDF page is often white to its edges: a thin line shows where it ends.
@@ -435,7 +435,9 @@ pub(crate) fn draw_object(
                     scene.stroke(&edge, transform, frame_edge, &data.bounds);
                 }
             }
-            None => draw_placeholder(scene, transform, data.bounds),
+            // Being decoded: a plain card where it will be.
+            crate::Picture::Loading => scene.fill(transform, PLACEHOLDER_FILL, &data.bounds),
+            crate::Picture::Broken => draw_placeholder(scene, transform, data.bounds),
         },
         ObjectKind::Ink(ink) => {
             let points = ink.points_in(data.bounds);
