@@ -30,6 +30,11 @@ fn main() {
         env_logger::Env::default().default_filter_or("warn,pb_app=info,pb_render=info"),
     )
     .init();
+    // PaintBoard is running already: it opens the file (or just shows itself) instead.
+    let file = std::env::args_os().nth(1).map(std::path::PathBuf::from);
+    if pb_platform::instance::hand_over(file.as_deref()) {
+        return;
+    }
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .expect("failed to create event loop");

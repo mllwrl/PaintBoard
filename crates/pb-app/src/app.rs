@@ -99,6 +99,10 @@ pub enum UserEvent {
     DevPluginPicked(PathBuf),
     /// A board file was picked to open (later than asked on the web).
     BoardPicked(PathBuf),
+    /// PaintBoard was started again, with this file to open (or none): this copy opens it
+    /// and comes to the front instead.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    StartedAgain(Option<PathBuf>),
     /// Files were picked to add to the board.
     FilesPicked(Vec<PathBuf>),
     /// Files were dropped on the page at this point (physical pixels; the web only).
@@ -242,6 +246,10 @@ pub struct App {
     playback: Option<Playback>,
     /// What the board's countdown showed when last drawn.
     timer_drawn: Option<crate::ui::TimerView>,
+    /// Shortcuts that may ask something in a window of the system, done after the next
+    /// frame like the UI's buttons: asked while a key is handled, Windows leaves that window
+    /// hidden and the app waits on it for good.
+    deferred: Vec<Action>,
     /// The voting results window is open.
     show_results: bool,
     /// The camera gliding to a new place.
@@ -326,6 +334,14 @@ impl App {
                 let _ = wake.send_event(UserEvent::Saved);
             });
         }
+        // Later starts hand their files to this copy.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let proxy = proxy.clone();
+            pb_platform::instance::listen(move |file| {
+                let _ = proxy.send_event(UserEvent::StartedAgain(file));
+            });
+        }
         let accounts = {
             let proxy = proxy.clone();
             crate::account::Accounts::new(move |reply| {
@@ -388,6 +404,7 @@ impl App {
             playback: None,
             camera_glide: None,
             timer_drawn: None,
+            deferred: Vec::new(),
             show_results: false,
             diagram: None,
             graph: None,
@@ -910,10 +927,10 @@ impl App {
             }),
         };
         self.focus_search = false;
-        let actions = match &mut self.ui {
-            Some(ui) => ui.run(&window, &model),
-            None => Vec::new(),
-        };
+        let mut actions = std::mem::take(&mut self.deferred);
+        if let Some(ui) = &mut self.ui {
+            actions.extend(ui.run(&window, &model));
+        }
         if let Some(gpu) = &mut self.gpu {
             let ui = &mut self.ui;
             let background = self
@@ -1428,6 +1445,7 @@ impl App {
                     },
                 );
             }
+            Action::InstallPluginFiles(paths) => self.install_plugin(paths),
             Action::LoadDevPlugin => {
                 let proxy = self.proxy.clone();
                 pb_platform::dialog::pick_files(
@@ -5294,6 +5312,23 @@ impl App {
         }
     }
 
+    /// PaintBoard was started again with `file`: shows the window, then opens the board
+    /// or offers to install the plugin, as when this copy was started with it. That may
+    /// ask something in a window of the system, so it is done after the next frame.
+    fn started_again(&mut self, file: Option<PathBuf>) {
+        if let Some(window) = &self.window {
+            window.set_minimized(false);
+            window.focus_window();
+        }
+        match file {
+            Some(f) if has_extension(&f, pb_plugin::package::EXTENSION) => {
+                self.defer(Action::InstallPluginFiles(vec![f]));
+            }
+            Some(f) => self.defer(Action::OpenFile(f)),
+            None => self.request_redraw(),
+        }
+    }
+
     fn new_board(&mut self) {
         self.finish_editing();
         self.end_style_drag();
@@ -5792,6 +5827,12 @@ impl App {
         }
     }
 
+    /// Does `action` after the next frame (see [`App::deferred`]).
+    fn defer(&mut self, action: Action) {
+        self.deferred.push(action);
+        self.request_redraw();
+    }
+
     fn handle_key(&mut self, event: &KeyEvent) -> bool {
         let PhysicalKey::Code(code) = event.physical_key else {
             return false;
@@ -5817,14 +5858,12 @@ impl App {
         let viewport = self.viewport();
         // Physical keys, so shortcuts work the same on any keyboard layout.
         match code {
-            KeyCode::KeyS if ctrl && modifiers.shift_key() => {
-                self.session.save_as(&self.document);
-            }
-            KeyCode::KeyS if ctrl => self.session.save(&self.document),
-            KeyCode::KeyO if ctrl => self.open_board(),
-            KeyCode::KeyE if ctrl && modifiers.shift_key() => self.open_export(),
+            KeyCode::KeyS if ctrl && modifiers.shift_key() => self.defer(Action::SaveAs),
+            KeyCode::KeyS if ctrl => self.defer(Action::Save),
+            KeyCode::KeyO if ctrl => self.defer(Action::Open),
+            KeyCode::KeyE if ctrl && modifiers.shift_key() => self.defer(Action::OpenExport),
             KeyCode::KeyP if ctrl && modifiers.shift_key() => self.toggle_palette(),
-            KeyCode::KeyP if ctrl => self.print(),
+            KeyCode::KeyP if ctrl => self.defer(Action::Print),
             KeyCode::KeyK if ctrl => self.toggle_palette(),
             // The UI's size: Ctrl+Alt+= / - / 0 (Ctrl+= and friends zoom the board).
             KeyCode::Equal if ctrl && modifiers.alt_key() => {
@@ -5836,7 +5875,7 @@ impl App {
             KeyCode::Digit0 if ctrl && modifiers.alt_key() => {
                 self.perform(Action::SetUiScale(1.0));
             }
-            KeyCode::KeyN if ctrl => self.new_board(),
+            KeyCode::KeyN if ctrl => self.defer(Action::NewBoard),
             KeyCode::KeyZ if ctrl && modifiers.shift_key() => self.redo(),
             KeyCode::KeyZ if ctrl => self.undo(),
             KeyCode::KeyY if ctrl => self.redo(),
@@ -5945,7 +5984,7 @@ impl App {
                 };
                 self.mark_cells(mark);
             }
-            KeyCode::Delete | KeyCode::Backspace => self.delete_selected(),
+            KeyCode::Delete | KeyCode::Backspace => self.defer(Action::Delete),
             KeyCode::ArrowLeft => self.nudge(-1.0, 0.0),
             KeyCode::ArrowRight => self.nudge(1.0, 0.0),
             KeyCode::ArrowUp => self.nudge(0.0, -1.0),
@@ -6198,6 +6237,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.request_redraw();
             }
             UserEvent::BoardPicked(path) => self.open_file(path),
+            UserEvent::StartedAgain(file) => self.started_again(file),
             UserEvent::FilesDropped(paths, at) => {
                 let at = self.camera.screen_to_world(at);
                 self.insert_files(&paths, Some(at));

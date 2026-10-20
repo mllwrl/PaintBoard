@@ -74,6 +74,8 @@ pub enum Action {
     /// Opens or closes the plugins window.
     TogglePlugins,
     InstallPlugin,
+    /// Offers to install the plugin in these files.
+    InstallPluginFiles(Vec<std::path::PathBuf>),
     /// Runs a plugin from its own folder, reloading it as it changes (desktop).
     LoadDevPlugin,
     SetPluginEnabled(String, bool),
@@ -87,7 +89,7 @@ pub enum Action {
     PackPlugin(String),
     /// Puts text on the clipboard (a link to share).
     CopyText(String),
-    /// Opens this board (one kept in the browser).
+    /// Opens this board (one kept in the browser, or a file PaintBoard was started with).
     OpenFile(std::path::PathBuf),
     /// Lets the browser download the board as a file (web only).
     DownloadBoard,
@@ -1598,13 +1600,13 @@ fn board_menu(ctx: &Context, model: &Model, typed: Typed, actions: &mut Vec<Acti
                     }
                     ui.menu_button(tr("Plugins"), |ui| plugins_menu(ui, model, actions));
                     ui.menu_button(tr("Talktracks"), |ui| talktracks_menu(ui, model, actions));
-                    ui.menu_button(tr("History"), |ui| {
+                    menu_with_fields(ui, tr("History"), |ui| {
                         history_menu(ui, model, version_name, actions)
                     });
                     ui.menu_button(tr("Vote"), |ui| {
                         voting_menu(ui, model.voting, &mut *actions)
                     });
-                    ui.menu_button(tr("Timer"), |ui| {
+                    menu_with_fields(ui, tr("Timer"), |ui| {
                         timer_menu(ui, model.view_only, timer_text, actions)
                     });
                     if ui
@@ -3862,6 +3864,16 @@ pub fn parse_timer(text: &str) -> Option<u64> {
         (minutes * 60_000.0).round().min(u64::MAX as f64) as u64
     };
     (1000..=TIMER_MAX).contains(&ms).then_some(ms)
+}
+
+/// A menu with fields to type in: clicking inside it (into a field, say) keeps it open, so
+/// its buttons close it themselves.
+fn menu_with_fields(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
+    let config = egui::containers::menu::MenuConfig::new()
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    egui::containers::menu::MenuButton::new(label)
+        .config(config)
+        .ui(ui, add);
 }
 
 /// Countdowns of a few usual lengths, and one of the length typed in `text`.

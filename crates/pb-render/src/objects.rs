@@ -934,6 +934,13 @@ fn paint_padding(data: &ObjectData) -> f64 {
     }
 }
 
+/// Whether an object too small on screen for any detail is drawn as [`draw_box`]. Not
+/// pictures, which would turn into gray boxes (drawn from their smallest copy, they cost
+/// little), nor pen strokes: handwriting would turn into rows of black squares.
+pub(crate) fn boxed_when_tiny(data: &ObjectData) -> bool {
+    !matches!(data.kind, ObjectKind::Image(_) | ObjectKind::Ink(_))
+}
+
 /// An object too small on screen for any detail: a box in its main color.
 pub(crate) fn draw_box(scene: &mut Scene, transform: Affine, data: &ObjectData) {
     let main = match &data.kind {
