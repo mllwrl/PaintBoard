@@ -31,6 +31,23 @@ impl InkStyle {
     };
 }
 
+/// A straight stroke (Shift) this close to level or upright, in degrees, is made exactly so.
+const STRAIGHTEN_WITHIN: f64 = 8.0;
+
+/// The end of a straight stroke from `start` towards `end`: level or upright when it is
+/// nearly so.
+pub(crate) fn straighten(start: Point, end: Point) -> Point {
+    let d = end - start;
+    let slope = STRAIGHTEN_WITHIN.to_radians().tan();
+    if d.y.abs() <= d.x.abs() * slope {
+        Point::new(end.x, start.y)
+    } else if d.x.abs() <= d.y.abs() * slope {
+        Point::new(start.x, end.y)
+    } else {
+        end
+    }
+}
+
 /// Marker strokes are see-through, like a highlighter.
 const MARKER_OPACITY: f64 = 0.5;
 
