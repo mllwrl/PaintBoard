@@ -292,6 +292,28 @@ pub fn save_account(server: &str, account: Option<(&str, &str)>) {
     }
 }
 
+/// File with `off` when the board's timer should run out silently.
+const TIMER_SOUND_FILE: &str = "timer-sound.txt";
+
+/// Whether a chime sounds when the board's timer runs out; on unless turned off.
+pub fn timer_sound() -> bool {
+    pb_platform::fs::app_data_dir()
+        .and_then(|dir| pb_platform::fs::read(&dir.join(TIMER_SOUND_FILE)))
+        .map_or(true, |bytes| {
+            String::from_utf8_lossy(&bytes).trim() != "off"
+        })
+}
+
+pub fn save_timer_sound(on: bool) {
+    let text = if on { "on" } else { "off" };
+    let saved = pb_platform::fs::app_data_dir().and_then(|dir| {
+        pb_platform::fs::write_atomic(&dir.join(TIMER_SOUND_FILE), text.as_bytes())
+    });
+    if let Err(err) = saved {
+        log::warn!("timer sound setting not saved: {err}");
+    }
+}
+
 /// File with what is known about pens (see [`PenSettings::to_words`]).
 const PEN_FILE: &str = "pen.txt";
 

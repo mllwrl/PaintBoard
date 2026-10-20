@@ -270,6 +270,11 @@ pub struct App {
     playback: Option<Playback>,
     /// What the board's countdown showed when last drawn.
     timer_drawn: Option<crate::ui::TimerView>,
+    /// The countdown last seen running with time left, so a chime sounds when it runs out
+    /// here (see [`timer_ran_out`]).
+    timer_armed: Option<pb_core::Timer>,
+    /// A chime sounds when the countdown runs out.
+    timer_sound: bool,
     /// Shortcuts that may ask something in a window of the system, done after the next
     /// frame like the UI's buttons: asked while a key is handled, Windows leaves that window
     /// hidden and the app waits on it for good.
@@ -452,6 +457,8 @@ impl App {
             playback: None,
             camera_glide: None,
             timer_drawn: None,
+            timer_armed: None,
+            timer_sound: crate::settings::timer_sound(),
             deferred: Vec::new(),
             show_results: false,
             diagram: None,
@@ -1145,6 +1152,7 @@ impl App {
                 (p.index, p.frames.len(), title)
             }),
             timer: self.timer_drawn.clone(),
+            timer_sound: self.timer_sound,
             voting: self.document.voting().map(|v| VotingView {
                 open: v.open,
                 limit: v.limit,
@@ -1941,6 +1949,10 @@ impl App {
                 }
             }
             Action::CloseTimer => self.apply(Command::SetTimer(None)),
+            Action::ToggleTimerSound => {
+                self.timer_sound = !self.timer_sound;
+                crate::settings::save_timer_sound(self.timer_sound);
+            }
             Action::StartVoting(limit) => {
                 self.finish_editing();
                 self.tools.clear_selection();
@@ -6438,6 +6450,9 @@ impl ApplicationHandler<UserEvent> for App {
         if timer.and_then(|t| timer_view(&t, now_ms)) != self.timer_drawn {
             self.request_redraw();
         }
+        if timer_ran_out(&mut self.timer_armed, timer, now_ms) && self.timer_sound {
+            crate::plugins::Host::play_sound(self, "chime");
+        }
         let timer = timer.and_then(|t| timer_tick(&t, now_ms)).map(|d| now + d);
         // Recording samples the view, and shows each second.
         let viewport = self.viewport();
@@ -7071,6 +7086,31 @@ fn timer_view(timer: &pb_core::Timer, now: i64) -> Option<crate::ui::TimerView> 
     })
 }
 
+/// A countdown that ran out longer ago than this (milliseconds) when first seen done, as
+/// after the computer slept, runs out silently.
+const TIMER_RINGS_FOR: u64 = 30_000;
+
+/// Whether the board's countdown just ran out at `now`, to sound once: it was last seen
+/// (`armed`) running with time left and is the same countdown, now done. A countdown
+/// first seen already done (a board opened, or synced, after), paused, or replaced does
+/// not ring. Updates `armed`.
+fn timer_ran_out(
+    armed: &mut Option<pb_core::Timer>,
+    timer: Option<pb_core::Timer>,
+    now: i64,
+) -> bool {
+    let Some(timer) = timer.filter(pb_core::Timer::running) else {
+        *armed = None;
+        return false;
+    };
+    if timer.left(now) > 0 {
+        *armed = Some(timer);
+        return false;
+    }
+    let was = armed.take();
+    was == Some(timer) && timer.elapsed(now) - timer.duration <= TIMER_RINGS_FOR
+}
+
 /// How long until the countdown next looks different: the next whole second while
 /// running, the next half second once time is up; `None` while paused or no longer shown.
 fn timer_tick(timer: &pb_core::Timer, now: i64) -> Option<pb_platform::Duration> {
@@ -7537,6 +7577,40 @@ mod tests {
         // Long after, it is gone.
         assert_eq!(timer_view(&timer, secs(150 + 11 * 60)), None);
         assert_eq!(timer_tick(&timer, secs(150 + 11 * 60)), None);
+    }
+
+    #[test]
+    fn a_timer_rings_once_when_it_runs_out_here() {
+        let t0 = 1_760_000_000_000;
+        let secs = |s: i64| t0 + s * 1000;
+        let timer = pb_core::Timer::new(60_000, t0);
+        let mut armed = None;
+        assert!(!timer_ran_out(&mut armed, Some(timer), secs(1)));
+        assert!(!timer_ran_out(&mut armed, Some(timer), secs(59)));
+        assert!(timer_ran_out(&mut armed, Some(timer), secs(60)));
+        // Once per run.
+        assert!(!timer_ran_out(&mut armed, Some(timer), secs(61)));
+        assert!(!timer_ran_out(&mut armed, Some(timer), secs(62)));
+        // Seen first when already done (opened or synced after): silent.
+        let mut fresh = None;
+        assert!(!timer_ran_out(&mut fresh, Some(timer), secs(61)));
+        // Started over: rings again.
+        let again = pb_core::Timer::new(60_000, secs(100));
+        assert!(!timer_ran_out(&mut armed, Some(again), secs(101)));
+        assert!(timer_ran_out(&mut armed, Some(again), secs(161)));
+        // Paused, or closed, before the end: nothing.
+        let mut armed = None;
+        let timer = pb_core::Timer::new(60_000, t0);
+        assert!(!timer_ran_out(&mut armed, Some(timer), secs(30)));
+        let paused = timer.toggled(secs(40));
+        assert!(!timer_ran_out(&mut armed, Some(paused), secs(70)));
+        assert!(!timer_ran_out(&mut armed, Some(timer), secs(70)));
+        assert!(!timer_ran_out(&mut armed, Some(timer), secs(30)));
+        assert!(!timer_ran_out(&mut armed, None, secs(70)));
+        assert!(!timer_ran_out(&mut armed, Some(timer), secs(70)));
+        // Run out long before it is next looked at (the computer slept): silent.
+        assert!(!timer_ran_out(&mut armed, Some(timer), secs(30)));
+        assert!(!timer_ran_out(&mut armed, Some(timer), secs(60 + 31)));
     }
 
     #[test]

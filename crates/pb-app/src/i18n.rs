@@ -806,6 +806,11 @@ const RU: &[(&str, &str)] = &[
     ("Start over", "Сначала"),
     ("Close", "Закрыть"),
     ("Everyone on the board sees it", "Его видят все на доске"),
+    ("Sound when time is up", "Звук, когда время вышло"),
+    (
+        "A short chime on this computer",
+        "Короткий сигнал на этом компьютере",
+    ),
     ("The name is empty", "Пустое название"),
     (
         "There is already a board with this name",

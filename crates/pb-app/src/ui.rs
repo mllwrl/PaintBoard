@@ -208,6 +208,8 @@ pub enum Action {
     /// Starts the countdown over.
     ResetTimer,
     CloseTimer,
+    /// Turns the chime when the countdown runs out on or off (here only).
+    ToggleTimerSound,
     /// Enters focus mode on the selection or the view, or leaves it (Shift+F).
     ToggleFocus,
     /// Presents the board frame by frame (F5).
@@ -581,6 +583,8 @@ pub struct Model<'a> {
     pub laser: bool,
     /// The countdown, while shown.
     pub timer: Option<TimerView>,
+    /// A chime sounds when the countdown runs out.
+    pub timer_sound: bool,
     /// The voting session, if there is one.
     pub voting: Option<VotingView>,
     /// The voting results window: objects with their votes, most first.
@@ -1650,7 +1654,7 @@ fn board_menu(ctx: &Context, model: &Model, typed: Typed, actions: &mut Vec<Acti
                         voting_menu(ui, model.voting, &mut *actions)
                     });
                     menu_with_fields(ui, tr("Timer"), |ui| {
-                        timer_menu(ui, model.view_only, timer_text, actions)
+                        timer_menu(ui, model, timer_text, actions)
                     });
                     if ui
                         .add_enabled(!model.read_only, Button::new(tr("Templates")))
@@ -3948,7 +3952,8 @@ fn menu_with_fields(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::
 }
 
 /// Countdowns of a few usual lengths, and one of the length typed in `text`.
-fn timer_menu(ui: &mut egui::Ui, view_only: bool, text: &mut String, actions: &mut Vec<Action>) {
+fn timer_menu(ui: &mut egui::Ui, model: &Model, text: &mut String, actions: &mut Vec<Action>) {
+    let view_only = model.view_only;
     ui.weak(tr("Everyone on the board sees it"));
     for minutes in [1, 3, 5, 10, 15, 30] {
         let button = Button::new(trf("{} min", &[&minutes]));
@@ -3981,6 +3986,17 @@ fn timer_menu(ui: &mut egui::Ui, view_only: bool, text: &mut String, actions: &m
             Color32::from_rgb(0xDC, 0x26, 0x26),
             tr("From 1 second to 24 hours"),
         );
+    }
+    ui.separator();
+    if ui
+        .add(Button::selectable(
+            model.timer_sound,
+            tr("Sound when time is up"),
+        ))
+        .on_hover_text(tr("A short chime on this computer"))
+        .clicked()
+    {
+        actions.push(Action::ToggleTimerSound);
     }
 }
 
