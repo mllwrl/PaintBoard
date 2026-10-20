@@ -282,6 +282,21 @@ impl Session {
         Ok(to)
     }
 
+    /// Lets the browser download the board kept in it at `path`; the open board is
+    /// `doc`, perhaps not written back yet.
+    #[cfg(target_arch = "wasm32")]
+    pub fn download_stored(&self, path: &Path, doc: &Document) {
+        if self.path.as_deref() == Some(path) {
+            return self.download(doc);
+        }
+        let name = path.file_name().unwrap_or_default();
+        let saved = fs::read(path)
+            .and_then(|bytes| fs::write_atomic(&fs::downloads_dir().join(name), &bytes));
+        if let Err(err) = saved {
+            dialog::show_error(tr("Could not save the board"), &err.to_string());
+        }
+    }
+
     /// Lets the browser download the board as a file (the web keeps boards inside the
     /// browser otherwise).
     #[cfg(target_arch = "wasm32")]

@@ -207,6 +207,8 @@ pub struct App {
     show_shortcuts: bool,
     /// The template gallery is open.
     show_templates: bool,
+    /// The boards kept in the browser are listed (the web version's start screen).
+    show_boards: bool,
     /// Presenting the board frame by frame.
     presentation: Option<Presentation>,
     /// In focus mode (the area is the document's): where the camera was before.
@@ -332,6 +334,7 @@ impl App {
             context_menu: None,
             show_shortcuts: false,
             show_templates: false,
+            show_boards: false,
             presentation: None,
             focus_saved: None,
             show_layers: false,
@@ -371,6 +374,8 @@ impl App {
         let opened = false;
         if !opened {
             app.resume_sharing();
+            // The web version starts with the boards kept in the browser.
+            app.show_boards = cfg!(target_arch = "wasm32");
         }
         app
     }
@@ -698,6 +703,7 @@ impl App {
                 has_selection: !self.tools.selection().is_empty(),
             }),
             show_templates: self.show_templates,
+            show_boards: self.show_boards,
             focus: self.focus_saved.is_some(),
             laser: self.presentation.as_ref().is_some_and(|p| p.laser),
             presentation: self.presentation.as_ref().map(|p| {
@@ -1408,6 +1414,11 @@ impl App {
             Action::ToggleFocus => self.toggle_focus(),
             Action::ToggleLaser => self.toggle_laser(),
             Action::ToggleTemplates => self.show_templates = !self.show_templates,
+            Action::ToggleBoards => self.show_boards = !self.show_boards,
+            #[cfg(target_arch = "wasm32")]
+            Action::DownloadStored(path) => self.session.download_stored(&path, &self.document),
+            #[cfg(not(target_arch = "wasm32"))]
+            Action::DownloadStored(_) => {}
             Action::InsertTemplate(i) => {
                 self.show_templates = false;
                 self.insert_template(i);
@@ -5396,6 +5407,7 @@ impl App {
                     || self.thread_panel.take().is_some()
                     || self.diagram.take().is_some()
                     || std::mem::replace(&mut self.show_templates, false)
+                    || std::mem::replace(&mut self.show_boards, false)
                     || std::mem::replace(&mut self.show_export, false)
                     || std::mem::replace(&mut self.show_shortcuts, false);
                 if !closed

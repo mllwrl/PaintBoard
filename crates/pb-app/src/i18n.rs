@@ -599,6 +599,19 @@ const RU: &[(&str, &str)] = &[
     ),
     ("Rename", "Переименовать"),
     ("OK", "ОК"),
+    ("Download", "Скачать"),
+    (
+        "Open, rename, download or delete them",
+        "Открыть, переименовать, скачать или удалить",
+    ),
+    ("+ New board", "+ Новая доска"),
+    ("Open a file…", "Открыть файл…"),
+    (
+        "A .pboard file from this computer",
+        "Файл .pboard с этого компьютера",
+    ),
+    ("No boards here yet", "Здесь пока нет досок"),
+    ("Open now", "Открыта сейчас"),
     (
         "Your own time, like 7 or 2:30:",
         "Своё время, например 7 или 2:30:",

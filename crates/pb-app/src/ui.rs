@@ -188,6 +188,10 @@ pub enum Action {
     ToggleLaser,
     /// Opens or closes the template gallery.
     ToggleTemplates,
+    /// Shows or hides the boards kept in the browser.
+    ToggleBoards,
+    /// Lets the browser download a board kept in it.
+    DownloadStored(std::path::PathBuf),
     /// Adds template `i` of `templates::TEMPLATES` in the middle of the view.
     InsertTemplate(usize),
     /// Opens the window for making a diagram from text.
@@ -462,6 +466,8 @@ pub struct Model<'a> {
     pub graph: Option<Option<String>>,
     /// The template gallery is open.
     pub show_templates: bool,
+    /// The window of the boards kept in the browser (the web version's start screen).
+    pub show_boards: bool,
     /// The dark theme is on.
     pub dark: bool,
     /// The UI's size relative to normal, and whether high contrast is on.
@@ -1057,7 +1063,6 @@ impl Ui {
                 let typed = Typed {
                     version_name,
                     timer_text,
-                    renaming_board,
                 };
                 board_menu(ctx, model, typed, &mut actions);
             }
@@ -1121,6 +1126,9 @@ impl Ui {
             }
             if model.show_templates {
                 templates_window(ctx, &mut actions);
+            }
+            if model.show_boards {
+                boards_window(ctx, model, renaming_board, &mut actions);
             }
             if let Some(view) = &model.share_window {
                 share_window(
@@ -1244,14 +1252,9 @@ fn panel() -> Frame {
         })
 }
 
-/// The browser keeps boards inside itself: they are opened from this list, and
+/// The browser keeps boards inside itself: they are listed in the boards window, and
 /// downloaded to have them as files.
-fn stored_boards_menu(
-    ui: &mut egui::Ui,
-    model: &Model,
-    renaming: &mut Option<(std::path::PathBuf, String)>,
-    actions: &mut Vec<Action>,
-) {
+fn stored_boards_menu(ui: &mut egui::Ui, actions: &mut Vec<Action>) {
     ui.separator();
     if ui
         .button(tr("Download board"))
@@ -1261,48 +1264,153 @@ fn stored_boards_menu(
         actions.push(Action::DownloadBoard);
         ui.close();
     }
-    if model.stored_boards.is_empty() {
-        return;
+    if ui
+        .button(tr("Boards in this browser"))
+        .on_hover_text(tr("Open, rename, download or delete them"))
+        .clicked()
+    {
+        actions.push(Action::ToggleBoards);
+        ui.close();
     }
-    ui.menu_button(tr("Boards in this browser"), |ui| {
-        for path in &model.stored_boards {
-            let name = path
-                .file_stem()
-                .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+}
+
+/// The start screen of the web version: the boards kept in the browser, to open, rename,
+/// download or delete, and a new board or one from a file. `renaming` is the board being
+/// renamed, with the name typed.
+fn boards_window(
+    ctx: &Context,
+    model: &Model,
+    renaming: &mut Option<(std::path::PathBuf, String)>,
+    actions: &mut Vec<Action>,
+) {
+    let mut open = true;
+    egui::Window::new(tr("Boards in this browser"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .order(Order::Foreground)
+        .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if let Some((_, typed)) = renaming.as_mut().filter(|(p, _)| p == path) {
-                    let field = ui.add(egui::TextEdit::singleline(typed).desired_width(160.0));
-                    field.request_focus();
-                    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    if ui.button(tr("OK")).clicked() || enter {
-                        actions.push(Action::RenameStored(path.clone(), typed.clone()));
-                        *renaming = None;
-                    } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        *renaming = None;
-                    }
-                    return;
-                }
-                let open = model.open_board.as_deref() == Some(path.as_path());
-                if ui.add_enabled(!open, Button::new(&name)).clicked() {
-                    actions.push(Action::OpenFile(path.clone()));
-                    ui.close();
-                }
-                let delete = ui
-                    .add_enabled(!open, Button::new("✕").small())
-                    .on_hover_text(tr("Delete this board from the browser"))
-                    .on_disabled_hover_text(tr("It is open: open another board first"));
-                if delete.clicked() {
-                    actions.push(Action::DeleteStored(path.clone()));
-                    ui.close();
+                if ui.button(tr("+ New board")).clicked() {
+                    actions.push(Action::NewBoard);
+                    actions.push(Action::ToggleBoards);
                 }
                 if ui
-                    .add(Button::new("✎").small())
-                    .on_hover_text(tr("Rename"))
+                    .button(tr("Open a file…"))
+                    .on_hover_text(tr("A .pboard file from this computer"))
                     .clicked()
                 {
-                    *renaming = Some((path.clone(), name.clone()));
+                    actions.push(Action::Open);
+                    actions.push(Action::ToggleBoards);
                 }
             });
+            ui.separator();
+            if model.stored_boards.is_empty() {
+                ui.weak(tr("No boards here yet"));
+                return;
+            }
+            egui::ScrollArea::vertical()
+                .max_height(ctx.content_rect().height() * 0.6)
+                .show(ui, |ui| {
+                    egui::Grid::new("boards")
+                        .spacing([8.0, 6.0])
+                        .show(ui, |ui| {
+                            for path in &model.stored_boards {
+                                board_row(ui, model, path, renaming, actions);
+                                ui.end_row();
+                            }
+                        });
+                });
+        });
+    if !open {
+        *renaming = None;
+        actions.push(Action::ToggleBoards);
+    }
+}
+
+/// The name field of board `path` being renamed.
+fn rename_field_id(path: &std::path::Path) -> Id {
+    Id::unique(("rename board", path))
+}
+
+/// One board of the boards window.
+fn board_row(
+    ui: &mut egui::Ui,
+    model: &Model,
+    path: &std::path::Path,
+    renaming: &mut Option<(std::path::PathBuf, String)>,
+    actions: &mut Vec<Action>,
+) {
+    let name = path
+        .file_stem()
+        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    let open = model.open_board.as_deref() == Some(path);
+    if let Some((_, typed)) = renaming.as_mut().filter(|(p, _)| p == path) {
+        let field = egui::TextEdit::singleline(typed)
+            .id(rename_field_id(path))
+            .desired_width(220.0);
+        ui.add(field);
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if ui.button(tr("OK")).clicked() || enter {
+            actions.push(Action::RenameStored(path.to_owned(), typed.clone()));
+            *renaming = None;
+        } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            *renaming = None;
+        }
+        return;
+    }
+    let label = if open {
+        RichText::new(&name).strong()
+    } else {
+        RichText::new(&name)
+    };
+    let title = ui
+        .allocate_ui_with_layout(
+            egui::vec2(220.0, 22.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_width(220.0);
+                ui.add(egui::Label::new(label).sense(egui::Sense::click()))
+            },
+        )
+        .inner;
+    if open {
+        title.on_hover_text(tr("Open now"));
+    } else if title.on_hover_text(tr("Open")).clicked() {
+        actions.push(Action::OpenFile(path.to_owned()));
+        actions.push(Action::ToggleBoards);
+    }
+    ui.horizontal(|ui| {
+        // Inter has no pencil or arrow signs: words instead.
+        if ui.add(Button::new(tr("Rename")).small()).clicked() {
+            // The field takes the keys at once, with the old name selected to type over.
+            let id = rename_field_id(path);
+            let mut state = egui::text_edit::TextEditState::default();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(0),
+                    egui::text::CCursor::new(name.chars().count()),
+                )));
+            state.store(ui.ctx(), id);
+            ui.memory_mut(|m| m.request_focus(id));
+            ui.ctx().request_repaint();
+            *renaming = Some((path.to_owned(), name.clone()));
+        }
+        if ui
+            .add(Button::new(tr("Download")).small())
+            .on_hover_text(tr("Save the board as a .pboard file on this computer"))
+            .clicked()
+        {
+            actions.push(Action::DownloadStored(path.to_owned()));
+        }
+        let delete = ui
+            .add_enabled(!open, Button::new(tr("Delete")).small())
+            .on_hover_text(tr("Delete this board from the browser"))
+            .on_disabled_hover_text(tr("It is open: open another board first"));
+        if delete.clicked() {
+            actions.push(Action::DeleteStored(path.to_owned()));
         }
     });
 }
@@ -1311,7 +1419,6 @@ fn stored_boards_menu(
 struct Typed<'a> {
     version_name: &'a mut String,
     timer_text: &'a mut String,
-    renaming_board: &'a mut Option<(std::path::PathBuf, String)>,
 }
 
 /// The menu bar at the top left.
@@ -1319,7 +1426,6 @@ fn board_menu(ctx: &Context, model: &Model, typed: Typed, actions: &mut Vec<Acti
     let Typed {
         version_name,
         timer_text,
-        renaming_board,
     } = typed;
     Area::new(Id::unique("board"))
         .fixed_pos(Pos2::new(MARGIN, MARGIN))
@@ -1361,7 +1467,7 @@ fn board_menu(ctx: &Context, model: &Model, typed: Typed, actions: &mut Vec<Acti
                             }
                         }
                         if model.web {
-                            stored_boards_menu(ui, model, renaming_board, actions);
+                            stored_boards_menu(ui, actions);
                         }
                         ui.separator();
                         if ui
