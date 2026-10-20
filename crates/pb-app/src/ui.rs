@@ -83,6 +83,8 @@ pub enum Action {
     /// Something happened in this plugin's panel.
     PluginPanel(String, serde_json::Value),
     ClosePluginPanel(String),
+    /// Saves a plugin being developed as one `.pbplugin` file, to give to others.
+    PackPlugin(String),
     /// Puts text on the clipboard (a link to share).
     CopyText(String),
     /// Opens this board (one kept in the browser).
@@ -5504,6 +5506,14 @@ fn plugins_window(ctx: &Context, plugins: &[PluginView], web: bool, actions: &mu
                             if ui.small_button(tr("Remove")).clicked() {
                                 actions.push(Action::RemovePlugin(p.id.clone()));
                             }
+                            if p.dev
+                                && ui
+                                    .small_button(tr("Pack…"))
+                                    .on_hover_text(tr("Save it as one .pbplugin file to give to others"))
+                                    .clicked()
+                            {
+                                actions.push(Action::PackPlugin(p.id.clone()));
+                            }
                         });
                     });
                     if !p.description.is_empty() {
@@ -5545,7 +5555,7 @@ fn plugins_window(ctx: &Context, plugins: &[PluginView], web: bool, actions: &mu
             ui.horizontal(|ui| {
                 if ui
                     .button(tr("Install plugin…"))
-                    .on_hover_text(tr("Pick the plugin's manifest.json (in the browser: with its scripts)"))
+                    .on_hover_text(tr("Pick a .pbplugin file, or the plugin's manifest.json (in the browser: with its scripts)"))
                     .clicked()
                 {
                     actions.push(Action::InstallPlugin);

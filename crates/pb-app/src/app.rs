@@ -308,7 +308,12 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))]
         let file = std::env::args_os().nth(1).map(PathBuf::from);
         #[cfg(target_arch = "wasm32")]
-        let file = None;
+        let file: Option<PathBuf> = None;
+        // A plugin file (double-clicked) is offered for installing, not opened as a board.
+        let (plugin_file, file) = match file {
+            Some(f) if has_extension(&f, pb_plugin::package::EXTENSION) => (Some(f), None),
+            other => (None, other),
+        };
         #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let (mut session, document) = Session::start(file);
         // Background saves wake the app when done (the web saves right away).
@@ -416,6 +421,9 @@ impl App {
             app.show_boards = cfg!(target_arch = "wasm32");
         }
         app.with_plugins(|plugins, app| *plugins = crate::plugins::Plugins::load_all(app));
+        if let Some(path) = plugin_file {
+            app.install_plugin(vec![path]);
+        }
         app
     }
 
@@ -437,24 +445,36 @@ impl App {
         // On the desktop the manifest alone will do: its folder has the rest.
         #[cfg(not(target_arch = "wasm32"))]
         if let [manifest] = &paths[..]
+            && !has_extension(manifest, pb_plugin::package::EXTENSION)
             && let Some(dir) = manifest.parent()
         {
             paths = pb_platform::fs::list(dir);
         }
-        let files: Vec<(String, Vec<u8>)> = paths
-            .iter()
-            .filter_map(|p| {
-                let name = p.file_name()?.to_string_lossy().into_owned();
-                let bytes = pb_platform::fs::read(p).ok()?;
-                (bytes.len() <= 8 << 20).then_some((name, bytes))
-            })
-            .collect();
+        let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut unpacked = Ok(());
+        for p in &paths {
+            let Some(name) = p.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            let Ok(bytes) = pb_platform::fs::read(p) else {
+                continue;
+            };
+            if has_extension(p, pb_plugin::package::EXTENSION) {
+                match pb_plugin::package::unpack(&bytes) {
+                    Ok(inside) => files.extend(inside),
+                    Err(err) => unpacked = Err(err),
+                }
+            } else if bytes.len() <= 8 << 20 {
+                files.push((name, bytes));
+            }
+        }
         // Picked in the browser, they were kept in memory only to be read.
         #[cfg(target_arch = "wasm32")]
         for path in &paths {
             let _ = pb_platform::fs::remove(path);
         }
-        let installed = self.with_plugins(|plugins, app| plugins.install(app, &files));
+        let installed =
+            unpacked.and_then(|()| self.with_plugins(|plugins, app| plugins.install(app, &files)));
         match installed {
             Ok(Some(name)) => {
                 self.plugins_window = true;
@@ -1396,8 +1416,8 @@ impl App {
             Action::InstallPlugin => {
                 let proxy = self.proxy.clone();
                 pb_platform::dialog::pick_files(
-                    tr("PaintBoard plugin (manifest.json and scripts)"),
-                    &["json", "js"],
+                    tr("PaintBoard plugin (.pbplugin, or manifest.json and scripts)"),
+                    &["pbplugin", "json", "js"],
                     true,
                     move |paths| {
                         let _ = proxy.send_event(UserEvent::PluginFiles(paths));
@@ -1443,6 +1463,21 @@ impl App {
                 self.with_plugins(|plugins, app| plugins.panel_event(app, &plugin, data));
             }
             Action::ClosePluginPanel(plugin) => self.plugins.close_panel(&plugin),
+            Action::PackPlugin(id) => match self.plugins.package(&id) {
+                Ok((name, bytes)) => {
+                    let file_type = pb_platform::dialog::FileType {
+                        name: tr("PaintBoard plugin"),
+                        extension: pb_plugin::package::EXTENSION,
+                    };
+                    if let Some(path) =
+                        pb_platform::dialog::pick_save(&file_type, std::path::Path::new(&name))
+                        && let Err(err) = pb_platform::fs::write_atomic(&path, &bytes)
+                    {
+                        dialog::show_error(tr("Could not save the plugin"), &err.to_string());
+                    }
+                }
+                Err(err) => dialog::show_error(tr("Could not save the plugin"), &err),
+            },
             Action::SignOut => self.accounts.sign_out(),
             Action::RefreshBoards => self.accounts.refresh_boards(),
             Action::OpenMyBoard(board) => {
@@ -2131,6 +2166,14 @@ impl App {
     /// Places image files at `at` (world), or in the middle of the view. Other files are
     /// skipped; unreadable images are reported.
     fn insert_files(&mut self, paths: &[PathBuf], at: Option<Point>) {
+        let (plugins, paths): (Vec<PathBuf>, Vec<PathBuf>) = paths
+            .iter()
+            .cloned()
+            .partition(|p| has_extension(p, pb_plugin::package::EXTENSION));
+        if !plugins.is_empty() {
+            self.install_plugin(plugins);
+        }
+        let paths = &paths[..];
         let mut errors = Vec::new();
         let documents: Vec<(String, String)> = paths
             .iter()

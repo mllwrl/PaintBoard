@@ -326,6 +326,21 @@ const RU: &[(&str, &str)] = &[
         "Ставьте плагины только от тех, кому доверяете.",
     ),
     ("Install plugin", "Установка плагина"),
+    (
+        "PaintBoard plugin (.pbplugin, or manifest.json and scripts)",
+        "Плагин PaintBoard (.pbplugin или manifest.json со скриптами)",
+    ),
+    ("PaintBoard plugin", "Плагин PaintBoard"),
+    ("Could not save the plugin", "Не удалось сохранить плагин"),
+    ("Pack…", "Упаковать…"),
+    (
+        "Save it as one .pbplugin file to give to others",
+        "Сохранить одним файлом .pbplugin, чтобы передать другим",
+    ),
+    (
+        "Pick a .pbplugin file, or the plugin's manifest.json (in the browser: with its scripts)",
+        "Выберите файл .pbplugin или manifest.json плагина (в браузере — вместе со скриптами)",
+    ),
     ("Here now:", "Сейчас здесь:"),
     ("Link to comment", "Ссылка для комментариев"),
     (

@@ -37,8 +37,11 @@ In PaintBoard: **Plugins → Manage plugins… → Develop from a folder…** an
 the plugin, PaintBoard starts it again; `console.log` lines and errors go to the plugin's
 **Log** in the same window.
 
-To give it to others, send the folder. They install it with **Install plugin…** (in the
-browser, by picking `manifest.json` together with the scripts).
+To give it to others, press **Pack…** next to it: PaintBoard saves the plugin as one
+`.pbplugin` file. People install it by double-clicking it, dragging it onto PaintBoard's
+window, or with **Install plugin…**. A `.pbplugin` is an ordinary zip of the plugin's
+folder, so any zip tool makes one too: zip the folder (or its contents) and rename the
+`.zip` to `.pbplugin`. Only plain files are taken (no subfolders), up to 16 MB in all.
 
 ## The manifest
 

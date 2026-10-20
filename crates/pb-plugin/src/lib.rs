@@ -8,6 +8,7 @@
 //! only what the plugin's permissions allow.
 
 mod manifest;
+pub mod package;
 #[cfg(not(target_arch = "wasm32"))]
 mod runtime;
 #[cfg(target_arch = "wasm32")]

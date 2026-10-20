@@ -333,11 +333,7 @@ impl Plugins {
         }
         for (name, bytes) in files {
             // Only plain names: the files stay in the plugin's folder.
-            let plain = !name.starts_with('.')
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
-            if plain {
+            if pb_plugin::package::plain_name(name) {
                 pb_platform::fs::write_atomic(&dir.join(name), bytes).map_err(|e| e.to_string())?;
             }
         }
@@ -426,6 +422,28 @@ impl Plugins {
                 self.start(host, i);
             }
         }
+    }
+
+    /// Plugin `id`'s files as one `.pbplugin`, and a name for it.
+    pub fn package(&self, id: &str) -> Result<(String, Vec<u8>), String> {
+        let plugin = &self.list[self.index(id).ok_or("no such plugin")?];
+        let mut files = Vec::new();
+        for path in pb_platform::fs::list(&plugin.dir) {
+            let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            if pb_plugin::package::plain_name(&name) && !name.ends_with(".pbplugin") {
+                let bytes = pb_platform::fs::read(&path).map_err(|e| format!("{name}: {e}"))?;
+                files.push((name, bytes));
+            }
+        }
+        let name = format!(
+            "{}-{}.{}",
+            plugin.manifest.id,
+            plugin.manifest.version,
+            pb_plugin::package::EXTENSION
+        );
+        Ok((name, pb_plugin::package::pack(&files)))
     }
 
     /// Whether any plugin is developed from its own folder (and so watched).
@@ -1101,6 +1119,34 @@ mod tests {
                 _ => assert_eq!(&texts[3..], ["one", "two", "three"]),
             }
         }
+    }
+
+    #[test]
+    fn plugins_in_development_pack_into_one_file() {
+        let dir = std::env::temp_dir().join(format!("pb-plugin-pack-{}", std::process::id()));
+        let example = "../../packaging/plugins/examples/quick-notes";
+        let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(example);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["manifest.json", "main.js"] {
+            std::fs::copy(example.join(name), dir.join(name)).unwrap();
+        }
+        // Not taken along: hidden files and earlier packages.
+        std::fs::write(dir.join(".notes"), "x").unwrap();
+        std::fs::write(dir.join("old.pbplugin"), "x").unwrap();
+        let mut plugin = load(&dir, true).unwrap();
+        plugin.enabled = false;
+        let plugins = Plugins {
+            list: vec![plugin],
+            ..Plugins::default()
+        };
+        let (name, bytes) = plugins.package("paintboard.quick-notes").unwrap();
+        assert_eq!(name, "paintboard.quick-notes-1.0.0.pbplugin");
+        let mut files = pb_plugin::package::unpack(&bytes).unwrap();
+        files.sort();
+        let names: Vec<_> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["main.js", "manifest.json"]);
+        assert_eq!(files[0].1, std::fs::read(dir.join("main.js")).unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

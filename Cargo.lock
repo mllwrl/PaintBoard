@@ -3646,6 +3646,8 @@ dependencies = [
 name = "pb-plugin"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
+ "flate2",
  "js-sys",
  "rquickjs",
  "serde",
