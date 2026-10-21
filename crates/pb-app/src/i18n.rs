@@ -42,6 +42,7 @@ pub fn lang() -> Lang {
 
 pub fn set_lang(lang: Lang) {
     LANG.store(lang as u8, Ordering::Relaxed);
+    pb_render::set_add_card_label(tr("+ Add card"));
     pb_platform::dialog::set_web_texts(pb_platform::dialog::WebTexts {
         ok_saves: tr("OK: save it.").into(),
         discard: tr("Close the board without saving it?").into(),
@@ -1434,6 +1435,7 @@ const RU: &[(&str, &str)] = &[
     ("Update", "Обновить"),
     ("What's new", "Что нового"),
     ("Later", "Позже"),
+    ("+ Add card", "+ Добавить карточку"),
     ("Update to PaintBoard {}…", "Обновить до PaintBoard {}…"),
     (
         "This is the last reminder. You can update any time: View → Update to PaintBoard…",

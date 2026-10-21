@@ -27,6 +27,25 @@ const PLACEHOLDER_LINE: Color = Color::from_rgb8(0xA0, 0xA0, 0x9A);
 const CARD_FILL: Color = Color::from_rgb8(0xFF, 0xFF, 0xFF);
 const ADD_LABEL: Color = Color::from_rgb8(0x6B, 0x72, 0x80);
 
+/// The "+ Add card" row's text in the interface language, set by the app.
+static ADD_CARD_TEXT: std::sync::RwLock<Option<Arc<str>>> = std::sync::RwLock::new(None);
+
+/// Sets the text of a Kanban column's "+ Add card" row (the interface language changed).
+pub fn set_add_card_label(text: &str) {
+    let mut label = ADD_CARD_TEXT
+        .write()
+        .unwrap_or_else(|poison| poison.into_inner());
+    *label = Some(text.into());
+}
+
+fn add_card_label() -> Arc<str> {
+    ADD_CARD_TEXT
+        .read()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone()
+        .unwrap_or_else(|| pb_core::Kanban::ADD_LABEL.into())
+}
+
 /// Web page cards: the strip along their left and their address.
 const EMBED_STRIP: Color = Color::from_rgb8(0x3B, 0x82, 0xF6);
 const EMBED_URL: Color = Color::from_rgb8(0x25, 0x63, 0xEB);
@@ -357,7 +376,7 @@ pub(crate) fn draw_object(
                     }
                 }
                 if let Some(text_box) = kanban.add_text_box(b, col) {
-                    let label: Arc<str> = pb_core::Kanban::ADD_LABEL.into();
+                    let label = add_card_label();
                     let spans = Spans::default();
                     text.draw_fitted(scene, transform, (&label, &spans), text_box, ADD_LABEL);
                 }
