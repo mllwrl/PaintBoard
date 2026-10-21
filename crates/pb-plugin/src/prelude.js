@@ -35,7 +35,9 @@
   };
   const log = (level) => (...values) =>
     post(JSON.stringify({ log: values.map(show).join(" "), level }));
-  const report = (error) => log("error")(error);
+  // QuickJS throws a bare null when it runs out of memory even for the error itself.
+  const report = (error) =>
+    log("error")(error ?? "out of memory (or an error without details)");
   globalThis.console = {
     log: log("info"),
     info: log("info"),
