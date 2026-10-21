@@ -73,6 +73,10 @@ ln -s /Applications "$out/dmg/Applications"
 cp "$notices" "$out/dmg/THIRD-PARTY.txt"
 image="$out/PaintBoard-$version-macos.dmg"
 rm -f "$image"
-hdiutil create -volname "PaintBoard $version" -srcfolder "$out/dmg" -ov -format UDZO "$image"
+# hdiutil's own guess of the size from -srcfolder is sometimes too small ("No space left
+# on device"), so the size is given: the contents and a good margin.
+size_mb=$(( $(du -sm "$out/dmg" | cut -f1) * 2 + 20 ))
+hdiutil create -volname "PaintBoard $version" -srcfolder "$out/dmg" -size "${size_mb}m" \
+    -fs HFS+ -ov -format UDZO "$image"
 rm -rf "$out/dmg"
 ls -l "$image"
