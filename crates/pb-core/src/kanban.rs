@@ -300,7 +300,7 @@ impl Kanban {
         if title.is_empty() {
             return Spans::default();
         }
-        Arc::new([crate::Span {
+        Spans::from_marks(vec![crate::Span {
             start: 0,
             end: title.len(),
             marks: crate::TextMarks {

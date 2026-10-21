@@ -1,7 +1,6 @@
 use pb_core::connector::ConnectorPath;
 use pb_core::{
-    Assets, FrameData, HAlign, Image, Label, ObjectData, ObjectKind, Rgba, Span, Spans, Style,
-    TextBox,
+    Assets, FrameData, HAlign, Image, Label, ObjectData, ObjectKind, Rgba, Spans, Style, TextBox,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -45,7 +44,7 @@ const FIT_CACHE_LIMIT: usize = 4096;
 pub fn fitted_font_size(
     engine: &mut TextEngine,
     text: &str,
-    spans: &[Span],
+    spans: &Spans,
     text_box: TextBox,
 ) -> f64 {
     let area = text_box.area;
@@ -171,7 +170,11 @@ fn draw_text(
     brush: Color,
 ) {
     let transform = transform * Affine::translate(origin);
-    let paint = |b: pb_text::Brush| b.map_or(brush, color);
+    let paint = |b: pb_text::Brush| match b {
+        pb_text::Brush::Text => brush,
+        pb_text::Brush::Color(c) => color(c),
+        pb_text::Brush::Link => link_color(brush),
+    };
     for run in &layout.runs {
         scene.glyphs(transform, run, paint(run.brush));
     }
@@ -184,6 +187,24 @@ fn draw_text(
             f64::from(d.y) + half,
         );
         scene.fill(transform, paint(d.brush), &bar);
+    }
+    for area in &layout.links {
+        if let pb_core::Link::Url(url) = &area.link {
+            let rect = Rect::new(area.x0, area.y0, area.x1, area.y1);
+            scene.link(transform, rect, url);
+        }
+    }
+}
+
+/// Links in text drawn in `text` color: a blue that stands out from it, light on light
+/// text (as on a dark board or note) and dark on dark text.
+pub fn link_color(text: Color) -> Color {
+    let c = text.to_rgba8();
+    let luma = 0.299 * f64::from(c.r) + 0.587 * f64::from(c.g) + 0.114 * f64::from(c.b);
+    if luma > 150.0 {
+        Color::from_rgb8(0x7C, 0xB7, 0xFF)
+    } else {
+        Color::from_rgb8(0x1F, 0x63, 0xD6)
     }
 }
 
@@ -381,7 +402,7 @@ pub(crate) fn draw_object(
             let [site, title, description, url] = pb_core::Embed::boxes(b);
             let muted = Color::from_rgb8(0x6B, 0x72, 0x80);
             let plain = Spans::default();
-            let bold: Spans = Arc::new([pb_core::Span {
+            let bold = Spans::from_marks(vec![pb_core::Span {
                 start: 0,
                 end: embed.title.len(),
                 marks: pb_core::TextMarks {
@@ -502,9 +523,13 @@ pub(crate) fn draw_connector(
     if let Some((label, r)) = label {
         scene.pop_layer();
         let size = Label::FONT_SIZE;
-        let layout = text
-            .engine
-            .layout_aligned(&label.text, &[], size, None, TextAlign::Center);
+        let layout = text.engine.layout_aligned(
+            &label.text,
+            &Spans::default(),
+            size,
+            None,
+            TextAlign::Center,
+        );
         let c = r.center();
         let origin = (c.x - layout.width / 2.0, c.y - layout.height / 2.0);
         draw_text(scene, transform, origin, &layout, brush);

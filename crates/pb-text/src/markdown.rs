@@ -421,7 +421,7 @@ pub fn layout(engine: &mut TextEngine, source: &str, width: f64, size: f64) -> M
         } else {
             &block.spans[..]
         };
-        let text_layout = engine.layout_aligned(
+        let text_layout = engine.layout_marks(
             text,
             spans,
             text_size,

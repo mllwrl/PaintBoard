@@ -6,7 +6,7 @@
 
 use pb_core::{
     Card, Cell, Command, Doc, Document, Embed, FrameData, Kanban, KanbanPart, Label, MindMap,
-    MindMapPart, Node, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Span, Sticky, Style, Table,
+    MindMapPart, Node, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Spans, Sticky, Style, Table,
     Text, TextBox, TextMarks,
 };
 use pb_geom::kurbo::{Point, Rect, Size, Vec2};
@@ -150,7 +150,7 @@ pub struct TextEdit {
     style: Style,
     /// Text when editing started, to skip edits that change nothing.
     original: String,
-    original_spans: Vec<Span>,
+    original_spans: Spans,
     selecting: bool,
     /// Last input; the caret blinks from then on, starting shown.
     active_at: Instant,
@@ -205,7 +205,7 @@ impl TextEdit {
             rotation: 0.0,
             style: Doc::style(),
             original: text.to_owned(),
-            original_spans: Vec::new(),
+            original_spans: Spans::default(),
             selecting: false,
             active_at: Instant::now(),
             caret_drawn: false,
@@ -238,7 +238,7 @@ impl TextEdit {
                 ..Style::default()
             },
             original: String::new(),
-            original_spans: Vec::new(),
+            original_spans: Spans::default(),
             selecting: false,
             active_at: Instant::now(),
             caret_drawn: false,
@@ -257,14 +257,21 @@ impl TextEdit {
             bounds,
             shape: None,
         };
-        Self::fitted(engine, Target::New, ("", &[]), placement, 0.0, style)
+        Self::fitted(
+            engine,
+            Target::New,
+            ("", &Spans::default()),
+            placement,
+            0.0,
+            style,
+        )
     }
 
     /// Text fitted into a sticky note or shape; `placement` is [`Placement::Fitted`].
     fn fitted(
         engine: &mut TextEngine,
         target: Target,
-        (text, spans): (&str, &[Span]),
+        (text, spans): (&str, &Spans),
         placement: Placement,
         rotation: f64,
         style: Style,
@@ -279,7 +286,7 @@ impl TextEdit {
             rotation,
             style,
             original: text.to_owned(),
-            original_spans: spans.to_vec(),
+            original_spans: spans.clone(),
             selecting: false,
             active_at: Instant::now(),
             caret_drawn: false,
@@ -333,7 +340,7 @@ impl TextEdit {
                 rotation: data.rotation,
                 style: data.style,
                 original: text.text.to_string(),
-                original_spans: text.spans.to_vec(),
+                original_spans: text.spans.clone(),
                 selecting: false,
                 active_at: Instant::now(),
                 caret_drawn: false,
@@ -384,7 +391,7 @@ impl TextEdit {
                     rotation: 0.0,
                     style: data.style,
                     original: c.label.text.to_string(),
-                    original_spans: Vec::new(),
+                    original_spans: Spans::default(),
                     selecting: false,
                     active_at: Instant::now(),
                     caret_drawn: false,
@@ -406,7 +413,7 @@ impl TextEdit {
                 rotation: 0.0,
                 style: data.style,
                 original: frame.title.to_string(),
-                original_spans: Vec::new(),
+                original_spans: Spans::default(),
                 selecting: false,
                 active_at: Instant::now(),
                 caret_drawn: false,
@@ -437,7 +444,7 @@ impl TextEdit {
                 let mut this = Self::fitted(
                     engine,
                     target,
-                    (&embed.title, &[]),
+                    (&embed.title, &Spans::default()),
                     Placement::EmbedTitle {
                         bounds: data.bounds,
                     },
@@ -498,7 +505,7 @@ impl TextEdit {
             rotation: data.rotation,
             style: data.style,
             original: node.text.to_string(),
-            original_spans: node.spans.to_vec(),
+            original_spans: node.spans.clone(),
             selecting: false,
             active_at: Instant::now(),
             caret_drawn: false,
@@ -596,7 +603,7 @@ impl TextEdit {
         let text_layout = self.editor.layout(engine);
         let node = Node {
             text: self.editor.display_text().into(),
-            spans: self.editor.display_spans().into(),
+            spans: self.editor.display_spans(),
             text_size: pb_geom::kurbo::Size::new(
                 text_layout.width / scale,
                 text_layout.height / scale,
@@ -1309,7 +1316,7 @@ impl TextEdit {
         let frame = self.frame(engine);
         let bounds = self.object_bounds(engine);
         let text = display.into();
-        let spans: pb_core::Spans = self.editor.display_spans().into();
+        let spans = self.editor.display_spans();
         ObjectData {
             kind: match self.placement {
                 Placement::Free { .. } => ObjectKind::Text(Text {
@@ -1438,7 +1445,7 @@ impl TextEdit {
                 col: table.cols.get(col)?.id.clone(),
                 cell: Cell {
                     text: text.into(),
-                    spans: spans.into(),
+                    spans,
                 },
             });
         }
@@ -1493,7 +1500,7 @@ impl TextEdit {
             (self.target, self.placement, &self.kanban)
         {
             let unchanged = text == self.original && spans == self.original_spans;
-            let edited = edited_board(kanban, part, text.into(), spans.into());
+            let edited = edited_board(kanban, part, text.into(), spans.clone());
             return match part {
                 BoardPart::Card(_)
                     if self.new_card && edited.cards.last()?.text.trim().is_empty() =>
@@ -1519,7 +1526,7 @@ impl TextEdit {
             Target::Existing(_) if text == self.original && spans == self.original_spans => None,
             Target::Existing(id) if empty => Some(Command::Delete(vec![id])),
             Target::Existing(id) => Some(Command::SetText {
-                spans: spans.into(),
+                spans,
                 id,
                 text: text.into(),
                 bounds: self.object_bounds(engine),

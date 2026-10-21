@@ -39,7 +39,7 @@ pub use object::{
 };
 pub use pb_geom::ShapeKind;
 pub use reaction::Reaction;
-pub use rich::{Span, Spans, TextMarks};
+pub use rich::{LinkSpan, ListKind, ListMarker, Para, ParaStyle, Span, Spans, TextMarks};
 pub use table::{Cell, CellRange, Line, Merge, Table};
 pub use talktrack::Talktrack;
 pub use timer::Timer;

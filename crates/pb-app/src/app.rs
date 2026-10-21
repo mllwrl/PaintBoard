@@ -4101,7 +4101,7 @@ impl App {
             .iter()
             .map(|label| {
                 let layout = engine.layout(&label.text, label.size, None);
-                let spans: pb_core::Spans = std::sync::Arc::new([pb_core::Span {
+                let spans = pb_core::Spans::from_marks(vec![pb_core::Span {
                     start: 0,
                     end: label.text.len(),
                     marks: pb_core::TextMarks {

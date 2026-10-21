@@ -33,7 +33,9 @@ enum Op {
     Connect(usize, usize),
     Move(usize, i8, i8),
     Fill(usize, u8),
-    Text(usize, String),
+    /// New text, with paragraph `n` a list item when bit `n` is set (bit `n + 4` for a
+    /// numbered one) and a link over the first characters.
+    Text(usize, String, u8),
     Delete(usize),
     Group(usize, usize),
     Ungroup(usize),
@@ -51,7 +53,8 @@ fn op() -> impl Strategy<Value = Op> {
         1 => (any::<usize>(), any::<usize>()).prop_map(|(a, b)| Op::Connect(a, b)),
         3 => (any::<usize>(), any::<i8>(), any::<i8>()).prop_map(|(i, x, y)| Op::Move(i, x, y)),
         1 => (any::<usize>(), any::<u8>()).prop_map(|(i, c)| Op::Fill(i, c)),
-        1 => (any::<usize>(), "[a-z ]{0,8}").prop_map(|(i, t)| Op::Text(i, t)),
+        1 => (any::<usize>(), "[a-z \n]{0,8}", any::<u8>())
+            .prop_map(|(i, t, lists)| Op::Text(i, t, lists)),
         2 => any::<usize>().prop_map(Op::Delete),
         1 => (1..5u8, any::<i16>()).prop_map(|(n, x)| Op::CreateMany(n, x / 64)),
         3 => (any::<i16>(), any::<i16>(), 2..20u8).prop_map(|(x, y, n)| Op::Ink(x / 64, y / 64, n)),
@@ -189,12 +192,31 @@ fn apply(doc: &mut Document, op: &Op) {
                 ..StyleChange::default()
             },
         }),
-        Op::Text(i, text) => object(*i).and_then(|id| {
+        Op::Text(i, text, lists) => object(*i).and_then(|id| {
             let bounds = doc.get(id)?.data.bounds;
+            let paras = (0..4)
+                .filter(|n| lists & (1 << n) != 0)
+                .map(|n| crate::Para {
+                    index: n,
+                    style: crate::ParaStyle::list(
+                        if lists & (16 << n) != 0 {
+                            crate::ListKind::Number
+                        } else {
+                            crate::ListKind::Bullet
+                        },
+                        lists % 3,
+                    ),
+                })
+                .collect();
+            let links = vec![crate::LinkSpan {
+                start: 0,
+                end: usize::from(lists % 5),
+                marks: crate::Link::from_input("example.com"),
+            }];
             Some(Command::SetText {
                 id,
                 text: text.as_str().into(),
-                spans: Default::default(),
+                spans: crate::Spans::new(vec![], links, paras),
                 bounds,
             })
         }),

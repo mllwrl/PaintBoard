@@ -262,7 +262,7 @@ fn bold(text: &str) -> Spans {
     if text.is_empty() {
         return Spans::default();
     }
-    Arc::new([Span {
+    Spans::from_marks(vec![Span {
         start: 0,
         end: text.len(),
         marks: TextMarks {
