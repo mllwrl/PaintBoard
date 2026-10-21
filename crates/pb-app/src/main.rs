@@ -9,6 +9,7 @@ mod books;
 mod editing;
 mod export;
 mod i18n;
+mod my_templates;
 mod navigation;
 mod palette;
 mod pictures;

@@ -20,7 +20,7 @@ mod table;
 pub use arrange::{
     Align, Axis, ClusterBy, ClusterLabel, align, arrange_grid, cluster, color_name, distribute,
 };
-pub use clipboard::{Clipboard, duplicate};
+pub use clipboard::{Clipboard, copy_of, duplicate};
 pub use connect::Which;
 pub use crop::Crop;
 pub use handles::{Handle, rotation_knob};

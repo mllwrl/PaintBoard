@@ -231,6 +231,16 @@ pub enum Action {
     DownloadStored(std::path::PathBuf),
     /// Adds template `i` of `templates::TEMPLATES` in the middle of the view.
     InsertTemplate(usize),
+    /// Asks for a name to save the selection as a template under.
+    SaveAsTemplate,
+    /// Saves the selection as the user's template with this name.
+    SaveTemplate(String),
+    /// Closes the template name prompt.
+    CloseTemplatePrompt,
+    /// Adds the user's template `i` (of [`Model::my_templates`]) in the middle of the view.
+    InsertMyTemplate(usize),
+    /// Removes the user's template `i`.
+    RemoveMyTemplate(usize),
     /// Opens the window for making a diagram from text.
     OpenDiagram,
     /// Saves the board as it is now as a version with this name (blank: a numbered one).
@@ -564,6 +574,12 @@ pub struct Model<'a> {
     pub graph: Option<Option<String>>,
     /// The template gallery is open.
     pub show_templates: bool,
+    /// The user's own templates.
+    pub my_templates: &'a [crate::my_templates::MyTemplate],
+    /// The prompt for a template name is open.
+    pub naming_template: bool,
+    /// What went wrong with the user's templates last.
+    pub my_template_error: Option<&'a str>,
     /// The window of the boards kept in the browser (the web version's start screen).
     pub show_boards: bool,
     /// The dark theme is on.
@@ -977,6 +993,10 @@ pub struct Ui {
     timer_text: String,
     /// The board kept in the browser being renamed, and the name typed.
     renaming_board: Option<(std::path::PathBuf, String)>,
+    /// Name typed for a template to save.
+    template_name: String,
+    /// The user's template asked to be removed, waiting for a yes.
+    removing_template: Option<std::path::PathBuf>,
     /// What is typed in the sharing window.
     share_texts: ShareTexts,
     /// What is typed in plugins' panels, by plugin and field.
@@ -1027,6 +1047,8 @@ impl Ui {
             version_name: String::new(),
             timer_text: String::new(),
             renaming_board: None,
+            template_name: String::new(),
+            removing_template: None,
             share_texts: ShareTexts::default(),
             panel_values: std::collections::HashMap::new(),
             repaint_at: None,
@@ -1151,6 +1173,8 @@ impl Ui {
         let version_name = &mut self.version_name;
         let timer_text = &mut self.timer_text;
         let renaming_board = &mut self.renaming_board;
+        let template_name = &mut self.template_name;
+        let removing_template = &mut self.removing_template;
         let share_texts = &mut self.share_texts;
         let panel_values = &mut self.panel_values;
         let output = self.ctx.run_pass(input, |ctx| {
@@ -1264,7 +1288,12 @@ impl Ui {
                 None => *export_shown = false,
             }
             if model.show_templates {
-                templates_window(ctx, &mut actions);
+                templates_window(ctx, model, removing_template, &mut actions);
+            }
+            if model.naming_template {
+                template_name_window(ctx, model, template_name, &mut actions);
+            } else {
+                template_name.clear();
             }
             if model.show_boards {
                 boards_window(ctx, model, renaming_board, &mut actions);
@@ -3273,6 +3302,13 @@ fn selection_toolbar(
                     if ui.button(tr("Duplicate")).on_hover_text(tr("Ctrl+D")).clicked() {
                         actions.push(Action::Duplicate);
                     }
+                    if ui
+                        .button(tr("Template…"))
+                        .on_hover_text(tr("Save selection as template…"))
+                        .clicked()
+                    {
+                        actions.push(Action::SaveAsTemplate);
+                    }
                     if ui.button(tr("Delete")).on_hover_text(tr("Delete")).clicked() {
                         actions.push(Action::Delete);
                     }
@@ -3621,6 +3657,13 @@ fn context_menu(
                 item(ui, "Copy", "Ctrl+C", Action::Copy, true);
                 item(ui, "Paste", "Ctrl+V", Action::Paste, true);
                 item(ui, "Duplicate", "Ctrl+D", Action::Duplicate, true);
+                item(
+                    ui,
+                    "Save selection as template…",
+                    "",
+                    Action::SaveAsTemplate,
+                    true,
+                );
                 item(ui, "Delete", "Delete", Action::Delete, free);
                 ui.separator();
                 item(
@@ -4445,8 +4488,13 @@ fn presentation_bar(
         });
 }
 
-/// The template gallery: a card per template.
-fn templates_window(ctx: &Context, actions: &mut Vec<Action>) {
+/// The template gallery: a card per template, then the user's own.
+fn templates_window(
+    ctx: &Context,
+    model: &Model,
+    removing: &mut Option<std::path::PathBuf>,
+    actions: &mut Vec<Action>,
+) {
     let mut open = true;
     let shown = egui::Window::new(tr("Templates"))
         .open(&mut open)
@@ -4493,6 +4541,7 @@ fn templates_window(ctx: &Context, actions: &mut Vec<Action>) {
                                 }
                             }
                         });
+                    my_templates(ui, model, removing, actions);
                 });
         });
     if let Some(shown) = shown {
@@ -4505,6 +4554,108 @@ fn templates_window(ctx: &Context, actions: &mut Vec<Action>) {
     }
     if !open {
         actions.push(Action::ToggleTemplates);
+    }
+}
+
+/// The gallery's "My templates": the user's saved templates, to insert or remove.
+fn my_templates(
+    ui: &mut egui::Ui,
+    model: &Model,
+    removing: &mut Option<std::path::PathBuf>,
+    actions: &mut Vec<Action>,
+) {
+    ui.add_space(8.0);
+    ui.separator();
+    ui.label(RichText::new(tr("My templates")).strong());
+    if let Some(error) = model.my_template_error {
+        ui.colored_label(ui.visuals().error_fg_color, error);
+    }
+    if model.my_templates.is_empty() {
+        ui.label(
+            RichText::new(tr(
+                "None yet. Select objects and choose Save selection as template… in their right-click menu.",
+            ))
+            .weak(),
+        );
+        return;
+    }
+    egui::Grid::new("my templates")
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            for (i, template) in model.my_templates.iter().enumerate() {
+                let label = trf("{} ({} objects)", &[&template.name, &template.objects]);
+                if ui
+                    .add(Button::new(label).min_size(egui::vec2(300.0, 0.0)))
+                    .on_hover_text(tr("Insert in the middle of the view"))
+                    .clicked()
+                {
+                    actions.push(Action::InsertMyTemplate(i));
+                }
+                if removing.as_deref() == Some(template.path.as_path()) {
+                    ui.horizontal(|ui| {
+                        ui.label(tr("Delete this template?"));
+                        if ui.add(Button::new(tr("Yes")).small()).clicked() {
+                            actions.push(Action::RemoveMyTemplate(i));
+                            *removing = None;
+                        }
+                        if ui.add(Button::new(tr("No")).small()).clicked() {
+                            *removing = None;
+                        }
+                    });
+                } else if ui.add(Button::new(tr("Delete")).small()).clicked() {
+                    *removing = Some(template.path.clone());
+                }
+                ui.end_row();
+            }
+        });
+}
+
+/// Asks for the name to save the selection as a template under.
+fn template_name_window(
+    ctx: &Context,
+    model: &Model,
+    name: &mut String,
+    actions: &mut Vec<Action>,
+) {
+    let mut open = true;
+    egui::Window::new(tr("Save selection as template"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .order(Order::Foreground)
+        .anchor(Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            ui.label(tr("Template name"));
+            let id = Id::unique("template name");
+            let field = ui.add(egui::TextEdit::singleline(name).id(id).desired_width(260.0));
+            if !field.has_focus() && name.is_empty() {
+                field.request_focus();
+            }
+            if let Some(error) = model.my_template_error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
+            let replaces = model
+                .my_templates
+                .iter()
+                .any(|t| t.name.eq_ignore_ascii_case(name.trim()));
+            if replaces {
+                ui.label(RichText::new(tr("A template with this name will be replaced.")).weak());
+            }
+            let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.horizontal(|ui| {
+                let can = !name.trim().is_empty();
+                if (ui.add_enabled(can, Button::new(tr("Save"))).clicked() || enter) && can {
+                    actions.push(Action::SaveTemplate(name.trim().to_owned()));
+                }
+                if ui.button(tr("Cancel")).clicked()
+                    || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                {
+                    actions.push(Action::CloseTemplatePrompt);
+                }
+            });
+        });
+    if !open {
+        actions.push(Action::CloseTemplatePrompt);
     }
 }
 
@@ -5115,6 +5266,12 @@ fn palette_commands(can: PaletteCan) -> Vec<(&'static str, &'static str, Action,
         ("Find", "Ctrl+F", Action::OpenSearch, true),
         ("Present", "F5", Action::Present, can.present),
         ("Templates", "", Action::ToggleTemplates, edit),
+        (
+            "Save selection as template…",
+            "",
+            Action::SaveAsTemplate,
+            selected,
+        ),
         ("Share", "", Action::ToggleShare, true),
         ("Manage plugins…", "", Action::TogglePlugins, true),
         ("Keyboard shortcuts", "F1", Action::ToggleShortcuts, true),

@@ -1166,6 +1166,46 @@ const RU: &[(&str, &str)] = &[
         "Start, steps, a decision and the end, joined by arrows",
         "Начало, шаги, решение и конец, соединённые стрелками",
     ),
+    // The user's own templates.
+    ("My templates", "Мои шаблоны"),
+    (
+        "None yet. Select objects and choose Save selection as template… in their right-click menu.",
+        "Пока нет. Выделите объекты и выберите «Сохранить выделенное как шаблон…» в меню правой кнопки.",
+    ),
+    ("{} ({} objects)", "{} (объектов: {})"),
+    (
+        "Insert in the middle of the view",
+        "Вставить в середину вида",
+    ),
+    ("Delete this template?", "Удалить этот шаблон?"),
+    ("Yes", "Да"),
+    ("No", "Нет"),
+    (
+        "Save selection as template",
+        "Сохранить выделенное как шаблон",
+    ),
+    (
+        "Save selection as template…",
+        "Сохранить выделенное как шаблон…",
+    ),
+    ("Template…", "Шаблон…"),
+    ("Template name", "Название шаблона"),
+    (
+        "A template with this name will be replaced.",
+        "Шаблон с таким названием будет заменён.",
+    ),
+    (
+        "Could not save the template: {}",
+        "Не удалось сохранить шаблон: {}",
+    ),
+    (
+        "Could not open the template: {}",
+        "Не удалось открыть шаблон: {}",
+    ),
+    (
+        "Could not remove the template: {}",
+        "Не удалось удалить шаблон: {}",
+    ),
     // What the templates put on the board.
     ("Strengths", "Сильные стороны"),
     ("Weaknesses", "Слабые стороны"),

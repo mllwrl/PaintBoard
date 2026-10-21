@@ -28,21 +28,11 @@ impl Clipboard {
 
     /// Returns false if nothing was selected.
     pub fn copy(&mut self, doc: &Document, selection: &Selection) -> bool {
-        let items = in_z_order(doc, selection);
+        let (items, assets) = copy_of(doc, selection);
         if items.is_empty() {
             return false;
         }
-        self.assets = items
-            .iter()
-            .flat_map(Content::shapes)
-            .flat_map(|data| match data.kind {
-                // A book needs its PDF too, to turn pages.
-                ObjectKind::Image(image) => [Some(image.asset), image.book.map(|b| b.pdf)],
-                _ => [None, None],
-            })
-            .flatten()
-            .filter_map(|asset| doc.assets().get(asset).cloned())
-            .collect();
+        self.assets = assets;
         self.items = items;
         self.pastes = 0;
         true
@@ -70,6 +60,24 @@ impl Clipboard {
         };
         Some(Command::Create(offset(&self.items, delta)))
     }
+}
+
+/// The selection as copied: its objects back to front (with what selected frames hold),
+/// and the files its images need.
+pub fn copy_of(doc: &Document, selection: &Selection) -> (Vec<Content>, Vec<Arc<[u8]>>) {
+    let items = in_z_order(doc, selection);
+    let assets = items
+        .iter()
+        .flat_map(Content::shapes)
+        .flat_map(|data| match data.kind {
+            // A book needs its PDF too, to turn pages.
+            ObjectKind::Image(image) => [Some(image.asset), image.book.map(|b| b.pdf)],
+            _ => [None, None],
+        })
+        .flatten()
+        .filter_map(|asset| doc.assets().get(asset).cloned())
+        .collect();
+    (items, assets)
 }
 
 /// Copies of the selection next to the originals (Ctrl+D).

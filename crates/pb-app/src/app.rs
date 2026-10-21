@@ -256,6 +256,12 @@ pub struct App {
     show_shortcuts: bool,
     /// The template gallery is open.
     show_templates: bool,
+    /// The user's own templates, as last read from their folder.
+    my_templates: Vec<crate::my_templates::MyTemplate>,
+    /// The prompt for a name to save the selection as a template under is open.
+    naming_template: bool,
+    /// What went wrong with the user's templates last.
+    my_template_error: Option<String>,
     /// The boards kept in the browser are listed (the web version's start screen).
     show_boards: bool,
     /// Presenting the board frame by frame.
@@ -449,6 +455,9 @@ impl App {
             context_menu: None,
             show_shortcuts: false,
             show_templates: false,
+            my_templates: Vec::new(),
+            naming_template: false,
+            my_template_error: None,
             show_boards: false,
             presentation: None,
             focus_saved: None,
@@ -1137,6 +1146,9 @@ impl App {
                 has_selection: !self.tools.selection().is_empty(),
             }),
             show_templates: self.show_templates,
+            my_templates: &self.my_templates,
+            naming_template: self.naming_template,
+            my_template_error: self.my_template_error.as_deref(),
             show_boards: self.show_boards,
             focus: self.focus_saved.is_some(),
             laser: self.presentation.as_ref().is_some_and(|p| p.laser),
@@ -1981,7 +1993,35 @@ impl App {
             Action::StopPresenting => self.stop_presentation(),
             Action::ToggleFocus => self.toggle_focus(),
             Action::ToggleLaser => self.toggle_laser(),
-            Action::ToggleTemplates => self.show_templates = !self.show_templates,
+            Action::ToggleTemplates => {
+                self.show_templates = !self.show_templates;
+                if self.show_templates {
+                    self.my_templates = crate::my_templates::list();
+                    self.my_template_error = None;
+                }
+            }
+            Action::SaveAsTemplate => {
+                if !self.tools.selection().is_empty() {
+                    self.finish_editing();
+                    self.naming_template = true;
+                    self.my_template_error = None;
+                    self.my_templates = crate::my_templates::list();
+                }
+            }
+            Action::SaveTemplate(name) => self.save_template(&name),
+            Action::CloseTemplatePrompt => {
+                self.naming_template = false;
+                self.my_template_error = None;
+            }
+            Action::InsertMyTemplate(i) => self.insert_my_template(i),
+            Action::RemoveMyTemplate(i) => {
+                if let Some(template) = self.my_templates.get(i) {
+                    self.my_template_error = crate::my_templates::remove(&template.path)
+                        .err()
+                        .map(|err| trf("Could not remove the template: {}", &[&err]));
+                }
+                self.my_templates = crate::my_templates::list();
+            }
             Action::ToggleBoards => self.show_boards = !self.show_boards,
             #[cfg(target_arch = "wasm32")]
             Action::DownloadStored(path) => self.session.download_stored(&path, &self.document),
@@ -4121,6 +4161,69 @@ impl App {
             .flat_map(pb_core::Content::shapes)
             .map(|d| d.bounds)
             .reduce(|a, b| a.union(b));
+        self.apply(Command::Create(items));
+        if let Some(area) = area {
+            let room = self
+                .camera
+                .visible_world_rect(viewport)
+                .inset(-FRAME_MARGIN / self.camera.zoom());
+            if area.width() > room.width() || area.height() > room.height() {
+                self.camera.fit(area, viewport, FRAME_MARGIN);
+            }
+        }
+    }
+
+    /// Saves the selection, with its pictures, as the user's template `name`.
+    fn save_template(&mut self, name: &str) {
+        let (items, assets) = pb_tools::copy_of(&self.document, self.tools.selection());
+        if items.is_empty() {
+            self.naming_template = false;
+            return;
+        }
+        match crate::my_templates::save(name, &items, &assets) {
+            Ok(_) => {
+                self.naming_template = false;
+                self.my_template_error = None;
+                self.my_templates = crate::my_templates::list();
+            }
+            Err(err) => {
+                log::error!("saving template {name}: {err}");
+                self.my_template_error = Some(trf("Could not save the template: {}", &[&err]));
+            }
+        }
+    }
+
+    /// Adds the user's template `i` in the middle of the view as one undo step, selects
+    /// it, and shows all of it.
+    fn insert_my_template(&mut self, i: usize) {
+        let Some(template) = self.my_templates.get(i) else {
+            return;
+        };
+        let contents = match crate::my_templates::load(&template.path) {
+            Ok(contents) => contents,
+            Err(err) => {
+                log::error!("template {}: {err}", template.path.display());
+                self.my_template_error = Some(trf("Could not open the template: {}", &[&err]));
+                return;
+            }
+        };
+        self.show_templates = false;
+        self.finish_editing();
+        self.tools.set_active(ToolKind::Select);
+        let viewport = self.viewport();
+        let center = self.camera.visible_world_rect(viewport).center();
+        let items = crate::my_templates::around(&contents.items, center);
+        let area = items
+            .iter()
+            .flat_map(pb_core::Content::shapes)
+            .map(|d| d.frame().aabb())
+            .reduce(|a, b| a.union(b));
+        for bytes in contents.assets {
+            self.document.add_asset(bytes);
+        }
+        if items.is_empty() {
+            return;
+        }
         self.apply(Command::Create(items));
         if let Some(area) = area {
             let room = self
