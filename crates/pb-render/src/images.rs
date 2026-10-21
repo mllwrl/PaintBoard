@@ -437,6 +437,10 @@ mod pool {
         done: Vec<Done>,
         /// Decodes under way.
         running: usize,
+        /// Tickets of the decodes under way.
+        working: Vec<u64>,
+        /// Decodes under way that were cancelled: their results are thrown away.
+        cancelled: Vec<u64>,
         closed: bool,
     }
 
@@ -506,14 +510,21 @@ mod pool {
             }
         }
 
+        /// Stops the job of `ticket`: waiting, finished or under way.
         pub fn cancel(&self, ticket: u64) {
-            self.queue().jobs.retain(|j| j.ticket != ticket);
+            let mut queue = self.queue();
+            queue.jobs.retain(|j| j.ticket != ticket);
+            queue.done.retain(|(_, t, _)| *t != ticket);
+            if queue.working.contains(&ticket) {
+                queue.cancelled.push(ticket);
+            }
         }
 
         pub fn cancel_all(&self) {
             let mut queue = self.queue();
             queue.jobs.clear();
             queue.done.clear();
+            queue.cancelled = queue.working.clone();
         }
 
         /// Finished decodes, and the waiting jobs dropped for not being wanted since
@@ -568,7 +579,9 @@ mod pool {
                         .map(|(i, _)| i);
                     if let Some(i) = next {
                         queue.running += 1;
-                        break queue.jobs.swap_remove(i);
+                        let job = queue.jobs.swap_remove(i);
+                        queue.working.push(job.ticket);
+                        break job;
                     }
                     queue = shared
                         .more
@@ -580,8 +593,14 @@ mod pool {
             {
                 let mut queue = lock();
                 queue.running -= 1;
+                queue.working.retain(|&t| t != job.ticket);
                 if queue.closed {
                     return;
+                }
+                let before = queue.cancelled.len();
+                queue.cancelled.retain(|&t| t != job.ticket);
+                if queue.cancelled.len() != before {
+                    continue;
                 }
                 queue.done.push((job.id, job.ticket, result));
             }
