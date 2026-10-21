@@ -25,7 +25,7 @@ jobs:
       - name: Check web target
         run: cargo check --workspace --target wasm32-unknown-unknown
 
-  # Without a GPU on the runner the snapshot tests in pb-render skip themselves.
+  # Runners have no real GPU, so the snapshot tests in pb-render skip themselves on CI.
   linux:
     runs-on: ubuntu-latest
     steps:

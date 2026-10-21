@@ -307,10 +307,24 @@ fn check(name: &str, rgba: Vec<u8>) -> Result<(), String> {
     Ok(())
 }
 
+/// The GPU to draw with, or `None` to skip. CI runners have no real GPU: Linux has none at
+/// all, and the software adapters on the Windows and macOS runners crash or draw a little
+/// differently, so on CI these tests run only with `PB_GPU_TESTS=1`.
+fn gpu() -> Option<Offscreen> {
+    if std::env::var_os("CI").is_some() && std::env::var_os("PB_GPU_TESTS").is_none() {
+        eprintln!("on CI: snapshot tests skipped (PB_GPU_TESTS=1 runs them)");
+        return None;
+    }
+    let gpu = pollster::block_on(Offscreen::new());
+    if gpu.is_none() {
+        eprintln!("no GPU found: snapshot tests skipped");
+    }
+    gpu
+}
+
 #[test]
 fn sample_boards_look_as_kept() {
-    let Some(mut gpu) = pollster::block_on(Offscreen::new()) else {
-        eprintln!("no GPU found: snapshot tests skipped");
+    let Some(mut gpu) = gpu() else {
         return;
     };
     let (light, dark) = (Theme::light(), Theme::dark());
@@ -332,8 +346,7 @@ fn sample_boards_look_as_kept() {
 /// big photos at full size would not fit, and some would silently be missing.
 #[test]
 fn many_big_photos_all_show() {
-    let Some(mut gpu) = pollster::block_on(Offscreen::new()) else {
-        eprintln!("no GPU found: snapshot tests skipped");
+    let Some(mut gpu) = gpu() else {
         return;
     };
     let mut doc = Document::new();
