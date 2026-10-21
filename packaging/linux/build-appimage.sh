@@ -59,7 +59,8 @@ rm "$app/install.sh" "$app/THIRD-PARTY.txt"
 # The AppImage.
 tool="${APPIMAGETOOL:-}"
 if [ -z "$tool" ]; then
-    tool="$out/appimagetool-$arch.AppImage"
+    # Kept beside target/linux, not in it: everything there goes into the release.
+    tool="$root/target/appimagetool-$arch.AppImage"
     if [ ! -x "$tool" ]; then
         url="https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$arch.AppImage"
         if command -v curl >/dev/null; then curl -fsSL -o "$tool" "$url"; else wget -q -O "$tool" "$url"; fi

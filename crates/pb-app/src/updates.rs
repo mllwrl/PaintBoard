@@ -207,11 +207,13 @@ impl Os {
 pub fn asset_for(assets: &[Asset], os: Os) -> Option<&Asset> {
     assets.iter().find(|a| {
         let name = a.name.to_ascii_lowercase();
-        match os {
-            Os::Windows => name.ends_with("-setup.exe"),
-            Os::Linux => name.ends_with(".appimage"),
-            Os::Mac => name.ends_with(".dmg"),
-        }
+        // Only PaintBoard's own files (a release could carry a build tool too).
+        name.starts_with("paintboard-")
+            && match os {
+                Os::Windows => name.ends_with("-setup.exe"),
+                Os::Linux => name.ends_with(".appimage"),
+                Os::Mac => name.ends_with(".dmg"),
+            }
     })
 }
 
@@ -453,6 +455,8 @@ mod tests {
         "draft": false,
         "prerelease": false,
         "assets": [
+            {"name": "appimagetool-x86_64.AppImage", "size": 50,
+             "browser_download_url": "https://example.com/tool.AppImage"},
             {"name": "PaintBoard-0.3.0-x86_64.AppImage", "size": 900,
              "browser_download_url": "https://example.com/a.AppImage"},
             {"name": "PaintBoard-0.3.0-setup.exe", "size": 1234,
@@ -470,12 +474,13 @@ mod tests {
         let release = parse_release(ANSWER).unwrap().unwrap();
         assert_eq!(release.version, v("0.3.0"));
         assert!(release.page.ends_with("/tag/v0.3.0"));
-        assert_eq!(release.assets.len(), 4);
+        assert_eq!(release.assets.len(), 5);
         let setup = asset_for(&release.assets, Os::Windows).unwrap();
         assert_eq!(setup.size, 1234);
         assert_eq!(setup.url, "https://example.com/setup.exe");
         let linux = asset_for(&release.assets, Os::Linux).unwrap();
-        assert!(linux.name.ends_with(".AppImage"));
+        // PaintBoard's own, not the build tool listed before it.
+        assert_eq!(linux.name, "PaintBoard-0.3.0-x86_64.AppImage");
         assert!(
             asset_for(&release.assets, Os::Mac)
                 .unwrap()
