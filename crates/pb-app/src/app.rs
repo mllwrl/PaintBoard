@@ -245,6 +245,12 @@ pub struct App {
     show_resolved: bool,
     /// The object whose link target is being picked on the board, by clicking it.
     picking_link: Option<ObjectId>,
+    /// The format bar shows the field for the address of a link in the text edited.
+    text_link_open: bool,
+    /// The link in text under the mouse, and whether that text is being edited.
+    hover_link: Option<(Link, bool)>,
+    /// A link in text pressed on: it opens if the press ends there without a drag.
+    pressed_link: Option<(Link, Point)>,
     /// Searching the board, while the search bar is open.
     search: Option<Search>,
     /// Objects found for the command palette, while it is open.
@@ -449,6 +455,9 @@ impl App {
             thread_panel: None,
             show_resolved: false,
             picking_link: None,
+            text_link_open: false,
+            hover_link: None,
+            pressed_link: None,
             search: None,
             focus_search: false,
             palette: None,
@@ -1097,6 +1106,7 @@ impl App {
             snap: self.tools.snap_to_grid(),
             selection: self.selection_info(),
             text_format: self.text_format(),
+            link_tip: self.link_tip(),
             minimap: self.minimap(),
             tags: self.tag_counts(),
             fill_colors: self.fill_colors(),
@@ -1474,10 +1484,63 @@ impl App {
         let area = edit.frame(self.text.engine()).aabb();
         let a = self.camera.world_to_screen(area.origin());
         let b = self.camera.world_to_screen(Point::new(area.x1, area.y1));
+        let link = edit.text_link().map(|link| match link {
+            Link::Url(url) => url.to_string(),
+            Link::Object(id) => Link::anchor(id),
+        });
         Some(TextFormat {
             screen: pb_geom::kurbo::Rect::from_points(a, b),
             marks,
+            para: edit.para_style().unwrap_or_default(),
+            link,
+            link_open: self.text_link_open,
         })
+    }
+
+    /// The link in text at `screen` (logical pixels), and whether that text is being
+    /// edited.
+    fn text_link_at(&mut self, screen: Point) -> Option<(Link, bool)> {
+        let world = self.camera.screen_to_world(screen);
+        let zoom = self.camera.zoom();
+        let pointer = Pointer {
+            world,
+            ..self.pointer()?
+        };
+        let engine = self.text.engine();
+        if let Some(edit) = &mut self.editing
+            && edit.contains(engine, world, 0.0)
+        {
+            return edit.link_at(engine, world).map(|link| (link, true));
+        }
+        let id = self.tools.object_at(&self.document, pointer)?;
+        let object = self.document.get(id)?;
+        if !editing::has_text_links(&object.data.kind) || self.document.is_hidden(id) {
+            return None;
+        }
+        let mut edit = TextEdit::existing(engine, &self.document, id, Some(world), zoom)?;
+        edit.link_at(engine, world).map(|link| (link, false))
+    }
+
+    /// What the tip by the mouse says about the link in text under it.
+    fn link_tip(&self) -> Option<(Point, String)> {
+        let (link, edited) = self.hover_link.as_ref()?;
+        let at = self.navigation.cursor()?;
+        let to = match link {
+            Link::Url(url) => url.to_string(),
+            Link::Object(id) => match self.document.get(*id).and_then(|o| o.data.kind.text()) {
+                Some(text) if !text.trim().is_empty() => {
+                    let line = text.lines().next().unwrap_or_default();
+                    trf("Object on the board: {}", &[&line])
+                }
+                _ => tr("An object on the board").to_owned(),
+            },
+        };
+        let how = if *edited {
+            tr("Ctrl+click to open")
+        } else {
+            tr("Click to open")
+        };
+        Some((at, format!("{to}\n{how}")))
     }
 
     /// What the selection toolbar needs; nothing while a gesture is in progress.
@@ -2465,6 +2528,28 @@ impl App {
                     edit.set_mark_color(self.text.engine(), color);
                 }
             }
+            Action::ToggleList(kind) => {
+                if let Some(edit) = &mut self.editing {
+                    edit.toggle_list(self.text.engine(), kind);
+                }
+            }
+            Action::EditTextLink => {
+                self.text_link_open = !self.text_link_open && self.editing.is_some();
+            }
+            Action::CloseTextLink => self.text_link_open = false,
+            Action::SetTextLink(address) => {
+                self.text_link_open = false;
+                if let (Some(edit), Some(link)) = (&mut self.editing, Link::from_input(&address)) {
+                    edit.set_text_link(self.text.engine(), Some(link));
+                }
+            }
+            Action::RemoveTextLink => {
+                self.text_link_open = false;
+                if let Some(edit) = &mut self.editing {
+                    edit.set_text_link(self.text.engine(), None);
+                }
+            }
+            Action::FollowTextLink(link) => self.follow(&link),
         }
     }
 
@@ -2508,6 +2593,7 @@ impl App {
     /// Ends text editing or cropping, keeping the edit as one command.
     fn finish_editing(&mut self) {
         self.finish_crop(true);
+        self.text_link_open = false;
         let Some(edit) = self.editing.take() else {
             return;
         };
@@ -4891,6 +4977,16 @@ impl App {
             self.follow(&link);
             return true;
         }
+        // A click on a link in text opens it when the press ends without a drag; the
+        // press still selects, so the object can be dragged by its link too.
+        self.pressed_link = None;
+        if self.editing.is_none()
+            && self.tools.active() == ToolKind::Select
+            && !double
+            && let Some((link, false)) = self.text_link_at(screen)
+        {
+            self.pressed_link = Some((link, screen));
+        }
         if self.editing.is_none()
             && self.tools.active() == ToolKind::Select
             && let Some((id, step)) = self.page_turn_at(screen)
@@ -4909,6 +5005,13 @@ impl App {
         if let Some(edit) = &mut self.editing {
             let engine = self.text.engine();
             if edit.contains(engine, pointer.world, pad) {
+                // Ctrl+click opens a link in the text being typed in.
+                if pointer.ctrl
+                    && let Some(link) = edit.link_at(engine, pointer.world)
+                {
+                    self.defer(Action::FollowTextLink(link));
+                    return true;
+                }
                 edit.press(engine, pointer.world, pointer.shift, double);
                 return true;
             }
@@ -6067,6 +6170,12 @@ impl App {
     }
 
     fn cursor_icon(&mut self) -> CursorIcon {
+        // A hand over a link that a click opens (with Ctrl in the text being typed in).
+        if let Some((_, edited)) = &self.hover_link
+            && (!edited || self.navigation.modifiers().control_key())
+        {
+            return CursorIcon::Pointer;
+        }
         let over_text = match (&mut self.editing, self.navigation.cursor()) {
             (Some(edit), Some(cursor)) => {
                 let world = self.camera.screen_to_world(cursor);
@@ -7088,6 +7197,7 @@ impl App {
                         KeyOutcome::NextCard => self.next_card(),
                         KeyOutcome::Paste => self.read_clipboard(None),
                         KeyOutcome::NextNode { child } => self.next_node(child),
+                        KeyOutcome::EditLink => self.text_link_open = true,
                     }
                     true
                 } else {
@@ -7118,6 +7228,15 @@ impl App {
                     (Some(edit), Some(p)) => edit.drag(self.text.engine(), p.world),
                     _ => false,
                 };
+                // Links in text show where they go, unless something is being dragged.
+                let hover = match self.navigation.cursor() {
+                    Some(at) if !over_ui && !text_drag && !self.tools.is_busy() => {
+                        self.text_link_at(at)
+                    }
+                    _ => None,
+                };
+                let hover_changed = hover != self.hover_link;
+                self.hover_link = hover;
                 let text_drag = text_drag
                     || match (&mut self.cropping, pointer) {
                         (Some(crop), Some(p)) if crop.is_dragging() => {
@@ -7134,7 +7253,8 @@ impl App {
                     self.pointer()
                         .is_some_and(|p| self.tools.pointer_move(&self.document, p))
                 };
-                panned || tool_changed
+                // The link's tip follows the mouse.
+                panned || tool_changed || hover_changed || self.hover_link.is_some()
             }
             WindowEvent::CursorLeft { .. } => {
                 self.navigation.cursor_left();
@@ -7169,6 +7289,14 @@ impl App {
                     if !consumed && left && state == ElementState::Released {
                         if let Some(edit) = &mut self.editing {
                             edit.release();
+                        }
+                        if let Some((link, at)) = self.pressed_link.take()
+                            && self
+                                .navigation
+                                .cursor()
+                                .is_some_and(|c| (c - at).hypot() <= DOUBLE_CLICK_DISTANCE)
+                        {
+                            self.defer(Action::FollowTextLink(link));
                         }
                         if let Some(crop) = &mut self.cropping {
                             crop.release();

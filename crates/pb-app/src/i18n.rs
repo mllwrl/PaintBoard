@@ -995,6 +995,46 @@ const RU: &[(&str, &str)] = &[
     ("Text color of the object", "Цвет текста объекта"),
     ("Text color", "Цвет текста"),
     ("None", "Нет"),
+    (
+        "Bulleted list (Ctrl+Shift+8)",
+        "Маркированный список (Ctrl+Shift+8)",
+    ),
+    (
+        "Numbered list (Ctrl+Shift+7)",
+        "Нумерованный список (Ctrl+Shift+7)",
+    ),
+    (
+        "Link the selected text to a page or object (Ctrl+K)",
+        "Ссылка из выделенного текста на страницу или объект (Ctrl+K)",
+    ),
+    (
+        "Keep the text, without the link",
+        "Оставить текст, убрать ссылку",
+    ),
+    ("Object on the board: {}", "Объект на доске: {}"),
+    ("An object on the board", "Объект на доске"),
+    ("Ctrl+click to open", "Ctrl+щелчок — открыть"),
+    ("Click to open", "Щелчок — открыть"),
+    (
+        "Bulleted / numbered list",
+        "Маркированный / нумерованный список",
+    ),
+    ("- or 1. and a space", "- или 1. и пробел"),
+    ("Start a list as you type", "Начать список прямо при наборе"),
+    ("Tab / Shift+Tab in a list", "Tab / Shift+Tab в списке"),
+    (
+        "Nest a list item deeper / less deep",
+        "Сдвинуть пункт списка глубже / выше по уровню",
+    ),
+    ("Enter on an empty item", "Enter на пустом пункте"),
+    ("End the list", "Закончить список"),
+    ("Ctrl+K while editing", "Ctrl+K при наборе текста"),
+    ("Link the selected text", "Сделать выделенный текст ссылкой"),
+    (
+        "Click, Ctrl+click while editing",
+        "Щелчок, Ctrl+щелчок при наборе",
+    ),
+    ("Open a link in text", "Открыть ссылку в тексте"),
     // Shortcuts.
     ("Tools", "Инструменты"),
     ("Select", "Выделение"),

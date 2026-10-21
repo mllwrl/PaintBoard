@@ -102,6 +102,8 @@ pub struct RichEditor {
     insert_marks: Option<TextMarks>,
     /// Styles of the text inserted next, when it is pasted from a copy made here.
     pasted: Option<Spans>,
+    /// Where moving up or down a line keeps the cursor, from the left edge.
+    h_pos: Option<f32>,
     default_style: StyleSet<Brush>,
     selection: Selection,
     /// Byte offsets of IME composing preedit text in the text buffer.
@@ -137,6 +139,7 @@ impl RichEditor {
             spans: Spans::default(),
             insert_marks: None,
             pasted: None,
+            h_pos: None,
             layout: Layout::default(),
             selection: Selection::default(),
             compose: None,
@@ -500,19 +503,51 @@ impl RichEditorDriver<'_> {
 
     /// Move up to the closest physical cluster boundary on the previous line, preserving the horizontal position for repeated movements.
     pub fn move_up(&mut self) {
+        self.move_lines(-1, false);
+    }
+
+    /// Moves the focus `delta` lines up or down, keeping its distance from the left edge
+    /// for repeated moves. Like parley's own, except that indented lines (list items)
+    /// count from where they start.
+    fn move_lines(&mut self, delta: isize, extend: bool) {
         self.refresh_layout();
-        self.editor.set_selection(
-            self.editor
-                .selection
-                .previous_line(&self.editor.layout, false),
-        );
+        let editor = &mut *self.editor;
+        let layout = &editor.layout;
+        let caret = editor.indented(editor.selection.focus().geometry(layout, 0.0));
+        let y = ((caret.y0 + caret.y1) / 2.0) as f32;
+        let lines: Vec<(f32, f32)> = layout
+            .lines()
+            .map(|l| (l.metrics().block_min_coord, l.metrics().block_max_coord))
+            .collect();
+        let at = lines.iter().position(|&(y0, y1)| y >= y0 && y <= y1);
+        let target = at
+            .and_then(|i| i.checked_add_signed(delta))
+            .filter(|&i| i < lines.len());
+        let Some(target) = target else {
+            // Past the first or last line: to the start or end, as parley does.
+            let moved = if delta < 0 {
+                editor.selection.previous_line(layout, extend)
+            } else {
+                editor.selection.next_line(layout, extend)
+            };
+            editor.set_selection(moved);
+            return;
+        };
+        let x = editor.h_pos.unwrap_or(caret.x0 as f32);
+        let (y0, y1) = lines[target];
+        let focus = Cursor::from_point(layout, x, (y0 + y1) / 2.0);
+        let moved = if extend {
+            editor.selection.extend(focus)
+        } else {
+            focus.into()
+        };
+        editor.set_selection(moved);
+        editor.h_pos = Some(x);
     }
 
     /// Move down to the closest physical cluster boundary on the next line, preserving the horizontal position for repeated movements.
     pub fn move_down(&mut self) {
-        self.refresh_layout();
-        self.editor
-            .set_selection(self.editor.selection.next_line(&self.editor.layout, false));
+        self.move_lines(1, false);
     }
 
     /// Move to the next cluster left in visual order.
@@ -625,19 +660,12 @@ impl RichEditorDriver<'_> {
 
     /// Move the selection focus point up to the nearest cluster boundary on the previous line, preserving the horizontal position for repeated movements.
     pub fn select_up(&mut self) {
-        self.refresh_layout();
-        self.editor.set_selection(
-            self.editor
-                .selection
-                .previous_line(&self.editor.layout, true),
-        );
+        self.move_lines(-1, true);
     }
 
     /// Move the selection focus point down to the nearest cluster boundary on the next line, preserving the horizontal position for repeated movements.
     pub fn select_down(&mut self) {
-        self.refresh_layout();
-        self.editor
-            .set_selection(self.editor.selection.next_line(&self.editor.layout, true));
+        self.move_lines(1, true);
     }
 
     /// Move the selection focus point to the next cluster left in visual order.
@@ -858,7 +886,23 @@ impl RichEditor {
     /// hidden.
     pub fn cursor_geometry(&self, size: f32) -> Option<BoundingBox> {
         self.show_cursor
-            .then(|| self.selection.focus().geometry(&self.layout, size))
+            .then(|| self.indented(self.selection.focus().geometry(&self.layout, size)))
+    }
+
+    /// `b`, a caret from parley, moved in by where its line starts: parley's caret leaves
+    /// that out, though hit testing and selections count it (list items start indented).
+    fn indented(&self, mut b: BoundingBox) -> BoundingBox {
+        let y = ((b.y0 + b.y1) / 2.0) as f32;
+        let line = self.layout.lines().find(|line| {
+            let m = line.metrics();
+            y >= m.block_min_coord && y <= m.block_max_coord
+        });
+        if let Some(line) = line {
+            let dx = f64::from(line.metrics().inline_min_coord);
+            b.x0 += dx;
+            b.x1 += dx;
+        }
+        b
     }
 
     /// Get a rectangle bounding the text the user is currently editing.
@@ -881,12 +925,12 @@ impl RichEditor {
             });
 
             (
-                area.unwrap_or_else(|| selection.focus().geometry(&self.layout, 0.)),
+                area.unwrap_or_else(|| self.indented(selection.focus().geometry(&self.layout, 0.))),
                 selection.focus(),
             )
         } else {
             // Bound the selected parts of the focused line only.
-            let focus = self.selection.focus().geometry(&self.layout, 0.);
+            let focus = self.indented(self.selection.focus().geometry(&self.layout, 0.));
             let mut area = focus;
             self.selection.geometry_with(&self.layout, |rect, _| {
                 if rect.y0 == focus.y0 {
@@ -1211,6 +1255,7 @@ impl RichEditor {
         {
             self.generation.nudge();
         }
+        self.h_pos = None;
 
         // This debug code is quite useful when diagnosing selection problems.
         #[cfg(any())]

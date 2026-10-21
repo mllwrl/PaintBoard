@@ -376,6 +376,12 @@ pub(crate) fn break_lines(layout: &mut Layout<Brush>, max_width: Option<f32>, in
         match lines.break_next() {
             None => break,
             Some(YieldData::LineBreak(data)) => {
+                // List items line up at their indent whatever the alignment: their line is
+                // only as wide as its text, so centering or right-aligning leaves it be.
+                if indent > 0.0 {
+                    let m = data.metrics;
+                    lines.set_prior_line_width(m.advance - m.hanging_advance);
+                }
                 if data.reason == BreakReason::Explicit {
                     paragraph += 1;
                 }
@@ -677,6 +683,28 @@ mod tests {
                 assert!(one.runs.iter().flat_map(|r| &r.glyphs).all(|g| g.id != 0));
             }
         }
+    }
+
+    #[test]
+    fn list_items_stay_at_their_indent_in_centered_text() {
+        use pb_core::ListKind::Bullet;
+        let mut engine = TextEngine::new();
+        let spans = list(&[(1, Bullet, 0)]);
+        let layout =
+            engine.layout_aligned("title\nitem", &spans, 20.0, Some(300.0), TextAlign::Center);
+        let first_x = |y_min: f32| {
+            layout
+                .runs
+                .iter()
+                .flat_map(|r| &r.glyphs)
+                .filter(|g| g.y > y_min && g.x > 25.0)
+                .map(|g| g.x)
+                .fold(f32::MAX, f32::min)
+        };
+        // The title is centered, the item starts at the indent.
+        let title = layout.runs[0].glyphs[0].x;
+        assert!(title > 100.0, "{title}");
+        assert!((first_x(25.0) - 20.0 * LIST_INDENT).abs() < 1.0);
     }
 
     #[test]

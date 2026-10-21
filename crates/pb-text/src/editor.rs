@@ -1087,6 +1087,20 @@ mod tests {
         // Lists change the layout as shown, and it matches the editor's.
         let shown = engine.layout_aligned(&ed.text(), &ed.spans(), 20.0, None, TextAlign::Start);
         assert_eq!(ed.layout(&mut engine), shown);
+        // The caret at the start of an item is where its text starts, past the marker.
+        ed.motion(&mut engine, Motion::TextStart, false);
+        let caret = ed.caret(&mut engine).unwrap();
+        let first = shown.runs[0].glyphs[0].x;
+        assert!(
+            (caret.x0 - f64::from(first)).abs() < 2.0,
+            "{caret:?} vs {first}"
+        );
+        // Down a line keeps to the same place in the next item.
+        ed.motion(&mut engine, Motion::Down, false);
+        let below = ed.caret(&mut engine).unwrap();
+        assert!((below.x0 - caret.x0).abs() < 2.0 && below.y0 > caret.y0);
+        ed.insert(&mut engine, "^");
+        assert_eq!(ed.text(), "a\n^b\nc");
     }
 
     #[test]

@@ -10,8 +10,8 @@ use egui::{
     Order, Painter, Pos2, Rect, Response, RichText, Sense, Shadow, Shape, Slider, Stroke, Vec2,
 };
 use pb_core::{
-    Cap, Connector, ConnectorChange, HAlign, ObjectId, Rgba, Route, ShapeKind, Style, StyleChange,
-    TextMarks, VAlign, ZOrder,
+    Cap, Connector, ConnectorChange, HAlign, ListKind, ObjectId, ParaStyle, Rgba, Route, ShapeKind,
+    Style, StyleChange, TextMarks, VAlign, ZOrder,
 };
 use pb_geom::kurbo::{self, PathEl};
 use pb_platform::Instant;
@@ -158,6 +158,18 @@ pub enum Action {
     ToggleMark(Mark),
     /// Colors the selected part of the text being edited; `None` for the object's color.
     MarkColor(Option<Rgba>),
+    /// Makes the paragraphs of the text being edited list items of a kind, or plain.
+    ToggleList(ListKind),
+    /// Shows or hides the field for the address of a link in the text being edited.
+    EditTextLink,
+    /// Hides that field.
+    CloseTextLink,
+    /// Links the selected text to a typed or pasted address or anchor.
+    SetTextLink(String),
+    /// Unlinks the selected text, or the link at the cursor.
+    RemoveTextLink,
+    /// Opens a link clicked in text.
+    FollowTextLink(pb_core::Link),
     /// Shows or hides the minimap.
     ToggleMinimap,
     /// Hides or shows one of the panels around the board.
@@ -532,6 +544,9 @@ pub struct Model<'a> {
     pub selection: Option<SelectionInfo>,
     /// Styles of the text being edited, if it takes them.
     pub text_format: Option<TextFormat>,
+    /// A link in text under the mouse: where the mouse is (window, logical pixels) and
+    /// what to say about it.
+    pub link_tip: Option<(kurbo::Point, String)>,
     /// The board in small; `None` when hidden.
     pub minimap: Option<Minimap>,
     /// The board's tags with how many objects carry each, by name.
@@ -763,6 +778,12 @@ pub struct TextFormat {
     pub screen: kurbo::Rect,
     /// Marks of the selection, or of what is typed next.
     pub marks: TextMarks,
+    /// The style of the paragraph with the cursor.
+    pub para: ParaStyle,
+    /// The address of the link at the selection or cursor, as it can be typed.
+    pub link: Option<String>,
+    /// The field for a link's address is shown.
+    pub link_open: bool,
 }
 
 /// Text colors offered while editing; the default color comes first.
@@ -978,6 +999,8 @@ pub struct Ui {
     new_tag: String,
     /// Address typed for a link.
     link_text: String,
+    /// Address typed for a link in text being edited, while its field shows.
+    text_link: Option<String>,
     /// Text typed into the search bar.
     search_text: String,
     /// What is typed in the command palette, and what it remembers.
@@ -1036,6 +1059,7 @@ impl Ui {
             popup: None,
             new_tag: String::new(),
             link_text: String::new(),
+            text_link: None,
             search_text: String::new(),
             palette: PaletteState {
                 recent: crate::settings::palette_recent(),
@@ -1169,6 +1193,7 @@ impl Ui {
         let popup = &mut self.popup;
         let new_tag = &mut self.new_tag;
         let link_text = &mut self.link_text;
+        let text_link = &mut self.text_link;
         let search_text = &mut self.search_text;
         let palette = &mut self.palette;
         let diagram_text = &mut self.diagram_text;
@@ -1253,8 +1278,12 @@ impl Ui {
             } else {
                 *popup = None;
             }
-            if let Some(format) = &model.text_format {
-                format_bar(ctx, format, &mut actions);
+            match &model.text_format {
+                Some(format) => format_bar(ctx, format, text_link, &mut actions),
+                None => *text_link = None,
+            }
+            if let Some((at, tip)) = &model.link_tip {
+                link_tip(ctx, *at, tip);
             }
             match model.search {
                 Some(info) => search_bar(ctx, info, search_text, &mut actions),
@@ -4976,6 +5005,15 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Tab / Shift+Tab", "Next sticky note, cell or card"),
             ("Ctrl+B / I / U", "Bold / italic / underline"),
             ("Ctrl+Shift+X", "Strikethrough"),
+            ("Ctrl+Shift+8 / 7", "Bulleted / numbered list"),
+            ("- or 1. and a space", "Start a list as you type"),
+            (
+                "Tab / Shift+Tab in a list",
+                "Nest a list item deeper / less deep",
+            ),
+            ("Enter on an empty item", "End the list"),
+            ("Ctrl+K while editing", "Link the selected text"),
+            ("Click, Ctrl+click while editing", "Open a link in text"),
             ("Esc", "Stop editing"),
         ],
     ),
@@ -5659,8 +5697,29 @@ fn tag_dot(ui: &mut egui::Ui, color: Rgba) -> Response {
     response
 }
 
-/// Bold, italic, underline, strikethrough and colors for the text being edited, above it.
-fn format_bar(ctx: &Context, format: &TextFormat, actions: &mut Vec<Action>) {
+/// What a link in text under the mouse goes to, beside the mouse.
+fn link_tip(ctx: &Context, at: kurbo::Point, tip: &str) {
+    let p = to_points(kurbo::Rect::from_origin_size(at, (0.0, 0.0)));
+    Area::new(Id::unique("link tip"))
+        .fixed_pos(Pos2::new(p.x0 as f32 + 14.0, p.y0 as f32 + 18.0))
+        .order(Order::Tooltip)
+        .interactable(false)
+        .show(ctx, |ui| {
+            panel().show(ui, |ui| {
+                ui.set_max_width(360.0);
+                ui.label(tip);
+            });
+        });
+}
+
+/// Bold, italic, underline, strikethrough, colors, lists and links for the text being
+/// edited, above it; with the field for a link's address under them when it is open.
+fn format_bar(
+    ctx: &Context,
+    format: &TextFormat,
+    text_link: &mut Option<String>,
+    actions: &mut Vec<Action>,
+) {
     let r = to_points(format.screen);
     let (anchor, pivot) = if (r.y0 as f32) - SELECTION_GAP > 90.0 {
         (
@@ -5710,7 +5769,11 @@ fn format_bar(ctx: &Context, format: &TextFormat, actions: &mut Vec<Action>) {
                         ),
                     ];
                     for (mark, on, label, tip) in marks {
-                        if ui.selectable_label(on, label).on_hover_text(tip).clicked() {
+                        if ui
+                            .selectable_label(on, label)
+                            .on_hover_text(tr(tip))
+                            .clicked()
+                        {
                             actions.push(Action::ToggleMark(mark));
                         }
                     }
@@ -5738,6 +5801,60 @@ fn format_bar(ctx: &Context, format: &TextFormat, actions: &mut Vec<Action>) {
                         if response.on_hover_text(tip).clicked() {
                             actions.push(Action::MarkColor(color));
                         }
+                    }
+                    ui.separator();
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let lists = [
+                        (ListKind::Bullet, "•", tr("Bulleted list (Ctrl+Shift+8)")),
+                        (ListKind::Number, "1.", tr("Numbered list (Ctrl+Shift+7)")),
+                    ];
+                    for (kind, label, tip) in lists {
+                        let on = format.para.list == Some(kind);
+                        if ui.selectable_label(on, label).on_hover_text(tip).clicked() {
+                            actions.push(Action::ToggleList(kind));
+                        }
+                    }
+                    let linked = format.link.is_some() || format.link_open;
+                    if ui
+                        .selectable_label(linked, tr("Link"))
+                        .on_hover_text(tr("Link the selected text to a page or object (Ctrl+K)"))
+                        .clicked()
+                    {
+                        actions.push(Action::EditTextLink);
+                    }
+                });
+                if !format.link_open {
+                    *text_link = None;
+                    return;
+                }
+                let first = text_link.is_none();
+                let typed =
+                    text_link.get_or_insert_with(|| format.link.clone().unwrap_or_default());
+                ui.horizontal(|ui| {
+                    let field = ui.add(
+                        egui::TextEdit::singleline(typed)
+                            .hint_text(tr("Web address or copied object link"))
+                            .desired_width(240.0),
+                    );
+                    if first {
+                        field.request_focus();
+                    }
+                    let valid = pb_core::Link::from_input(typed).is_some();
+                    let entered =
+                        field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                    let set = ui.add_enabled(valid, Button::new(tr("Set")));
+                    if valid && (entered || set.clicked()) {
+                        actions.push(Action::SetTextLink(std::mem::take(typed)));
+                    } else if format.link.is_some()
+                        && ui
+                            .button(tr("Remove"))
+                            .on_hover_text(tr("Keep the text, without the link"))
+                            .clicked()
+                    {
+                        actions.push(Action::RemoveTextLink);
+                    } else if escaped {
+                        actions.push(Action::CloseTextLink);
                     }
                 });
             });
