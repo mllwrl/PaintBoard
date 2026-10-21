@@ -119,6 +119,11 @@ await paintboard.board.ungroup(group);
 
 A connector's `text` is its label, in `create` and `update` alike.
 
+Stickies, shapes and text objects with lists in their text also have `paragraphs` (each
+paragraph's `text`, `list` — `"bullet"`, `"number"` or `null` — and nesting `level`), and
+those with links in their text have `links` (the linked `text` and its `link`, an address
+or an object id). Both are read only: setting `text` replaces the text with plain text.
+
 ## Sounds and waiting
 
 `paintboard.ui.playSound(name)` plays one of the built-in sounds: `"chime"`, `"beep"`,

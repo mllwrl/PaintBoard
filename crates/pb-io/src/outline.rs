@@ -1,12 +1,14 @@
 //! The board's text as Markdown, and tables as CSV.
 
-use pb_core::{Link, Object, ObjectKind, Table};
+use pb_core::rich::{self, ListKind};
+use pb_core::{Link, Object, ObjectKind, Spans, Table};
 
 /// Markdown for `objects`, under the heading `title`: frames become second-level
 /// headings with what lies in them, everything in reading order (top to bottom, then left
 /// to right). Text, notes and shapes are list items, tables are Markdown tables, kanban
 /// columns small headings with their cards, mind maps nested lists, and Markdown documents
-/// are copied as they are. Pictures, drawings and lines are left out.
+/// are copied as they are. Lists in text become nested lists, links in it `[text](url)`.
+/// Pictures, drawings and lines are left out.
 pub fn markdown(title: &str, objects: &[&Object]) -> String {
     let mut frames: Vec<&Object> = objects
         .iter()
@@ -102,7 +104,8 @@ fn write_objects(out: &mut Blocks, mut objects: Vec<&Object>) {
                 for (col, column) in kanban.columns.iter().enumerate() {
                     out.push(format!("### {}", one_line(&column.title)));
                     for i in kanban.cards_in(col) {
-                        out.item(list_item(&kanban.cards[i].text, 0));
+                        let card = &kanban.cards[i];
+                        out.item(list_item(&card.text, &card.spans, 0));
                     }
                 }
             }
@@ -110,7 +113,8 @@ fn write_objects(out: &mut Blocks, mut objects: Vec<&Object>) {
                 if let Some(root) = map.root() {
                     let mut stack = vec![(root, 0)];
                     while let Some((i, depth)) = stack.pop() {
-                        out.item(list_item(&map.nodes[i].text, depth));
+                        let node = &map.nodes[i];
+                        out.item(list_item(&node.text, &node.spans, depth));
                         let children = map.children(i);
                         stack.extend(children.into_iter().rev().map(|c| (c, depth + 1)));
                     }
@@ -128,9 +132,11 @@ fn write_objects(out: &mut Blocks, mut objects: Vec<&Object>) {
                 let Some(text) = kind.text().filter(|t| !t.trim().is_empty()) else {
                     continue;
                 };
+                let plain = Spans::default();
+                let spans = kind.rich().unwrap_or(&plain);
                 match link {
                     Some(url) => out.item(format!("- [{}]({url})", one_line(text))),
-                    None => out.item(list_item(text, 0)),
+                    None => out.item(list_item(text, spans, 0)),
                 }
             }
         }
@@ -138,14 +144,88 @@ fn write_objects(out: &mut Blocks, mut objects: Vec<&Object>) {
 }
 
 /// A list item `depth` levels in; lines after the first are indented to stay in it.
-fn list_item(text: &str, depth: usize) -> String {
+fn list_item(text: &str, spans: &Spans, depth: usize) -> String {
     let indent = "  ".repeat(depth);
-    let mut lines = text.trim().lines();
-    let mut item = format!("{indent}- {}", lines.next().unwrap_or_default());
+    let lines = rich_lines(text, spans);
+    let mut lines = lines.iter();
+    let mut item = format!("{indent}- {}", lines.next().map_or("", |l| l.as_str()));
     for line in lines {
         item.push_str(&format!("\n{indent}  {line}"));
     }
     item
+}
+
+/// The paragraphs of `text` as Markdown lines: list items start with `- ` or `1. `
+/// (indented by their level) and links are `[text](url)`. Blank paragraphs at the ends
+/// are left out.
+pub fn rich_lines(text: &str, spans: &Spans) -> Vec<String> {
+    let ranges = rich::paragraph_ranges(text);
+    let markers = rich::list_markers(&spans.paras, ranges.len());
+    let mut lines: Vec<(bool, String)> = ranges
+        .iter()
+        .zip(markers)
+        .map(|(range, marker)| {
+            let body = linked(text, range.clone(), spans);
+            match marker {
+                Some(m) => {
+                    let indent = "   ".repeat(usize::from(m.level));
+                    let start = match m.kind {
+                        ListKind::Bullet => "-".to_owned(),
+                        ListKind::Number => format!("{}.", m.number),
+                    };
+                    (true, format!("{indent}{start} {}", body.trim()))
+                }
+                None => (false, body.trim_end().to_owned()),
+            }
+        })
+        .collect();
+    while lines
+        .last()
+        .is_some_and(|(list, l)| !list && l.trim().is_empty())
+    {
+        lines.pop();
+    }
+    let first = lines
+        .iter()
+        .position(|(list, l)| *list || !l.trim().is_empty())
+        .unwrap_or(lines.len());
+    lines
+        .drain(first..)
+        .enumerate()
+        .map(|(i, (_, line))| {
+            if i == 0 {
+                line.trim_start().to_owned()
+            } else {
+                line
+            }
+        })
+        .collect()
+}
+
+/// Bytes `range` of `text` with its web links written as Markdown links.
+fn linked(text: &str, range: std::ops::Range<usize>, spans: &Spans) -> String {
+    let mut out = String::new();
+    let mut at = range.start;
+    for span in spans.links.iter() {
+        let (start, end) = (span.start.max(range.start), span.end.min(range.end));
+        let Some(Link::Url(url)) = &span.marks else {
+            continue;
+        };
+        if start >= end || start < at {
+            continue;
+        }
+        out += &text[at..start];
+        let shown = text[start..end].replace('[', "\\[").replace(']', "\\]");
+        let url = if url.contains([' ', '(', ')']) {
+            format!("<{url}>")
+        } else {
+            url.to_string()
+        };
+        out += &format!("[{shown}]({url})");
+        at = end;
+    }
+    out += &text[at..range.end];
+    out
 }
 
 fn one_line(text: &str) -> String {
@@ -155,8 +235,8 @@ fn one_line(text: &str) -> String {
 /// A Markdown table; the first row is its header.
 fn markdown_table(table: &Table) -> String {
     let cell = |row: usize, col: usize| {
-        let text = table.text(row, col).0.trim();
-        text.replace('|', "\\|").replace('\n', "<br>")
+        let (text, spans) = table.text(row, col);
+        rich_lines(text, spans).join("<br>").replace('|', "\\|")
     };
     let line = |row: usize| {
         let cells: Vec<String> = (0..table.cols.len()).map(|col| cell(row, col)).collect();
@@ -205,6 +285,61 @@ mod tests {
             tags: Default::default(),
             link: None,
         }
+    }
+
+    #[test]
+    fn lists_and_links_in_text_become_markdown() {
+        use pb_core::{LinkSpan, ListKind, Para, ParaStyle};
+        let text = "Shopping:\nmilk\neggs\nbread\nsteps\none\ntwo\nsee example.com";
+        let para = |index, kind, level| Para {
+            index,
+            style: ParaStyle::list(kind, level),
+        };
+        let start = text.find("example.com").unwrap();
+        let spans = Spans::new(
+            vec![],
+            vec![LinkSpan {
+                start,
+                end: start + 11,
+                marks: Link::from_input("example.com"),
+            }],
+            vec![
+                para(1, ListKind::Bullet, 0),
+                para(2, ListKind::Bullet, 1),
+                para(3, ListKind::Bullet, 0),
+                para(5, ListKind::Number, 0),
+                para(6, ListKind::Number, 0),
+            ],
+        );
+        assert_eq!(
+            rich_lines(text, &spans),
+            [
+                "Shopping:",
+                "- milk",
+                "   - eggs",
+                "- bread",
+                "steps",
+                "1. one",
+                "2. two",
+                "see [example.com](https://example.com)",
+            ]
+        );
+        let mut doc = Document::new();
+        let kind = ObjectKind::Sticky(Sticky {
+            text: text.into(),
+            spans,
+        });
+        let note = data(kind, Rect::new(0.0, 0.0, 100.0, 100.0));
+        doc.apply(Command::Create(vec![note.into()])).unwrap();
+        let objects: Vec<&Object> = doc.objects().iter().collect();
+        let md = markdown("B", &objects);
+        assert!(
+            md.contains("- Shopping:\n  - milk\n     - eggs\n  - bread\n  steps\n  1. one"),
+            "{md}"
+        );
+        // A list item first stays one: a list nested in the note's item.
+        let spans = Spans::new(vec![], vec![], vec![para(0, ListKind::Number, 0)]);
+        assert_eq!(list_item("first\n", &spans, 0), "- 1. first");
     }
 
     fn sticky(text: &str, x: f64, y: f64) -> ObjectData {

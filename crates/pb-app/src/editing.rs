@@ -344,7 +344,9 @@ impl TextEdit {
     /// The width a text object with `bounds` wraps at: its own when it was made narrower
     /// than its longest line, otherwise none, so it grows as it is typed into.
     fn wrap_width(engine: &mut TextEngine, text: &Text, bounds: Rect) -> Option<f64> {
-        let natural = engine.layout(&text.text, text.size, None).content_width;
+        let natural = engine
+            .layout_aligned(&text.text, &text.spans, text.size, None, TextAlign::Start)
+            .content_width;
         (natural > bounds.width() + WRAP_SLACK).then_some(bounds.width())
     }
 
