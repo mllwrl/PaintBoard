@@ -513,8 +513,12 @@ impl App {
         if let Some(path) = plugin_file {
             app.install_plugin(vec![path]);
         }
-        // A newer PaintBoard is looked for once a day, in the background.
-        if !crate::updates::off_by_env() && app.updates.prefs.check_due(pb_platform::now_ms()) {
+        // A newer PaintBoard is looked for once a day, in the background; and on the
+        // starts that still remind of one found before.
+        let prefs = &app.updates.prefs;
+        let due = prefs.check_due(pb_platform::now_ms())
+            || (!prefs.off && prefs.reminder_due(&crate::updates::Version::current()));
+        if !crate::updates::off_by_env() && due {
             app.check_for_updates(false);
         }
         app
@@ -577,9 +581,16 @@ impl App {
             return;
         };
         log::info!("PaintBoard {} is out", release.version);
-        let now = pb_platform::now_ms();
-        if by_hand || !self.updates.prefs.put_off(&release.version, now) {
+        // Asked for: shown. Otherwise only on the first starts that find this version;
+        // later it waits in the View menu.
+        if by_hand {
             self.updates.notice = true;
+        } else if !self.updates.reminded {
+            self.updates.reminded = true;
+            if self.updates.prefs.remind(&release.version) {
+                self.updates.notice = true;
+            }
+            crate::settings::save_update_prefs(&self.updates.prefs);
         }
         // A newer one than the one downloaded or tried: start over.
         if self
@@ -700,6 +711,7 @@ impl App {
                 _ => None,
             },
             installing: matches!(download, Some(Download::Ready(_))),
+            last_reminder: self.updates.prefs.last_reminder(),
         })
     }
 
@@ -1187,6 +1199,7 @@ impl App {
             show_resolved: self.show_resolved,
             update: self.update_view(),
             update_checks: (!cfg!(target_arch = "wasm32")).then_some(!self.updates.prefs.off),
+            newer_version: self.updates.found.as_ref().map(|r| r.version.to_string()),
             palette: self.palette.clone(),
             search: self.search.as_ref().map(|s| SearchInfo {
                 count: s.hits.len(),
@@ -2110,14 +2123,8 @@ impl App {
                     }
                 }
             }
-            Action::UpdateLater => {
-                self.updates.notice = false;
-                if let Some(release) = &self.updates.found {
-                    let now = pb_platform::now_ms();
-                    self.updates.prefs.later = Some((release.version.to_string(), now));
-                    crate::settings::save_update_prefs(&self.updates.prefs);
-                }
-            }
+            Action::UpdateLater => self.updates.notice = false,
+            Action::ShowUpdate => self.updates.notice = self.updates.found.is_some(),
             Action::RunInstaller => self.run_installer(),
             Action::ToggleFingerNavigation => {
                 self.pen.fingers_move = Some(!self.pen.fingers_navigate());

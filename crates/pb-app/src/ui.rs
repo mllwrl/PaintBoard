@@ -367,8 +367,11 @@ pub enum Action {
     InstallUpdate,
     /// Opens the newer PaintBoard's page, with what is new.
     UpdateNotes,
-    /// Hides the notice about the newer PaintBoard for a day.
+    /// Hides the notice about the newer PaintBoard (it shows by itself on a couple of
+    /// starts; after that it's in the View menu).
     UpdateLater,
+    /// Shows the notice about the newer PaintBoard again (View menu).
+    ShowUpdate,
     /// The new version's installer is downloaded: saves the board, runs it and quits.
     RunInstaller,
 }
@@ -622,6 +625,8 @@ pub struct Model<'a> {
     pub update: Option<UpdateView>,
     /// Updates can be looked for here (the desktop): whether that happens by itself.
     pub update_checks: Option<bool>,
+    /// A newer PaintBoard found, to offer in the View menu.
+    pub newer_version: Option<String>,
 }
 
 /// The notice about a newer PaintBoard.
@@ -634,6 +639,8 @@ pub struct UpdateView {
     pub error: Option<String>,
     /// Downloaded: the app is about to close for the installer.
     pub installing: bool,
+    /// The last start that shows this notice by itself.
+    pub last_reminder: bool,
 }
 
 pub struct VersionItem {
@@ -2822,6 +2829,13 @@ fn view_controls(ctx: &Context, model: &Model, actions: &mut Vec<Action>) -> Rec
                         }
                         if let Some(automatic) = model.update_checks {
                             ui.separator();
+                            if let Some(version) = &model.newer_version {
+                                let text = trf("Update to PaintBoard {}…", &[version]);
+                                if ui.button(RichText::new(text).strong()).clicked() {
+                                    actions.push(Action::ShowUpdate);
+                                    ui.close();
+                                }
+                            }
                             if ui.button(tr("Check for updates")).clicked() {
                                 actions.push(Action::CheckForUpdates);
                                 ui.close();
@@ -6464,6 +6478,8 @@ fn update_notice(ctx: &Context, update: &UpdateView, actions: &mut Vec<Action>) 
                 }
                 if let Some(error) = &update.error {
                     ui.label(trf("Could not download the update: {}", &[error]));
+                } else if update.last_reminder {
+                    ui.weak(tr("This is the last reminder. You can update any time: View → Update to PaintBoard…"));
                 }
                 ui.horizontal(|ui| {
                     let update_text = if update.error.is_some() {

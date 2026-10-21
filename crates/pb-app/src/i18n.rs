@@ -1434,6 +1434,11 @@ const RU: &[(&str, &str)] = &[
     ("Update", "Обновить"),
     ("What's new", "Что нового"),
     ("Later", "Позже"),
+    ("Update to PaintBoard {}…", "Обновить до PaintBoard {}…"),
+    (
+        "This is the last reminder. You can update any time: View → Update to PaintBoard…",
+        "Больше напоминать не будем. Обновиться можно в любой момент: Вид → «Обновить до PaintBoard…»",
+    ),
     ("Check for updates", "Проверить обновления"),
     (
         "Check for updates every day",

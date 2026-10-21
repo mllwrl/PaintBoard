@@ -10,7 +10,7 @@ use std::fmt;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub const LATEST_URL: &str = "https://api.github.com/repos/mllwrl/PaintBoard/releases/latest";
 
-/// Automatic checks happen at most this often, and "Later" hides a version this long.
+/// Automatic checks happen at most this often.
 pub const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// Setting this environment variable (to anything but `0`) turns automatic checks off,
@@ -222,12 +222,16 @@ pub struct Prefs {
     pub off: bool,
     /// When the last check started (ms since the Unix epoch).
     pub checked: Option<i64>,
-    /// The version put off with "Later", and when.
-    pub later: Option<(String, i64)>,
+    /// The newest version found, and on how many starts the notice about it showed.
+    pub newest: Option<(String, u32)>,
 }
 
+/// The notice about a new version shows by itself on this many starts; after that it is
+/// only in the View menu, so it doesn't nag.
+pub const REMINDERS: u32 = 2;
+
 impl Prefs {
-    /// From the settings file: lines `off`, `checked <ms>`, `later <version> <ms>`.
+    /// From the settings file: lines `off`, `checked <ms>`, `newest <version> <shown>`.
     pub fn parse(text: &str) -> Self {
         let mut prefs = Self::default();
         for line in text.lines() {
@@ -235,8 +239,8 @@ impl Prefs {
             match words[..] {
                 ["off"] => prefs.off = true,
                 ["checked", ms] => prefs.checked = ms.parse().ok(),
-                ["later", version, ms] => {
-                    prefs.later = ms.parse().ok().map(|ms| (version.to_owned(), ms));
+                ["newest", version, shown] => {
+                    prefs.newest = shown.parse().ok().map(|n| (version.to_owned(), n));
                 }
                 _ => {}
             }
@@ -252,8 +256,8 @@ impl Prefs {
         if let Some(ms) = self.checked {
             text += &format!("checked {ms}\n");
         }
-        if let Some((version, ms)) = &self.later {
-            text += &format!("later {version} {ms}\n");
+        if let Some((version, shown)) = &self.newest {
+            text += &format!("newest {version} {shown}\n");
         }
         text
     }
@@ -263,11 +267,39 @@ impl Prefs {
         !self.off && self.checked.is_none_or(|at| now < at || now - at >= DAY_MS)
     }
 
-    /// `version` was put off with "Later" less than a day before `now`.
-    pub fn put_off(&self, version: &Version, now: i64) -> bool {
-        self.later.as_ref().is_some_and(|(later, at)| {
-            Version::parse(later).as_ref() == Some(version) && (0..DAY_MS).contains(&(now - at))
+    /// A version newer than `current` is known and still to be shown on a start: worth
+    /// asking GitHub again even if it was asked today.
+    pub fn reminder_due(&self, current: &Version) -> bool {
+        self.newest.as_ref().is_some_and(|(newest, shown)| {
+            Version::parse(newest).is_some_and(|v| v > *current) && *shown < REMINDERS
         })
+    }
+
+    /// `version` was found by a check on start: whether its notice shows this time (on the
+    /// first [`REMINDERS`] starts that find it), counted here.
+    pub fn remind(&mut self, version: &Version) -> bool {
+        let same = self
+            .newest
+            .as_ref()
+            .is_some_and(|(v, _)| Version::parse(v).as_ref() == Some(version));
+        if !same {
+            self.newest = Some((version.to_string(), 0));
+        }
+        let Some((_, shown)) = &mut self.newest else {
+            return false;
+        };
+        let show = *shown < REMINDERS;
+        if show {
+            *shown += 1;
+        }
+        show
+    }
+
+    /// The notice about the newest version showed for the last time.
+    pub fn last_reminder(&self) -> bool {
+        self.newest
+            .as_ref()
+            .is_some_and(|(_, shown)| *shown >= REMINDERS)
     }
 }
 
@@ -282,6 +314,8 @@ pub struct Updates {
     /// A check is running: `Some(true)` if asked for by hand.
     pub checking: Option<bool>,
     pub download: Option<Download>,
+    /// This start already counted its reminder.
+    pub reminded: bool,
 }
 
 /// The new version's installer being downloaded.
@@ -477,16 +511,24 @@ mod tests {
     }
 
     #[test]
-    fn later_hides_that_version_for_a_day() {
-        let now = 1_000 * DAY_MS;
-        let prefs = Prefs {
-            later: Some(("0.3.0".into(), now - 1000)),
-            ..Prefs::default()
-        };
-        assert!(prefs.put_off(&v("0.3.0"), now));
-        assert!(!prefs.put_off(&v("0.3.1"), now));
-        assert!(!prefs.put_off(&v("0.3.0"), now - 1000 + DAY_MS));
-        assert!(!Prefs::default().put_off(&v("0.3.0"), now));
+    fn a_new_version_is_shown_on_two_starts_then_left_to_the_menu() {
+        let current = v("0.2.0");
+        let mut prefs = Prefs::default();
+        assert!(!prefs.reminder_due(&current));
+        // First and second start that find 0.3.0: the notice shows.
+        assert!(prefs.remind(&v("0.3.0")));
+        assert!(!prefs.last_reminder());
+        assert!(prefs.reminder_due(&current));
+        assert!(prefs.remind(&v("0.3.0")));
+        assert!(prefs.last_reminder());
+        // Then no more, and no reason to check again before tomorrow.
+        assert!(!prefs.reminder_due(&current));
+        assert!(!prefs.remind(&v("0.3.0")));
+        // A newer one starts over.
+        assert!(prefs.remind(&v("0.3.1")));
+        assert_eq!(prefs.newest, Some(("0.3.1".into(), 1)));
+        // Installed meanwhile: nothing due.
+        assert!(!prefs.reminder_due(&v("0.3.1")));
     }
 
     #[test]
@@ -494,12 +536,12 @@ mod tests {
         let prefs = Prefs {
             off: true,
             checked: Some(123),
-            later: Some(("0.4.0-rc.1".into(), 456)),
+            newest: Some(("0.4.0-rc.1".into(), 1)),
         };
         assert_eq!(Prefs::parse(&prefs.to_text()), prefs);
         assert_eq!(Prefs::parse(""), Prefs::default());
         assert_eq!(
-            Prefs::parse("checked x\nlater 1.0\nnonsense"),
+            Prefs::parse("checked x\nnewest 1.0\nlater 0.3.0 5\nnonsense"),
             Prefs::default()
         );
     }
