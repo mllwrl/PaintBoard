@@ -159,6 +159,16 @@ impl ObjectKind {
         }
     }
 
+    /// Styles, links and lists of the text of a text object, sticky note or shape.
+    pub fn rich(&self) -> Option<&Spans> {
+        match self {
+            Self::Text(text) => Some(&text.spans),
+            Self::Sticky(sticky) => Some(&sticky.spans),
+            Self::Shape(shape) => Some(&shape.spans),
+            _ => None,
+        }
+    }
+
     /// Inline styles of the text of a text object, sticky note or shape.
     pub fn spans(&self) -> &[Span] {
         match self {
@@ -812,8 +822,8 @@ pub struct ObjectData {
     pub link: Option<Link>,
 }
 
-/// Where an object links to.
-#[derive(Clone, Debug, PartialEq)]
+/// Where an object, or a run of text, links to.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Link {
     /// A web page or mail address: `http`, `https` or `mailto` only.
     Url(Arc<str>),

@@ -99,6 +99,12 @@ enum Op {
         /// From the picture's pixels to the space of `transform`.
         placed: Affine,
     },
+    /// A web link over `area` of text.
+    Link {
+        transform: Affine,
+        area: Rect,
+        url: String,
+    },
 }
 
 /// A picture drawn somewhere in the drawing.
@@ -195,6 +201,14 @@ impl Canvas for Drawing {
                 glyphs: run.glyphs.clone(),
             });
         }
+    }
+
+    fn link(&mut self, transform: Affine, area: Rect, url: &str) {
+        self.ops.push(Op::Link {
+            transform,
+            area,
+            url: url.to_owned(),
+        });
     }
 
     fn full_pictures(&self) -> bool {

@@ -1702,9 +1702,9 @@ impl Tools {
                 return None;
             }
             let marked = pb_core::rich::apply(spans, 0..text.len(), text.len(), |m| set(m, on));
-            (*marked != *spans).then(|| pb_core::Cell {
+            (*marked != **spans).then(|| pb_core::Cell {
                 text: text.into(),
-                spans: marked.into(),
+                spans: spans.with_marks(marked),
             })
         })
     }
@@ -1714,7 +1714,7 @@ impl Tools {
     fn change_cells(
         &self,
         doc: &Document,
-        change: impl Fn(&str, &[pb_core::Span]) -> Option<pb_core::Cell>,
+        change: impl Fn(&str, &pb_core::Spans) -> Option<pb_core::Cell>,
     ) -> Vec<Command> {
         let (Some((id, cells)), Some((_, _, table))) =
             (self.selected_cells(doc), self.single_table(doc))

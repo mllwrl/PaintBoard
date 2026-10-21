@@ -224,6 +224,20 @@ impl Writer<'_> {
                     matrix(*transform * *placed)
                 );
             }
+            Op::Link {
+                transform,
+                area,
+                url,
+            } => {
+                let path: BezPath = area.path_elements(0.1).collect();
+                let href = escape(url);
+                let _ = writeln!(
+                    self.body,
+                    "<a href=\"{href}\" xlink:href=\"{href}\"><path d=\"{}\" \
+                     fill=\"#000\" fill-opacity=\"0\"/></a>",
+                    data(&super::transformed(*transform, &path), 2)
+                );
+            }
         }
     }
 
@@ -271,6 +285,22 @@ impl Writer<'_> {
 }
 
 /// A `transform` attribute, or nothing for no transform.
+/// `text` for an attribute value.
+fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out += "&amp;",
+            '<' => out += "&lt;",
+            '>' => out += "&gt;",
+            '"' => out += "&quot;",
+            '\'' => out += "&apos;",
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn matrix(t: Affine) -> String {
     if t == Affine::IDENTITY {
         return String::new();

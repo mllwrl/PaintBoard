@@ -49,10 +49,41 @@ pub fn pdf(pages: &[Page]) -> Vec<u8> {
         writer.content(&page.drawing.ops, &mut at, &mut content);
         let contents = writer.file.reserve();
         writer.file.stream(contents, "", content.as_bytes());
+        // Web links in text stay clickable: an annotation over each.
+        let page_transform = Affine::new([scale, 0.0, 0.0, -scale, 0.0, ph]);
+        let mut annots = Vec::new();
+        for op in &page.drawing.ops {
+            let Op::Link {
+                transform,
+                area,
+                url,
+            } = op
+            else {
+                continue;
+            };
+            let r = (page_transform * *transform).transform_rect_bbox(*area);
+            let id = writer.file.reserve();
+            let body = format!(
+                "<< /Type /Annot /Subtype /Link /Rect [{} {} {} {}] /Border [0 0 0] \
+                 /A << /S /URI /URI ({}) >> >>",
+                number(r.x0, 2),
+                number(r.y0, 2),
+                number(r.x1, 2),
+                number(r.y1, 2),
+                uri_string(url)
+            );
+            writer.file.object(id, body.as_bytes());
+            annots.push(format!("{id} 0 R"));
+        }
+        let annots = if annots.is_empty() {
+            String::new()
+        } else {
+            format!(" /Annots [{}]", annots.join(" "))
+        };
         let id = writer.file.reserve();
         let body = format!(
             "<< /Type /Page /Parent {tree} 0 R /MediaBox [0 0 {} {}] /Resources {resources} 0 R \
-             /Contents {contents} 0 R >>",
+             /Contents {contents} 0 R{annots} >>",
             number(pw, 3),
             number(ph, 3)
         );
@@ -325,6 +356,8 @@ impl Writer<'_> {
                     cm(out, *transform * *placed * unit);
                     let _ = writeln!(out, "/{name} Do Q");
                 }
+                // Annotations of the page, see `pdf`.
+                Op::Link { .. } => {}
             }
         }
     }
@@ -438,6 +471,25 @@ impl Writer<'_> {
 }
 
 /// Appends a `cm` operator for `t`, unless it does nothing.
+/// `url` as the body of a PDF string: ASCII, other bytes percent-encoded, and the
+/// string's own delimiters escaped.
+fn uri_string(url: &str) -> String {
+    let mut out = String::with_capacity(url.len());
+    for b in url.bytes() {
+        match b {
+            b'(' | b')' | b'\\' => {
+                out.push('\\');
+                out.push(char::from(b));
+            }
+            0x21..=0x7E => out.push(char::from(b)),
+            _ => {
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    out
+}
+
 fn cm(out: &mut String, t: Affine) {
     if t == Affine::IDENTITY {
         return;

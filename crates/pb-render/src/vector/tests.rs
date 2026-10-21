@@ -300,6 +300,46 @@ fn pdf_draws_like_the_board() {
     ));
 }
 
+#[test]
+fn links_in_text_stay_clickable_in_files() {
+    let mut doc = Document::new();
+    let spans = pb_core::Spans::new(
+        vec![],
+        vec![pb_core::LinkSpan {
+            start: 0,
+            end: 11,
+            marks: pb_core::Link::from_input("example.com/a?b=(c)"),
+        }],
+        vec![pb_core::Para {
+            index: 1,
+            style: pb_core::ParaStyle::list(pb_core::ListKind::Bullet, 0),
+        }],
+    );
+    let text = ObjectKind::Text(Text {
+        text: "example.com\nan item".into(),
+        spans,
+        size: 16.0,
+    });
+    let data = object(text, Rect::new(0.0, 0.0, 200.0, 60.0), Style::default());
+    doc.apply(Command::Create(vec![data.into()])).unwrap();
+    let drawing = record(&doc);
+    let svg = svg(&drawing, SIZE, None);
+    well_formed(&svg);
+    assert!(
+        svg.contains("<a href=\"https://example.com/a?b=(c)\""),
+        "{svg}"
+    );
+    let bytes = pdf(&[Page {
+        drawing,
+        size: SIZE,
+    }]);
+    assert_eq!(pb_io::pdf::page_count(&bytes).unwrap(), 1);
+    let file = String::from_utf8_lossy(&bytes);
+    assert!(file.contains("/Subtype /Link"));
+    assert!(file.contains("/URI (https://example.com/a?b=\\(c\\))"));
+    assert!(file.contains("/Annots ["));
+}
+
 /// Writes the test board as SVG, PDF and pictures of both to `PB_VECTOR_OUT`, to look at.
 #[test]
 #[ignore = "writes files, run by hand"]

@@ -231,6 +231,77 @@ mod tests {
     }
 
     #[test]
+    fn lists_and_links_edited_at_once_stay_whole() {
+        use crate::{Link, LinkSpan, ListKind, Para, ParaStyle, Spans, TextMarks};
+
+        let mut a = Document::new();
+        a.set_peer(1).unwrap();
+        let id = rect(&mut a);
+        let bullet = |index| Para {
+            index,
+            style: ParaStyle::list(ListKind::Bullet, 0),
+        };
+        let text = "one\ntwo\nthree";
+        let spans = Spans::new(vec![], vec![], vec![bullet(1)]);
+        let set = |doc: &mut Document, text: &str, spans: Spans| {
+            let bounds = doc.get(id).unwrap().data.bounds;
+            doc.apply(Command::SetText {
+                id,
+                text: text.into(),
+                spans,
+                bounds,
+            })
+            .unwrap();
+        };
+        set(&mut a, text, spans.clone());
+        let mut b = Document::from_snapshot(&a.snapshot()).unwrap();
+        b.set_peer(2).unwrap();
+        // One makes "three" a numbered item and links "one"...
+        let link = LinkSpan {
+            start: 0,
+            end: 3,
+            marks: Link::from_input("example.com"),
+        };
+        let numbered = Para {
+            index: 2,
+            style: ParaStyle::list(ListKind::Number, 0),
+        };
+        set(
+            &mut a,
+            text,
+            Spans::new(vec![], vec![link], vec![bullet(1), numbered]),
+        );
+        // ...while the other deletes the line "two" and adds a long one at the end.
+        let edited = "one\nthree\nfour\nfive";
+        let mut b_spans = spans.edited(text, 4..8, "", TextMarks::default(), None);
+        b_spans = b_spans.edited(
+            "one\nthree",
+            9..9,
+            "\nfour\nfive",
+            TextMarks::default(),
+            None,
+        );
+        set(&mut b, edited, b_spans);
+        let from_a = a.updates_since(&b.sync_version()).unwrap();
+        let from_b = b.updates_since(&a.sync_version()).unwrap();
+        a.import_updates(&from_b).unwrap();
+        b.import_updates(&from_a).unwrap();
+        let rich = |doc: &Document| doc.get(id).unwrap().data.kind.rich().unwrap().clone();
+        assert_eq!(text_of(&a, id), text_of(&b, id));
+        assert_eq!(rich(&a), rich(&b));
+        // Whatever won, it fits the merged text: lists on paragraphs it has, links on it.
+        let merged = text_of(&a, id);
+        let count = crate::rich::paragraph_count(&merged);
+        let now = rich(&a);
+        assert!(now.paras.iter().all(|p| p.index < count), "{now:?}");
+        assert!(now.links.iter().all(|l| l.end <= merged.len()));
+        assert_eq!(now.fit_to(&merged), now);
+        // Reloading gives the same.
+        let loaded = Document::from_snapshot(&a.snapshot()).unwrap();
+        assert_eq!(rich(&loaded), now);
+    }
+
+    #[test]
     fn text_from_older_boards_reads_and_edits() {
         let mut doc = Document::new();
         let id = rect(&mut doc);

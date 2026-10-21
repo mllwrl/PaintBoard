@@ -105,6 +105,12 @@ mod key {
     pub const FONT_SIZE: &str = "fontSize";
     /// Inline styles of `text`, see `rich::to_bytes`.
     pub const MARKS: &str = "marks";
+    /// Links in `text`, see `rich::links_to_bytes`; apart from `marks`, so versions
+    /// without links still read the styles.
+    pub const LINKS: &str = "links";
+    /// Paragraph styles (lists) of `text`, see `rich::paras_to_bytes`; versions without
+    /// lists show plain paragraphs.
+    pub const PARAS: &str = "paras";
     /// Hash of an image's file, see `AssetId`.
     pub const ASSET: &str = "asset";
     /// Shown part of an image, see `Image::crop`.
@@ -142,6 +148,8 @@ mod key {
     pub const COLS: &str = "cols";
     pub const CELL: &str = "cell:";
     pub const CELL_MARKS: &str = "cellMarks:";
+    pub const CELL_LINKS: &str = "cellLinks:";
+    pub const CELL_PARAS: &str = "cellParas:";
     /// ...and merged cells as `row0,col0,row1,col1` ids joined by `;`.
     pub const MERGES: &str = "merges";
     /// Kanban boards: column ids joined by `;`, each column's title under this prefix and
@@ -151,12 +159,16 @@ mod key {
     pub const COLUMN_TITLE: &str = "columnTitle:";
     pub const CARD: &str = "card:";
     pub const CARD_MARKS: &str = "cardMarks:";
+    pub const CARD_LINKS: &str = "cardLinks:";
+    pub const CARD_PARAS: &str = "cardParas:";
     pub const CARD_AT: &str = "cardAt:";
     /// Mind maps: each node's text, inline styles, `parent;order` (no parent for the
     /// central topic), measured text size `w;h` and flags (`c` collapsed, `l` left) under
     /// these prefixes and its id. A node exists while it has a place.
     pub const NODE: &str = "node:";
     pub const NODE_MARKS: &str = "nodeMarks:";
+    pub const NODE_LINKS: &str = "nodeLinks:";
+    pub const NODE_PARAS: &str = "nodeParas:";
     pub const NODE_AT: &str = "nodeAt:";
     pub const NODE_SIZE: &str = "nodeSize:";
     pub const NODE_FLAGS: &str = "nodeFlags:";
@@ -948,7 +960,7 @@ impl Document {
                                     })
                                     .filter(|s| s.marks != crate::TextMarks::default())
                                     .collect();
-                                write_spans(&meta, &plain)?;
+                                put_binary(&meta, key::MARKS, rich::to_bytes(&plain))?;
                             }
                         }
                     }
@@ -1120,7 +1132,7 @@ impl Document {
                 }
                 let meta = self.tree.get_meta(self.nodes[&id])?;
                 write_text(&meta, &text)?;
-                write_spans(&meta, &rich::fit_to(&spans, &text))?;
+                write_rich(&meta, &RichKeys::object(), &spans.fit_to(&text))?;
                 write_bounds(&meta, bounds.abs())?;
             }
             Command::SetCrop { id, crop, bounds } => {
@@ -1220,7 +1232,13 @@ impl Document {
                     return Err(Error::UnknownObject(id));
                 }
                 let meta = self.tree.get_meta(self.nodes[&id])?;
-                for prefix in [key::CARD, key::CARD_MARKS, key::CARD_AT] {
+                for prefix in [
+                    key::CARD,
+                    key::CARD_MARKS,
+                    key::CARD_LINKS,
+                    key::CARD_PARAS,
+                    key::CARD_AT,
+                ] {
                     let k = format!("{prefix}{card}");
                     if meta.get(&k).is_some() {
                         meta.delete(&k)?;
@@ -1251,6 +1269,8 @@ impl Document {
                     for prefix in [
                         key::NODE,
                         key::NODE_MARKS,
+                        key::NODE_LINKS,
+                        key::NODE_PARAS,
                         key::NODE_AT,
                         key::NODE_SIZE,
                         key::NODE_FLAGS,
@@ -2468,27 +2488,89 @@ fn is_group(meta: &LoroMap) -> bool {
     )
 }
 
-/// Writes inline styles, or removes them when there are none.
-fn write_spans(meta: &LoroMap, spans: &[Span]) -> Result<()> {
-    if spans.is_empty() {
-        if meta.get(key::MARKS).is_some() {
-            meta.delete(key::MARKS)?;
+/// Writes `bytes` under `k` unless they are there already; empty ones remove `k`.
+fn put_binary(meta: &LoroMap, k: &str, bytes: Vec<u8>) -> Result<()> {
+    let current = meta.get(k);
+    if bytes.is_empty() {
+        if current.is_some() {
+            meta.delete(k)?;
         }
-        Ok(())
-    } else {
-        meta.insert(key::MARKS, rich::to_bytes(spans))?;
-        Ok(())
+        return Ok(());
+    }
+    let same = matches!(
+        current,
+        Some(ValueOrContainer::Value(LoroValue::Binary(b))) if *b == bytes
+    );
+    if !same {
+        meta.insert(k, bytes)?;
+    }
+    Ok(())
+}
+
+fn get_binary(meta: &LoroMap, k: &str) -> Option<Vec<u8>> {
+    match meta.get(k) {
+        Some(ValueOrContainer::Value(LoroValue::Binary(bytes))) => Some(bytes.to_vec()),
+        _ => None,
     }
 }
 
-/// Inline styles stored with a text, fitted to it.
-fn read_spans(meta: &LoroMap, text: &str) -> Spans {
-    match meta.get(key::MARKS) {
-        Some(ValueOrContainer::Value(LoroValue::Binary(bytes))) => {
-            rich::fit_to(&rich::from_bytes(&bytes), text).into()
+/// Where a text's inline styles, links and paragraph styles are stored: apart, so each
+/// merges on its own and versions that know only the styles still read them.
+struct RichKeys {
+    marks: String,
+    links: String,
+    paras: String,
+}
+
+impl RichKeys {
+    /// A text object's, sticky note's or shape's.
+    fn object() -> Self {
+        Self {
+            marks: key::MARKS.into(),
+            links: key::LINKS.into(),
+            paras: key::PARAS.into(),
         }
-        _ => Spans::default(),
     }
+
+    /// A part's (a cell, card or node), under these prefixes followed by its `id`.
+    fn part([marks, links, paras]: [&str; 3], id: &str) -> Self {
+        Self {
+            marks: format!("{marks}{id}"),
+            links: format!("{links}{id}"),
+            paras: format!("{paras}{id}"),
+        }
+    }
+
+    fn cell(row: &str, col: &str) -> Self {
+        let keys = [key::CELL_MARKS, key::CELL_LINKS, key::CELL_PARAS];
+        Self::part(keys, &format!("{row}:{col}"))
+    }
+
+    fn card(id: &str) -> Self {
+        Self::part([key::CARD_MARKS, key::CARD_LINKS, key::CARD_PARAS], id)
+    }
+
+    fn node(id: &str) -> Self {
+        Self::part([key::NODE_MARKS, key::NODE_LINKS, key::NODE_PARAS], id)
+    }
+}
+
+/// Writes the parts of `spans` that changed; empty parts are removed.
+fn write_rich(meta: &LoroMap, keys: &RichKeys, spans: &Spans) -> Result<()> {
+    put_binary(meta, &keys.marks, rich::to_bytes(&spans.marks))?;
+    put_binary(meta, &keys.links, rich::links_to_bytes(&spans.links))?;
+    put_binary(meta, &keys.paras, rich::paras_to_bytes(&spans.paras))
+}
+
+/// Styles, links and lists stored with a text, fitted to it.
+fn read_rich(meta: &LoroMap, keys: &RichKeys, text: &str) -> Spans {
+    let read = |k: &str| get_binary(meta, k).unwrap_or_default();
+    Spans::new(
+        rich::from_bytes(&read(&keys.marks)),
+        rich::links_from_bytes(&read(&keys.links)),
+        rich::paras_from_bytes(&read(&keys.paras)),
+    )
+    .fit_to(text)
 }
 
 fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
@@ -2499,9 +2581,8 @@ fn write_data(meta: &LoroMap, data: &ObjectData) -> Result<()> {
     if let Some(link) = &data.link {
         meta.insert(key::LINK, link.to_stored())?;
     }
-    let spans = data.kind.spans();
-    if !spans.is_empty() {
-        write_spans(meta, spans)?;
+    if let Some(spans) = data.kind.rich() {
+        write_rich(meta, &RichKeys::object(), spans)?;
     }
     match &data.kind {
         ObjectKind::Ink(ink) => meta.insert(key::POINTS, ink.to_bytes())?,
@@ -2991,16 +3072,9 @@ fn write_card(meta: &LoroMap, card: &crate::Card, old: Option<&crate::Card>) -> 
     if old.is_none_or(|o| o.text != card.text) {
         write_text_at(meta, &format!("{}{id}", key::CARD), &card.text)?;
     }
-    let spans = rich::fit_to(&card.spans, &card.text);
-    if old.is_none_or(|o| *o.spans != *spans) {
-        let k = format!("{}{id}", key::CARD_MARKS);
-        if spans.is_empty() {
-            if meta.get(&k).is_some() {
-                meta.delete(&k)?;
-            }
-        } else {
-            meta.insert(&k, rich::to_bytes(&spans))?;
-        }
+    let spans = card.spans.fit_to(&card.text);
+    if old.is_none_or(|o| o.spans != spans) {
+        write_rich(meta, &RichKeys::card(id), &spans)?;
     }
     Ok(())
 }
@@ -3037,16 +3111,9 @@ fn write_node(meta: &LoroMap, node: &crate::Node, old: Option<&crate::Node>) -> 
     if old.is_none_or(|o| o.text != node.text) {
         write_text_at(meta, &format!("{}{id}", key::NODE), &node.text)?;
     }
-    let spans = rich::fit_to(&node.spans, &node.text);
-    if old.is_none_or(|o| *o.spans != *spans) {
-        let k = format!("{}{id}", key::NODE_MARKS);
-        if spans.is_empty() {
-            if meta.get(&k).is_some() {
-                meta.delete(&k)?;
-            }
-        } else {
-            meta.insert(&k, rich::to_bytes(&spans))?;
-        }
+    let spans = node.spans.fit_to(&node.text);
+    if old.is_none_or(|o| o.spans != spans) {
+        write_rich(meta, &RichKeys::node(id), &spans)?;
     }
     Ok(())
 }
@@ -3069,12 +3136,7 @@ fn read_mindmap(meta: &LoroMap) -> Option<crate::MindMap> {
         .into_iter()
         .map(|(id, parent, order)| {
             let text = get_str(meta, &format!("{}{id}", key::NODE)).unwrap_or_default();
-            let spans: Spans = match meta.get(&format!("{}{id}", key::NODE_MARKS)) {
-                Some(ValueOrContainer::Value(LoroValue::Binary(bytes))) => {
-                    rich::fit_to(&rich::from_bytes(&bytes), &text).into()
-                }
-                _ => Spans::default(),
-            };
+            let spans = read_rich(meta, &RichKeys::node(&id), &text);
             let text_size = get_str(meta, &format!("{}{id}", key::NODE_SIZE))
                 .and_then(|s| {
                     let (w, h) = s.split_once(';')?;
@@ -3134,12 +3196,7 @@ fn read_kanban(meta: &LoroMap) -> Option<crate::Kanban> {
         .into_iter()
         .map(|(id, column, order)| {
             let text = get_str(meta, &format!("{}{id}", key::CARD)).unwrap_or_default();
-            let spans: Spans = match meta.get(&format!("{}{id}", key::CARD_MARKS)) {
-                Some(ValueOrContainer::Value(LoroValue::Binary(bytes))) => {
-                    rich::fit_to(&rich::from_bytes(&bytes), &text).into()
-                }
-                _ => Spans::default(),
-            };
+            let spans = read_rich(meta, &RichKeys::card(&id), &text);
             crate::Card {
                 id: id.into(),
                 column: column.into(),
@@ -3192,11 +3249,9 @@ fn read_merges(meta: &LoroMap) -> Arc<[crate::Merge]> {
 /// Writes a table cell's text and styles; empty text removes them.
 fn write_cell(meta: &LoroMap, row: &str, col: &str, cell: &crate::Cell) -> Result<()> {
     let text_key = format!("{}{row}:{col}", key::CELL);
-    let marks_key = format!("{}{row}:{col}", key::CELL_MARKS);
+    let keys = RichKeys::cell(row, col);
     if cell.text.is_empty() {
-        if meta.get(&marks_key).is_some() {
-            meta.delete(&marks_key)?;
-        }
+        write_rich(meta, &keys, &Spans::default())?;
         // A text container is emptied rather than removed: someone typing in the cell
         // meanwhile keeps their text.
         match meta.get(&text_key) {
@@ -3207,15 +3262,7 @@ fn write_cell(meta: &LoroMap, row: &str, col: &str, cell: &crate::Cell) -> Resul
         return Ok(());
     }
     write_text_at(meta, &text_key, &cell.text)?;
-    let spans = rich::fit_to(&cell.spans, &cell.text);
-    if spans.is_empty() {
-        if meta.get(&marks_key).is_some() {
-            meta.delete(&marks_key)?;
-        }
-    } else {
-        meta.insert(&marks_key, rich::to_bytes(&spans))?;
-    }
-    Ok(())
+    write_rich(meta, &keys, &cell.spans.fit_to(&cell.text))
 }
 
 fn read_table(meta: &LoroMap) -> Option<crate::Table> {
@@ -3241,13 +3288,7 @@ fn read_table(meta: &LoroMap) -> Option<crate::Table> {
     let cells = texts
         .into_iter()
         .map(|(row, col, text)| {
-            let marks_key = format!("{}{row}:{col}", key::CELL_MARKS);
-            let spans: Spans = match meta.get(&marks_key) {
-                Some(ValueOrContainer::Value(LoroValue::Binary(bytes))) => {
-                    rich::fit_to(&rich::from_bytes(&bytes), &text).into()
-                }
-                _ => Spans::default(),
-            };
+            let spans = read_rich(meta, &RichKeys::cell(&row, &col), &text);
             let cell = crate::Cell {
                 text: text.into(),
                 spans,
@@ -3462,12 +3503,12 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
                 Some(ValueOrContainer::Value(LoroValue::Double(v))) => v,
                 _ => DEFAULT_FONT_SIZE,
             };
-            let spans = read_spans(meta, &text);
+            let spans = read_rich(meta, &RichKeys::object(), &text);
             ObjectKind::Text(Text { text, spans, size })
         }
         ValueOrContainer::Value(LoroValue::String(s)) if &**s == "sticky" => {
             let text: Arc<str> = get_str(meta, key::TEXT).unwrap_or_default().into();
-            let spans = read_spans(meta, &text);
+            let spans = read_rich(meta, &RichKeys::object(), &text);
             ObjectKind::Sticky(Sticky { text, spans })
         }
         ValueOrContainer::Value(LoroValue::String(s)) if &**s == "table" => {
@@ -3546,7 +3587,7 @@ fn read_data(meta: &LoroMap) -> Option<ObjectData> {
         }
         ValueOrContainer::Value(LoroValue::String(s)) => {
             let text: Arc<str> = get_str(meta, key::TEXT).unwrap_or_default().into();
-            let spans = read_spans(meta, &text);
+            let spans = read_rich(meta, &RichKeys::object(), &text);
             ObjectKind::Shape(Shape {
                 kind: ObjectKind::parse_shape(&s)?,
                 text,
@@ -4317,12 +4358,11 @@ mod tests {
         shape.kind = ObjectKind::Shape(crate::Shape {
             kind: ShapeKind::Rectangle,
             text: "Hello".into(),
-            spans: vec![Span {
+            spans: Spans::from_marks(vec![Span {
                 start: 0,
                 end: 5,
                 marks,
-            }]
-            .into(),
+            }]),
         });
         let id = create(&mut doc, shape);
         let plain = create(&mut doc, rect(200.0, 0.0, 10.0, 10.0));
@@ -4687,7 +4727,7 @@ mod tests {
         };
         data.kind = ObjectKind::Sticky(Sticky {
             text: "один два".into(),
-            spans: vec![span(0, 8)].into(),
+            spans: Spans::from_marks(vec![span(0, 8)]),
         });
         let id = create(&mut doc, data.clone());
         let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
@@ -4696,7 +4736,7 @@ mod tests {
         doc.apply(Command::SetText {
             id,
             text: "од".into(),
-            spans: vec![span(0, 8)].into(),
+            spans: Spans::from_marks(vec![span(0, 8)]),
             bounds: data.bounds,
         })
         .unwrap();
@@ -4711,6 +4751,143 @@ mod tests {
         assert!(doc.get(id).unwrap().data.kind.spans().is_empty());
         doc.undo().unwrap();
         assert_eq!(doc.get(id).unwrap().data.kind.spans(), &[span(0, 4)]);
+    }
+
+    fn rich_sample() -> Spans {
+        use crate::{Link, ListKind, Para, ParaStyle};
+        let bold = crate::TextMarks {
+            bold: true,
+            ..Default::default()
+        };
+        Spans::new(
+            vec![Span {
+                start: 0,
+                end: 3,
+                marks: bold,
+            }],
+            vec![
+                crate::LinkSpan {
+                    start: 4,
+                    end: 7,
+                    marks: Link::from_input("example.com"),
+                },
+                crate::LinkSpan {
+                    start: 8,
+                    end: 13,
+                    marks: Some(Link::Object(ObjectId::from_node(loro::TreeID {
+                        peer: 7,
+                        counter: 3,
+                    }))),
+                },
+            ],
+            vec![
+                Para {
+                    index: 1,
+                    style: ParaStyle::list(ListKind::Bullet, 0),
+                },
+                Para {
+                    index: 2,
+                    style: ParaStyle::list(ListKind::Number, 2),
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn links_and_lists_roundtrip_apart_from_the_styles() {
+        let mut doc = Document::new();
+        let mut data = rect(0.0, 0.0, 200.0, 200.0);
+        let spans = rich_sample();
+        data.kind = ObjectKind::Sticky(Sticky {
+            text: "one\ntwo\nthree".into(),
+            spans: spans.clone(),
+        });
+        let id = create(&mut doc, data.clone());
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        assert_eq!(loaded.get(id).unwrap().data, data);
+        // The styles keep their old stored form, so older versions still show them; the
+        // links and lists are under keys of their own that those versions skip.
+        let meta = doc.tree.get_meta(doc.nodes[&id]).unwrap();
+        let marks = get_binary(&meta, key::MARKS).unwrap();
+        assert_eq!(rich::from_bytes(&marks), &*spans.marks);
+        assert!(get_binary(&meta, key::LINKS).is_some());
+        assert!(get_binary(&meta, key::PARAS).is_some());
+        // A board from before links and lists (only `marks`) loads as it was.
+        meta.delete(key::LINKS).unwrap();
+        meta.delete(key::PARAS).unwrap();
+        doc.doc.commit();
+        let old = Document::from_snapshot(&doc.snapshot()).unwrap();
+        let kind = &old.get(id).unwrap().data.kind;
+        assert_eq!(
+            kind.rich().unwrap(),
+            &Spans::from_marks(spans.marks.to_vec())
+        );
+        // Shorter text drops the lists of paragraphs it no longer has.
+        doc.apply(Command::SetText {
+            id,
+            text: "one\ntwo".into(),
+            spans: spans.clone(),
+            bounds: data.bounds,
+        })
+        .unwrap();
+        let now = doc.get(id).unwrap().data.kind.rich().unwrap().clone();
+        assert_eq!(now.paras.len(), 1);
+        assert_eq!(now.links.len(), 1);
+        // Removing them removes their keys.
+        doc.apply(Command::SetText {
+            id,
+            text: "one\ntwo".into(),
+            spans: Spans::default(),
+            bounds: data.bounds,
+        })
+        .unwrap();
+        let meta = doc.tree.get_meta(doc.nodes[&id]).unwrap();
+        assert!(get_binary(&meta, key::PARAS).is_none());
+        assert!(get_binary(&meta, key::LINKS).is_none());
+        doc.undo().unwrap();
+        assert_eq!(doc.get(id).unwrap().data.kind.rich(), Some(&now));
+    }
+
+    #[test]
+    fn cells_cards_and_nodes_keep_links_and_lists() {
+        let spans = rich_sample();
+        let text: Arc<str> = "one\ntwo\nthree".into();
+        let mut doc = Document::new();
+        let mut n = 0;
+        let table = crate::Table::new(1, 1, || {
+            n += 1;
+            format!("t{n}")
+        })
+        .with_cell(
+            0,
+            0,
+            crate::Cell {
+                text: text.clone(),
+                spans: spans.clone(),
+            },
+        );
+        let mut data = rect(0.0, 0.0, 300.0, 300.0);
+        data.kind = ObjectKind::Table(table);
+        let table_id = create(&mut doc, data);
+        let loaded = Document::from_snapshot(&doc.snapshot()).unwrap();
+        let ObjectKind::Table(t) = &loaded.get(table_id).unwrap().data.kind else {
+            panic!("a table");
+        };
+        assert_eq!(t.cell(0, 0).unwrap().spans, spans);
+        // Emptying the cell removes all of it.
+        let (row, col) = (t.rows[0].id.clone(), t.cols[0].id.clone());
+        doc.apply(Command::SetCell {
+            id: table_id,
+            row: row.clone(),
+            col: col.clone(),
+            cell: crate::Cell {
+                text: "".into(),
+                spans: spans.clone(),
+            },
+        })
+        .unwrap();
+        let meta = doc.tree.get_meta(doc.nodes[&table_id]).unwrap();
+        assert!(get_binary(&meta, &format!("{}{row}:{col}", key::CELL_PARAS)).is_none());
     }
 
     #[test]

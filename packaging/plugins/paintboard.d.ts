@@ -59,6 +59,12 @@ declare namespace paintboard {
     /** Tables only: the text of each cell, row by row (merged cells show their text in
      * the top left one). */
     cells?: string[][];
+    /** Stickies, shapes and text objects with lists: each paragraph (the text between line
+     * breaks), with its list kind and nesting level. Read only. */
+    paragraphs?: { text: string; list: "bullet" | "number" | null; level: number }[];
+    /** Stickies, shapes and text objects with links in their text: the linked text and
+     * where it goes, in order. Read only. */
+    links?: { text: string; link: string }[];
   }
 
   /** Which objects `getObjects` returns; all of them without a filter. */

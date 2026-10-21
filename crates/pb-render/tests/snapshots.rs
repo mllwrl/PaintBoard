@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use pb_core::{
     Anchor, Cap, Cell, Command, Connector, Document, End, FrameData, Label, ObjectData, ObjectKind,
@@ -106,12 +105,11 @@ fn notes_and_text() -> Document {
         bold: true,
         ..TextMarks::default()
     };
-    let spans: Arc<[Span]> = vec![Span {
+    let spans = pb_core::Spans::from_marks(vec![Span {
         start: 0,
         end: 4,
         marks: bold,
-    }]
-    .into();
+    }]);
     board(vec![
         object(
             ObjectKind::Frame(FrameData {

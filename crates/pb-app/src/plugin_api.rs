@@ -195,6 +195,34 @@ pub fn object_json(doc: &Document, object: &Object) -> Value {
     let mut set = |key: &str, value: Value| {
         map.insert(key.to_owned(), value);
     };
+    if let (Some(spans), Some(text)) = (data.kind.rich(), data.kind.text()) {
+        if !spans.paras.is_empty() {
+            let paragraphs: Vec<Value> = pb_core::rich::paragraph_ranges(text)
+                .into_iter()
+                .enumerate()
+                .map(|(i, range)| {
+                    let style = spans.para(i);
+                    let list = style.list.map(|kind| match kind {
+                        pb_core::ListKind::Bullet => "bullet",
+                        pb_core::ListKind::Number => "number",
+                    });
+                    json!({"text": &text[range], "list": list, "level": style.level})
+                })
+                .collect();
+            set("paragraphs", paragraphs.into());
+        }
+        if !spans.links.is_empty() {
+            let links: Vec<Value> = spans
+                .links
+                .iter()
+                .filter_map(|s| {
+                    let link = s.marks.as_ref()?;
+                    Some(json!({"text": &text[s.range()], "link": link_text(link)}))
+                })
+                .collect();
+            set("links", links.into());
+        }
+    }
     match &data.kind {
         ObjectKind::Shape(shape) => {
             set("shape", pb_core::shape_name(shape.kind).into());
@@ -774,6 +802,46 @@ mod tests {
         for command in update_commands(doc, id, &props, &mut measure).unwrap() {
             doc.apply(command).unwrap();
         }
+    }
+
+    #[test]
+    fn plugins_read_lists_and_links_in_text() {
+        let mut doc = Document::new();
+        let note = create(&mut doc, json!({"type": "sticky", "text": "to do\nmilk"}));
+        let o = object_json(&doc, doc.get(note).unwrap());
+        assert!(o.get("paragraphs").is_none() && o.get("links").is_none());
+        let bounds = doc.get(note).unwrap().data.bounds;
+        let spans = pb_core::Spans::new(
+            vec![],
+            vec![pb_core::LinkSpan {
+                start: 6,
+                end: 10,
+                marks: Link::from_input("milk.example.com"),
+            }],
+            vec![pb_core::Para {
+                index: 1,
+                style: pb_core::ParaStyle::list(pb_core::ListKind::Number, 1),
+            }],
+        );
+        doc.apply(Command::SetText {
+            id: note,
+            text: "to do\nmilk".into(),
+            spans,
+            bounds,
+        })
+        .unwrap();
+        let o = object_json(&doc, doc.get(note).unwrap());
+        assert_eq!(
+            o["paragraphs"],
+            json!([
+                {"text": "to do", "list": null, "level": 0},
+                {"text": "milk", "list": "number", "level": 1}
+            ])
+        );
+        assert_eq!(
+            o["links"],
+            json!([{"text": "milk", "link": "https://milk.example.com"}])
+        );
     }
 
     #[test]

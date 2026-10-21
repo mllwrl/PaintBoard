@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //
 // Adapted for PaintBoard from parley 0.12's `editing/editor.rs` (`PlainEditor`): the
-// buffer carries inline styles (`spans`), which follow its edits and style the layout.
+// buffer carries inline styles, links and list paragraphs (`spans`), which follow its
+// edits and style the layout.
 
 //! A text editor with inline styles, built on parley's plain text editor.
 
@@ -20,7 +21,8 @@ use parley::{
     Affinity, Alignment, AlignmentOptions, BaseDirection, BoundingBox, Cursor, FontContext, Layout,
     LayoutContext, Selection, StyleProperty, StyleSet,
 };
-use pb_core::rich::{self, Span, TextMarks};
+use pb_core::Spans;
+use pb_core::rich::{self, TextMarks};
 
 use crate::Brush;
 
@@ -94,10 +96,14 @@ impl<'source> IntoIterator for SplitString<'source> {
 pub struct RichEditor {
     layout: Layout<Brush>,
     buffer: String,
-    /// Inline styles of `buffer`, normalized (see `pb_core::rich`).
-    spans: Vec<Span>,
+    /// Inline styles, links and lists of `buffer`, normalized (see `pb_core::rich`).
+    spans: Spans,
     /// Marks for the next insertion; `None` takes those of the text before it.
     insert_marks: Option<TextMarks>,
+    /// Styles of the text inserted next, when it is pasted from a copy made here.
+    pasted: Option<Spans>,
+    /// Where moving up or down a line keeps the cursor, from the left edge.
+    h_pos: Option<f32>,
     default_style: StyleSet<Brush>,
     selection: Selection,
     /// Byte offsets of IME composing preedit text in the text buffer.
@@ -130,8 +136,10 @@ impl RichEditor {
         Self {
             default_style: StyleSet::new(font_size),
             buffer: String::default(),
-            spans: Vec::new(),
+            spans: Spans::default(),
             insert_marks: None,
+            pasted: None,
+            h_pos: None,
             layout: Layout::default(),
             selection: Selection::default(),
             compose: None,
@@ -495,19 +503,51 @@ impl RichEditorDriver<'_> {
 
     /// Move up to the closest physical cluster boundary on the previous line, preserving the horizontal position for repeated movements.
     pub fn move_up(&mut self) {
+        self.move_lines(-1, false);
+    }
+
+    /// Moves the focus `delta` lines up or down, keeping its distance from the left edge
+    /// for repeated moves. Like parley's own, except that indented lines (list items)
+    /// count from where they start.
+    fn move_lines(&mut self, delta: isize, extend: bool) {
         self.refresh_layout();
-        self.editor.set_selection(
-            self.editor
-                .selection
-                .previous_line(&self.editor.layout, false),
-        );
+        let editor = &mut *self.editor;
+        let layout = &editor.layout;
+        let caret = editor.indented(editor.selection.focus().geometry(layout, 0.0));
+        let y = ((caret.y0 + caret.y1) / 2.0) as f32;
+        let lines: Vec<(f32, f32)> = layout
+            .lines()
+            .map(|l| (l.metrics().block_min_coord, l.metrics().block_max_coord))
+            .collect();
+        let at = lines.iter().position(|&(y0, y1)| y >= y0 && y <= y1);
+        let target = at
+            .and_then(|i| i.checked_add_signed(delta))
+            .filter(|&i| i < lines.len());
+        let Some(target) = target else {
+            // Past the first or last line: to the start or end, as parley does.
+            let moved = if delta < 0 {
+                editor.selection.previous_line(layout, extend)
+            } else {
+                editor.selection.next_line(layout, extend)
+            };
+            editor.set_selection(moved);
+            return;
+        };
+        let x = editor.h_pos.unwrap_or(caret.x0 as f32);
+        let (y0, y1) = lines[target];
+        let focus = Cursor::from_point(layout, x, (y0 + y1) / 2.0);
+        let moved = if extend {
+            editor.selection.extend(focus)
+        } else {
+            focus.into()
+        };
+        editor.set_selection(moved);
+        editor.h_pos = Some(x);
     }
 
     /// Move down to the closest physical cluster boundary on the next line, preserving the horizontal position for repeated movements.
     pub fn move_down(&mut self) {
-        self.refresh_layout();
-        self.editor
-            .set_selection(self.editor.selection.next_line(&self.editor.layout, false));
+        self.move_lines(1, false);
     }
 
     /// Move to the next cluster left in visual order.
@@ -620,19 +660,12 @@ impl RichEditorDriver<'_> {
 
     /// Move the selection focus point up to the nearest cluster boundary on the previous line, preserving the horizontal position for repeated movements.
     pub fn select_up(&mut self) {
-        self.refresh_layout();
-        self.editor.set_selection(
-            self.editor
-                .selection
-                .previous_line(&self.editor.layout, true),
-        );
+        self.move_lines(-1, true);
     }
 
     /// Move the selection focus point down to the nearest cluster boundary on the next line, preserving the horizontal position for repeated movements.
     pub fn select_down(&mut self) {
-        self.refresh_layout();
-        self.editor
-            .set_selection(self.editor.selection.next_line(&self.editor.layout, true));
+        self.move_lines(1, true);
     }
 
     /// Move the selection focus point to the next cluster left in visual order.
@@ -853,7 +886,23 @@ impl RichEditor {
     /// hidden.
     pub fn cursor_geometry(&self, size: f32) -> Option<BoundingBox> {
         self.show_cursor
-            .then(|| self.selection.focus().geometry(&self.layout, size))
+            .then(|| self.indented(self.selection.focus().geometry(&self.layout, size)))
+    }
+
+    /// `b`, a caret from parley, moved in by where its line starts: parley's caret leaves
+    /// that out, though hit testing and selections count it (list items start indented).
+    fn indented(&self, mut b: BoundingBox) -> BoundingBox {
+        let y = ((b.y0 + b.y1) / 2.0) as f32;
+        let line = self.layout.lines().find(|line| {
+            let m = line.metrics();
+            y >= m.block_min_coord && y <= m.block_max_coord
+        });
+        if let Some(line) = line {
+            let dx = f64::from(line.metrics().inline_min_coord);
+            b.x0 += dx;
+            b.x1 += dx;
+        }
+        b
     }
 
     /// Get a rectangle bounding the text the user is currently editing.
@@ -876,12 +925,12 @@ impl RichEditor {
             });
 
             (
-                area.unwrap_or_else(|| selection.focus().geometry(&self.layout, 0.)),
+                area.unwrap_or_else(|| self.indented(selection.focus().geometry(&self.layout, 0.))),
                 selection.focus(),
             )
         } else {
             // Bound the selected parts of the focused line only.
-            let focus = self.selection.focus().geometry(&self.layout, 0.);
+            let focus = self.indented(self.selection.focus().geometry(&self.layout, 0.));
             let mut area = focus;
             self.selection.geometry_with(&self.layout, |rect, _| {
                 if rect.y0 == focus.y0 {
@@ -944,23 +993,47 @@ impl RichEditor {
         self.generation
     }
 
-    /// Replaces `range` of the buffer with `s`, keeping the inline styles in step.
+    /// Replaces `range` of the buffer with `s`, keeping the styles in step.
     fn replace_buffer(&mut self, range: Range<usize>, s: &str) {
         let marks = self
             .insert_marks
-            .unwrap_or_else(|| rich::marks_for_typing(&self.spans, range.start));
-        self.buffer.replace_range(range.clone(), s);
-        self.spans = rich::edited(&self.spans, range, s.len(), marks);
+            .unwrap_or_else(|| rich::marks_for_typing(&self.spans.marks, range.start));
+        let pasted = self.pasted.take();
+        self.spans = self
+            .spans
+            .edited(&self.buffer, range.clone(), s, marks, pasted.as_ref());
+        self.buffer.replace_range(range, s);
     }
 
-    /// Inline styles of the raw text (see [`Self::raw_text`]).
-    pub fn spans(&self) -> &[Span] {
+    /// Styles, links and lists of the raw text (see [`Self::raw_text`]).
+    pub fn spans(&self) -> &Spans {
         &self.spans
     }
 
-    /// Replaces the inline styles.
-    pub fn set_spans(&mut self, spans: Vec<Span>) {
-        self.spans = rich::fit_to(&spans, &self.buffer);
+    /// Boxes covering bytes `range` of the text; the layout must be fresh.
+    pub fn range_geometry(&self, range: Range<usize>) -> Vec<BoundingBox> {
+        Selection::new(self.cursor_at(range.start), self.cursor_at(range.end))
+            .geometry(&self.layout)
+            .into_iter()
+            .map(|(b, _)| b)
+            .collect()
+    }
+
+    /// Replaces the styles, links and lists.
+    pub fn set_spans(&mut self, spans: Spans) {
+        self.spans = spans.fit_to(&self.buffer);
+        self.layout_dirty = true;
+    }
+
+    /// The text inserted next brings these styles along (see [`Spans::slice`]).
+    pub fn set_pasted(&mut self, spans: Option<Spans>) {
+        self.pasted = spans;
+    }
+
+    /// Sets the font size, which list indents follow too.
+    pub fn set_font_size(&mut self, size: f32) {
+        self.font_size = size;
+        self.default_style.insert(StyleProperty::FontSize(size));
         self.layout_dirty = true;
     }
 
@@ -977,10 +1050,10 @@ impl RichEditor {
     ///
     /// The cursor goes to the start; set the selection afterwards (upstream keeps its byte
     /// offsets, which needs a private field of `Cursor`).
-    pub fn set_text(&mut self, is: &str, spans: &[Span]) {
+    pub fn set_text(&mut self, is: &str, spans: &Spans) {
         self.buffer.clear();
         self.buffer.push_str(is);
-        self.spans = rich::fit_to(spans, is);
+        self.spans = spans.fit_to(is);
         self.selection = Selection::default();
         self.layout_dirty = true;
         self.compose = None;
@@ -1182,6 +1255,7 @@ impl RichEditor {
         {
             self.generation.nudge();
         }
+        self.h_pos = None;
 
         // This debug code is quite useful when diagnosing selection problems.
         #[cfg(any())]
@@ -1225,16 +1299,14 @@ impl RichEditor {
         for prop in self.default_style.inner().values() {
             builder.push_default(prop.to_owned());
         }
-        for span in &self.spans {
-            for prop in crate::span_styles(span) {
-                builder.push(prop, span.range());
-            }
-        }
+        crate::push_styles(&mut builder, &self.spans);
         if let Some(preedit_range) = &self.compose {
             builder.push(StyleProperty::Underline(true), preedit_range.clone());
         }
         self.layout = builder.build(&self.buffer);
-        self.layout.break_all_lines(self.width);
+        let size = self.font_size * self.scale;
+        let indents = crate::list_indents(&self.buffer, &self.spans.paras, size);
+        crate::break_lines(&mut self.layout, self.width, &indents);
         self.layout
             .align(self.alignment, AlignmentOptions::default());
         self.selection = self.selection.refresh(&self.layout);

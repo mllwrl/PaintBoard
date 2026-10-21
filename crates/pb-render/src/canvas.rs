@@ -27,6 +27,10 @@ pub trait Canvas {
     /// Glyphs of `run`, positioned relative to `transform`'s origin.
     fn glyphs(&mut self, transform: Affine, run: &pb_text::GlyphRun, brush: Color);
 
+    /// A web link over `area` (text drawn already), for files that keep links
+    /// clickable; the screen has its own way to follow them.
+    fn link(&mut self, _transform: Affine, _area: Rect, _url: &str) {}
+
     /// Pictures are wanted at their full decoded size rather than just big enough for the
     /// screen (for files, which may be looked at closer).
     fn full_pictures(&self) -> bool {

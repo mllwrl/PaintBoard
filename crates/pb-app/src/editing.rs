@@ -4,10 +4,12 @@
 //! Edits stay local until editing ends, then become a single command, so one undo reverts
 //! the whole edit and autosave and sync see finished text only.
 
+use std::sync::Mutex;
+
 use pb_core::{
-    Card, Cell, Command, Doc, Document, Embed, FrameData, Kanban, KanbanPart, Label, MindMap,
-    MindMapPart, Node, ObjectData, ObjectId, ObjectKind, Rgba, Shape, Span, Sticky, Style, Table,
-    Text, TextBox, TextMarks,
+    Card, Cell, Command, Doc, Document, Embed, FrameData, Kanban, KanbanPart, Label, Link,
+    ListKind, MindMap, MindMapPart, Node, ObjectData, ObjectId, ObjectKind, ParaStyle, Rgba, Shape,
+    Spans, Sticky, Style, Table, Text, TextBox, TextMarks,
 };
 use pb_geom::kurbo::{Point, Rect, Size, Vec2};
 use pb_geom::{Frame, ShapeKind};
@@ -31,6 +33,42 @@ const BLINK: Duration = Duration::from_millis(530);
 /// The caret stops blinking and stays shown this long after the last input, so an idle
 /// edit does not keep waking the app.
 const BLINK_FOR: Duration = Duration::from_secs(20);
+
+/// Text last copied or cut from text being edited, with its styles, links and lists: what
+/// is pasted keeps them when the clipboard still holds that text.
+static COPIED: Mutex<Option<(String, Spans)>> = Mutex::new(None);
+
+/// Copies the selection of `ed` to the clipboard, remembering its styles.
+fn copy(ed: &TextEditor) -> bool {
+    let Some((text, spans)) = ed.selected_rich() else {
+        return false;
+    };
+    clipboard::set_text(&text);
+    if let Ok(mut copied) = COPIED.lock() {
+        *copied = Some((text, spans));
+    }
+    true
+}
+
+/// Types `text` from the clipboard into `ed`, with the styles it was copied with here.
+fn paste_text(ed: &mut TextEditor, engine: &mut TextEngine, text: &str) {
+    let text = text.replace("\r\n", "\n");
+    let copied = COPIED.lock().ok().and_then(|c| c.clone());
+    match copied {
+        Some((was, spans)) if was == text => ed.paste_rich(engine, &text, &spans),
+        _ => ed.insert(engine, &text),
+    }
+}
+
+/// Whether text of the object has links in it, anywhere (a cell, card or node too).
+pub fn has_text_links(kind: &ObjectKind) -> bool {
+    match kind {
+        ObjectKind::Table(t) => t.cells.values().any(|c| !c.spans.links.is_empty()),
+        ObjectKind::Kanban(k) => k.cards.iter().any(|c| !c.spans.links.is_empty()),
+        ObjectKind::MindMap(m) => m.nodes.iter().any(|n| !n.spans.links.is_empty()),
+        kind => kind.rich().is_some_and(|s| !s.links.is_empty()),
+    }
+}
 
 /// What the editor did with a key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +98,8 @@ pub enum KeyOutcome {
     NextNode {
         child: bool,
     },
+    /// Ctrl+K: ask for the address to link the selection to.
+    EditLink,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,7 +190,7 @@ pub struct TextEdit {
     style: Style,
     /// Text when editing started, to skip edits that change nothing.
     original: String,
-    original_spans: Vec<Span>,
+    original_spans: Spans,
     selecting: bool,
     /// Last input; the caret blinks from then on, starting shown.
     active_at: Instant,
@@ -205,7 +245,7 @@ impl TextEdit {
             rotation: 0.0,
             style: Doc::style(),
             original: text.to_owned(),
-            original_spans: Vec::new(),
+            original_spans: Spans::default(),
             selecting: false,
             active_at: Instant::now(),
             caret_drawn: false,
@@ -238,7 +278,7 @@ impl TextEdit {
                 ..Style::default()
             },
             original: String::new(),
-            original_spans: Vec::new(),
+            original_spans: Spans::default(),
             selecting: false,
             active_at: Instant::now(),
             caret_drawn: false,
@@ -257,14 +297,21 @@ impl TextEdit {
             bounds,
             shape: None,
         };
-        Self::fitted(engine, Target::New, ("", &[]), placement, 0.0, style)
+        Self::fitted(
+            engine,
+            Target::New,
+            ("", &Spans::default()),
+            placement,
+            0.0,
+            style,
+        )
     }
 
     /// Text fitted into a sticky note or shape; `placement` is [`Placement::Fitted`].
     fn fitted(
         engine: &mut TextEngine,
         target: Target,
-        (text, spans): (&str, &[Span]),
+        (text, spans): (&str, &Spans),
         placement: Placement,
         rotation: f64,
         style: Style,
@@ -279,7 +326,7 @@ impl TextEdit {
             rotation,
             style,
             original: text.to_owned(),
-            original_spans: spans.to_vec(),
+            original_spans: spans.clone(),
             selecting: false,
             active_at: Instant::now(),
             caret_drawn: false,
@@ -297,7 +344,9 @@ impl TextEdit {
     /// The width a text object with `bounds` wraps at: its own when it was made narrower
     /// than its longest line, otherwise none, so it grows as it is typed into.
     fn wrap_width(engine: &mut TextEngine, text: &Text, bounds: Rect) -> Option<f64> {
-        let natural = engine.layout(&text.text, text.size, None).content_width;
+        let natural = engine
+            .layout_aligned(&text.text, &text.spans, text.size, None, TextAlign::Start)
+            .content_width;
         (natural > bounds.width() + WRAP_SLACK).then_some(bounds.width())
     }
 
@@ -333,7 +382,7 @@ impl TextEdit {
                 rotation: data.rotation,
                 style: data.style,
                 original: text.text.to_string(),
-                original_spans: text.spans.to_vec(),
+                original_spans: text.spans.clone(),
                 selecting: false,
                 active_at: Instant::now(),
                 caret_drawn: false,
@@ -384,7 +433,7 @@ impl TextEdit {
                     rotation: 0.0,
                     style: data.style,
                     original: c.label.text.to_string(),
-                    original_spans: Vec::new(),
+                    original_spans: Spans::default(),
                     selecting: false,
                     active_at: Instant::now(),
                     caret_drawn: false,
@@ -406,7 +455,7 @@ impl TextEdit {
                 rotation: 0.0,
                 style: data.style,
                 original: frame.title.to_string(),
-                original_spans: Vec::new(),
+                original_spans: Spans::default(),
                 selecting: false,
                 active_at: Instant::now(),
                 caret_drawn: false,
@@ -437,7 +486,7 @@ impl TextEdit {
                 let mut this = Self::fitted(
                     engine,
                     target,
-                    (&embed.title, &[]),
+                    (&embed.title, &Spans::default()),
                     Placement::EmbedTitle {
                         bounds: data.bounds,
                     },
@@ -498,7 +547,7 @@ impl TextEdit {
             rotation: data.rotation,
             style: data.style,
             original: node.text.to_string(),
-            original_spans: node.spans.to_vec(),
+            original_spans: node.spans.clone(),
             selecting: false,
             active_at: Instant::now(),
             caret_drawn: false,
@@ -596,7 +645,7 @@ impl TextEdit {
         let text_layout = self.editor.layout(engine);
         let node = Node {
             text: self.editor.display_text().into(),
-            spans: self.editor.display_spans().into(),
+            spans: self.editor.display_spans(),
             text_size: pb_geom::kurbo::Size::new(
                 text_layout.width / scale,
                 text_layout.height / scale,
@@ -949,6 +998,45 @@ impl TextEdit {
         }
     }
 
+    /// The style of the paragraph with the cursor; `None` for plain text.
+    pub fn para_style(&self) -> Option<ParaStyle> {
+        self.is_rich().then(|| self.editor.para_style())
+    }
+
+    /// Makes the selected paragraphs `kind` list items, or plain if they all are.
+    pub fn toggle_list(&mut self, engine: &mut TextEngine, kind: ListKind) {
+        if self.is_rich() {
+            self.touch();
+            self.editor.toggle_list(engine, kind);
+            self.refit(engine);
+        }
+    }
+
+    /// The link at the selection or cursor; `None` for plain text or none there.
+    pub fn text_link(&self) -> Option<Link> {
+        self.is_rich()
+            .then(|| self.editor.link().map(|(_, link)| link))
+            .flatten()
+    }
+
+    /// Links the selection (or the link at the cursor) to `link`, or unlinks it.
+    pub fn set_text_link(&mut self, engine: &mut TextEngine, link: Option<Link>) {
+        if self.is_rich() {
+            self.touch();
+            self.editor.set_link(engine, link);
+            self.refit(engine);
+        }
+    }
+
+    /// The link in the text at `world`, if any.
+    pub fn link_at(&mut self, engine: &mut TextEngine, world: Point) -> Option<Link> {
+        if !self.is_rich() {
+            return None;
+        }
+        let p = self.layout_point(engine, world);
+        self.editor.link_at(engine, p.x, p.y)
+    }
+
     /// Colors the selection, or what is typed next; `None` for the object's text color.
     pub fn set_mark_color(&mut self, engine: &mut TextEngine, color: Option<Rgba>) {
         if self.is_rich() {
@@ -1112,7 +1200,7 @@ impl TextEdit {
     pub fn paste(&mut self, engine: &mut TextEngine) {
         self.touch();
         if let Some(text) = clipboard::text() {
-            self.editor.insert(engine, &text.replace("\r\n", "\n"));
+            paste_text(&mut self.editor, engine, &text);
         }
     }
 
@@ -1130,6 +1218,17 @@ impl TextEdit {
         let shift = modifiers.shift_key();
         let card = self.edited_card().is_some();
         let node = self.mindmap.is_some();
+        let rich = self.is_rich();
+        // Tab and Shift+Tab nest list items, before they move on to the next note or cell.
+        if rich
+            && event.logical_key == Key::Named(NamedKey::Tab)
+            && !ctrl
+            && !self.editor.is_composing()
+            && self.editor.indent(engine, shift)
+        {
+            self.refit(engine);
+            return KeyOutcome::Handled;
+        }
         let ed = &mut self.editor;
         // Board shortcuts by physical key, like elsewhere.
         if ctrl && let PhysicalKey::Code(code) = event.physical_key {
@@ -1148,21 +1247,28 @@ impl TextEdit {
                     return KeyOutcome::Handled;
                 }
                 KeyCode::KeyC => {
-                    if let Some(text) = ed.selected_text() {
-                        clipboard::set_text(&text);
-                    }
+                    copy(ed);
                 }
                 KeyCode::KeyX => {
-                    if let Some(text) = ed.selected_text() {
-                        clipboard::set_text(&text);
+                    if copy(ed) {
                         ed.backspace(engine, false);
                     }
+                }
+                KeyCode::KeyK if rich && !shift => return KeyOutcome::EditLink,
+                KeyCode::Digit8 | KeyCode::Digit7 if rich && shift => {
+                    let kind = if code == KeyCode::Digit8 {
+                        ListKind::Bullet
+                    } else {
+                        ListKind::Number
+                    };
+                    self.toggle_list(engine, kind);
+                    return KeyOutcome::Handled;
                 }
                 // The browser reads the clipboard later: the app pastes with `paste`.
                 KeyCode::KeyV if cfg!(target_arch = "wasm32") => return KeyOutcome::Paste,
                 KeyCode::KeyV => {
                     if let Some(text) = clipboard::text() {
-                        ed.insert(engine, &text.replace("\r\n", "\n"));
+                        paste_text(ed, engine, &text);
                     }
                 }
                 // Undo and redo work inside the edit; before anything is typed, they
@@ -1309,7 +1415,7 @@ impl TextEdit {
         let frame = self.frame(engine);
         let bounds = self.object_bounds(engine);
         let text = display.into();
-        let spans: pb_core::Spans = self.editor.display_spans().into();
+        let spans = self.editor.display_spans();
         ObjectData {
             kind: match self.placement {
                 Placement::Free { .. } => ObjectKind::Text(Text {
@@ -1438,7 +1544,7 @@ impl TextEdit {
                 col: table.cols.get(col)?.id.clone(),
                 cell: Cell {
                     text: text.into(),
-                    spans: spans.into(),
+                    spans,
                 },
             });
         }
@@ -1493,7 +1599,7 @@ impl TextEdit {
             (self.target, self.placement, &self.kanban)
         {
             let unchanged = text == self.original && spans == self.original_spans;
-            let edited = edited_board(kanban, part, text.into(), spans.into());
+            let edited = edited_board(kanban, part, text.into(), spans.clone());
             return match part {
                 BoardPart::Card(_)
                     if self.new_card && edited.cards.last()?.text.trim().is_empty() =>
@@ -1519,7 +1625,7 @@ impl TextEdit {
             Target::Existing(_) if text == self.original && spans == self.original_spans => None,
             Target::Existing(id) if empty => Some(Command::Delete(vec![id])),
             Target::Existing(id) => Some(Command::SetText {
-                spans: spans.into(),
+                spans,
                 id,
                 text: text.into(),
                 bounds: self.object_bounds(engine),

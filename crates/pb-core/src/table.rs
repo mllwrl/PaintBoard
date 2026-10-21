@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use kurbo::{Point, Rect};
 
-use crate::{HAlign, Span, Spans, Style, TextBox, VAlign};
+use crate::{HAlign, Spans, Style, TextBox, VAlign};
 
 /// A row or a column.
 #[derive(Clone, Debug, PartialEq)]
@@ -277,9 +277,10 @@ impl Table {
     }
 
     /// The text of cell (`row`, `col`), empty if it has none.
-    pub fn text(&self, row: usize, col: usize) -> (&str, &[Span]) {
+    pub fn text(&self, row: usize, col: usize) -> (&str, &Spans) {
+        static PLAIN: std::sync::LazyLock<Spans> = std::sync::LazyLock::new(Spans::default);
         self.cell(row, col)
-            .map_or(("", &[]), |c| (&*c.text, &*c.spans))
+            .map_or(("", &*PLAIN), |c| (&*c.text, &c.spans))
     }
 
     /// A copy with the text of cell (`row`, `col`) replaced.
