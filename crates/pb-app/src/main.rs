@@ -34,6 +34,7 @@ fn main() {
         env_logger::Env::default().default_filter_or("warn,pb_app=info,pb_render=info"),
     )
     .init();
+    keep_crashes();
     // PaintBoard is running already: it opens the file (or just shows itself) instead.
     let file = std::env::args_os().nth(1).map(std::path::PathBuf::from);
     if pb_platform::instance::hand_over(file.as_deref()) {
@@ -44,6 +45,33 @@ fn main() {
         .expect("failed to create event loop");
     let mut app = App::new(event_loop.create_proxy());
     event_loop.run_app(&mut app).expect("event loop failed");
+}
+
+/// A crash is written down in `crash.log` in the app's data folder, with where it happened:
+/// release builds have no console to show it in.
+#[cfg(not(target_arch = "wasm32"))]
+fn keep_crashes() {
+    use std::io::Write;
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        if let Ok(dir) = pb_platform::fs::app_data_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            let log = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("crash.log"));
+            if let Ok(mut log) = log {
+                let _ = writeln!(
+                    log,
+                    "PaintBoard {} crashed at {} ms since 1970: {info}\n{backtrace}\n",
+                    env!("CARGO_PKG_VERSION"),
+                    pb_platform::now_ms(),
+                );
+            }
+        }
+        default(info);
+    }));
 }
 
 #[cfg(target_arch = "wasm32")]
