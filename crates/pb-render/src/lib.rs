@@ -235,6 +235,27 @@ fn shown_objects(
     ids
 }
 
+/// Draws a see-through 1×1 picture, so no frame is without one. vello 0.11 drops the
+/// contents of its image atlas when a frame has no image (nor gradient) in it, yet still
+/// counts the pictures it uploaded as there: one that left the screen (or was deleted and
+/// brought back with undo) came back blank.
+fn keep_image_atlas(scene: &mut Scene) {
+    use std::sync::OnceLock;
+    use vello::peniko::{Blob, Fill, ImageAlphaType, ImageBrush, ImageData, ImageFormat};
+    static PIXEL: OnceLock<ImageBrush> = OnceLock::new();
+    let pixel = PIXEL.get_or_init(|| {
+        ImageBrush::new(ImageData {
+            data: Blob::from(vec![0u8; 4]),
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha,
+            width: 1,
+            height: 1,
+        })
+    });
+    let spot = vello::kurbo::Rect::new(0.0, 0.0, 1.0, 1.0);
+    scene.fill(Fill::NonZero, Affine::IDENTITY, pixel, None, &spot);
+}
+
 /// Rebuilds `scene` for the given view.
 pub fn build_scene(
     scene: &mut Scene,
@@ -244,6 +265,7 @@ pub fn build_scene(
 ) {
     scene.reset();
     images.begin_frame();
+    keep_image_atlas(scene);
     if !view.plain {
         draw_grid(
             scene,

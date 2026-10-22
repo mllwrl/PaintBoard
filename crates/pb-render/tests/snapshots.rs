@@ -384,3 +384,77 @@ fn many_big_photos_all_show() {
         assert_eq!(&rgba[at..at + 3], c, "image {i} is missing");
     }
 }
+
+/// vello drops the contents of its image atlas when a frame has no images (or gradients)
+/// in it, yet thinks the images it uploaded before are still there: a picture that left
+/// the screen came back blank.
+#[test]
+fn a_picture_shows_again_after_leaving_the_screen() {
+    let Some(mut gpu) = gpu() else {
+        return;
+    };
+    let mut doc = Document::new();
+    let (w, h) = (300u32, 200u32);
+    let rgba = [200u8, 40, 40, 255].repeat((w * h) as usize);
+    let png = pb_io::image::encode_png(&pb_io::image::Pixels {
+        width: w,
+        height: h,
+        rgba,
+    })
+    .unwrap();
+    let asset = doc.add_asset(png);
+    let picture = object(
+        ObjectKind::Image(pb_core::Image::new(asset)),
+        Rect::new(-150.0, -100.0, 150.0, 100.0),
+        Style::default(),
+    );
+    doc.apply(Command::Create(vec![picture.into()])).unwrap();
+    let theme = Theme::light();
+    let (overlay, filter, votes) = (
+        Overlay::default(),
+        pb_core::Filter::default(),
+        HashMap::new(),
+    );
+    let mut images = ImageCache::default();
+    let mut text = TextRenderer::new();
+    // The camera's origin is the view's top left corner.
+    let mut frame = |origin: Point| {
+        let camera = Camera::new(origin, 1.0);
+        let view = View {
+            camera: &camera,
+            viewport: Size::new(f64::from(WIDTH), f64::from(HEIGHT)),
+            scale: 1.0,
+            grid: GridStyle::None,
+            theme: &theme,
+            document: &doc,
+            assets: doc.assets(),
+            overrides: &[],
+            hidden: &[],
+            previews: &[],
+            overlay: &overlay,
+            filter: &filter,
+            me: "me",
+            votes: &votes,
+            plain: true,
+            only: None,
+            frame_titles: true,
+        };
+        let mut scene = Scene::new();
+        build_scene(&mut scene, &view, &mut text, &mut images);
+        gpu.render_image(&scene, WIDTH, HEIGHT, theme.background)
+            .unwrap()
+    };
+    let middle = ((HEIGHT / 2 * WIDTH + WIDTH / 2) * 4) as usize;
+    let home = Point::new(-f64::from(WIDTH) / 2.0, -f64::from(HEIGHT) / 2.0);
+    let shown = frame(home);
+    assert_eq!(&shown[middle..middle + 3], &[200, 40, 40]);
+    // Away: nothing with an image on screen.
+    frame(Point::new(1e5, 1e5));
+    frame(Point::new(1e5, 1e5));
+    let back = frame(home);
+    assert_eq!(
+        &back[middle..middle + 3],
+        &[200, 40, 40],
+        "the picture is blank"
+    );
+}
