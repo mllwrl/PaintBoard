@@ -291,6 +291,9 @@ pub struct App {
     /// frame like the UI's buttons: asked while a key is handled, Windows leaves that window
     /// hidden and the app waits on it for good.
     deferred: Vec<Action>,
+    /// Background results that may ask something in a window of the system (an error, a
+    /// question), handled after the next frame for the same reason as [`App::deferred`].
+    deferred_events: Vec<UserEvent>,
     /// The voting results window is open.
     show_results: bool,
     /// The camera gliding to a new place.
@@ -478,6 +481,7 @@ impl App {
             timer_armed: None,
             timer_sound: crate::settings::timer_sound(),
             deferred: Vec::new(),
+            deferred_events: Vec::new(),
             show_results: false,
             diagram: None,
             graph: None,
@@ -1243,6 +1247,13 @@ impl App {
             self.shown_title = title;
         }
 
+        let events = std::mem::take(&mut self.deferred_events);
+        if !events.is_empty() {
+            for event in events {
+                self.handle_event(event);
+            }
+            self.request_redraw();
+        }
         if !actions.is_empty() {
             for action in actions {
                 self.perform(action);
@@ -6774,100 +6785,18 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::GpuReady(gpu) => self.on_gpu_ready(*gpu),
-            UserEvent::Recognized { request, result } => self.finish_recognition(request, result),
-            UserEvent::Previewed {
-                id,
-                url,
-                replace_title,
-                result,
-            } => self.finish_preview(id, &url, replace_title, result),
-            // Waking up is all it takes: `about_to_wait` ticks the session.
-            UserEvent::Saved => {}
-            UserEvent::ImagesReady => self.request_redraw(),
-            UserEvent::Paste(at) => self.paste_now(at),
-            // Waking up is all it takes: `about_to_wait` ticks the sharing.
-            UserEvent::Network => {}
-            UserEvent::BoardMade(server, answer) => self.board_made(&server, answer),
-            UserEvent::PluginPosted => {
-                self.with_plugins(|plugins, app| plugins.poll(app));
-            }
-            UserEvent::PluginFetched {
-                plugin,
-                call,
-                result,
-            } => {
-                self.with_plugins(|plugins, app| plugins.fetched(app, &plugin, call, result));
-            }
-            UserEvent::PluginFiles(paths) => self.install_plugin(paths),
-            UserEvent::DevPluginPicked(path) => {
-                #[cfg(not(target_arch = "wasm32"))]
-                if let Some(dir) = path.parent() {
-                    let dir = dir.to_owned();
-                    let loaded = self.with_plugins(|plugins, app| plugins.load_dev(app, &dir));
-                    match loaded {
-                        Ok(_) => self.plugins_window = true,
-                        Err(err) => dialog::show_error(tr("Could not load the plugin"), &err),
-                    }
-                }
-                #[cfg(target_arch = "wasm32")]
-                let _ = path;
-            }
-            UserEvent::Account(reply) => {
-                if let Some(outcome) = self.accounts.receive(reply) {
-                    self.account_outcome(outcome);
-                }
-                self.request_redraw();
-            }
-            UserEvent::BoardPicked(path) => self.open_file(path),
-            UserEvent::StartedAgain(file) => self.started_again(file),
-            UserEvent::FilesDropped(paths, at) => {
-                let at = self.camera.screen_to_world(at);
-                self.insert_files(&paths, Some(at));
-                for path in &paths {
-                    let _ = pb_platform::fs::remove(path);
-                }
-                self.request_redraw();
-            }
-            UserEvent::FilesPicked(paths) => {
-                self.insert_files(&paths, None);
-                // Picked in the browser, they were kept in memory only to be read.
-                #[cfg(target_arch = "wasm32")]
-                for path in &paths {
-                    let _ = pb_platform::fs::remove(path);
-                }
-                self.request_redraw();
-            }
-            UserEvent::PageRendered { pdf, page, result } => {
-                self.finish_page(pdf, page, result);
-            }
-            UserEvent::UpdateChecked { by_hand, result } => {
-                self.update_checked(by_hand, result);
-                self.request_redraw();
-            }
-            UserEvent::UpdateProgress(done, total) => {
-                if matches!(
-                    self.updates.download,
-                    Some(crate::updates::Download::Running(..))
-                ) {
-                    self.updates.download = Some(crate::updates::Download::Running(done, total));
-                    self.request_redraw();
-                }
-            }
-            UserEvent::UpdateDownloaded(result) => {
-                self.updates.download = Some(match result {
-                    Ok(path) => {
-                        // Saving and starting the installer may need to say something:
-                        // after the frame.
-                        self.defer(Action::RunInstaller);
-                        crate::updates::Download::Ready(path)
-                    }
-                    Err(err) => {
-                        log::warn!("could not download the update: {err}");
-                        crate::updates::Download::Failed(err)
-                    }
-                });
-                self.updates.notice = true;
+            // Nothing in these asks anything: at once (a minimized window, waiting for
+            // StartedAgain, would draw no frame).
+            UserEvent::GpuReady(_)
+            | UserEvent::Saved
+            | UserEvent::ImagesReady
+            | UserEvent::Network
+            | UserEvent::StartedAgain(_)
+            | UserEvent::UpdateChecked { .. }
+            | UserEvent::UpdateProgress(..)
+            | UserEvent::UpdateDownloaded(_) => self.handle_event(event),
+            _ => {
+                self.deferred_events.push(event);
                 self.request_redraw();
             }
         }
@@ -7564,9 +7493,9 @@ fn window_icon() -> Option<winit::window::Icon> {
 }
 
 /// Deleting this many objects at once asks first...
-const DELETE_ASK: usize = 20;
+const DELETE_ASK: usize = 100;
 /// ...and so does deleting everything on a board of at least this many.
-const DELETE_ASK_ALL: usize = 5;
+const DELETE_ASK_ALL: usize = 20;
 
 /// The most objects the minimap draws one by one; boards with more are drawn by cell.
 const MINIMAP_MAX_MARKS: usize = 1500;
@@ -7839,6 +7768,110 @@ impl crate::plugins::Host for App {
         Box::new(move || {
             let _ = proxy.send_event(UserEvent::PluginPosted);
         })
+    }
+}
+
+impl App {
+    /// What came from a background task or another part of the app.
+    fn handle_event(&mut self, event: UserEvent) {
+        match event {
+            UserEvent::GpuReady(gpu) => self.on_gpu_ready(*gpu),
+            UserEvent::Recognized { request, result } => self.finish_recognition(request, result),
+            UserEvent::Previewed {
+                id,
+                url,
+                replace_title,
+                result,
+            } => self.finish_preview(id, &url, replace_title, result),
+            // Waking up is all it takes: `about_to_wait` ticks the session.
+            UserEvent::Saved => {}
+            UserEvent::ImagesReady => self.request_redraw(),
+            UserEvent::Paste(at) => self.paste_now(at),
+            // Waking up is all it takes: `about_to_wait` ticks the sharing.
+            UserEvent::Network => {}
+            UserEvent::BoardMade(server, answer) => self.board_made(&server, answer),
+            UserEvent::PluginPosted => {
+                self.with_plugins(|plugins, app| plugins.poll(app));
+            }
+            UserEvent::PluginFetched {
+                plugin,
+                call,
+                result,
+            } => {
+                self.with_plugins(|plugins, app| plugins.fetched(app, &plugin, call, result));
+            }
+            UserEvent::PluginFiles(paths) => self.install_plugin(paths),
+            UserEvent::DevPluginPicked(path) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(dir) = path.parent() {
+                    let dir = dir.to_owned();
+                    let loaded = self.with_plugins(|plugins, app| plugins.load_dev(app, &dir));
+                    match loaded {
+                        Ok(_) => self.plugins_window = true,
+                        Err(err) => dialog::show_error(tr("Could not load the plugin"), &err),
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                let _ = path;
+            }
+            UserEvent::Account(reply) => {
+                if let Some(outcome) = self.accounts.receive(reply) {
+                    self.account_outcome(outcome);
+                }
+                self.request_redraw();
+            }
+            UserEvent::BoardPicked(path) => self.open_file(path),
+            UserEvent::StartedAgain(file) => self.started_again(file),
+            UserEvent::FilesDropped(paths, at) => {
+                let at = self.camera.screen_to_world(at);
+                self.insert_files(&paths, Some(at));
+                for path in &paths {
+                    let _ = pb_platform::fs::remove(path);
+                }
+                self.request_redraw();
+            }
+            UserEvent::FilesPicked(paths) => {
+                self.insert_files(&paths, None);
+                // Picked in the browser, they were kept in memory only to be read.
+                #[cfg(target_arch = "wasm32")]
+                for path in &paths {
+                    let _ = pb_platform::fs::remove(path);
+                }
+                self.request_redraw();
+            }
+            UserEvent::PageRendered { pdf, page, result } => {
+                self.finish_page(pdf, page, result);
+            }
+            UserEvent::UpdateChecked { by_hand, result } => {
+                self.update_checked(by_hand, result);
+                self.request_redraw();
+            }
+            UserEvent::UpdateProgress(done, total) => {
+                if matches!(
+                    self.updates.download,
+                    Some(crate::updates::Download::Running(..))
+                ) {
+                    self.updates.download = Some(crate::updates::Download::Running(done, total));
+                    self.request_redraw();
+                }
+            }
+            UserEvent::UpdateDownloaded(result) => {
+                self.updates.download = Some(match result {
+                    Ok(path) => {
+                        // Saving and starting the installer may need to say something:
+                        // after the frame.
+                        self.defer(Action::RunInstaller);
+                        crate::updates::Download::Ready(path)
+                    }
+                    Err(err) => {
+                        log::warn!("could not download the update: {err}");
+                        crate::updates::Download::Failed(err)
+                    }
+                });
+                self.updates.notice = true;
+                self.request_redraw();
+            }
+        }
     }
 }
 

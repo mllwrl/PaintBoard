@@ -6238,4 +6238,49 @@ mod tests {
         assert!(doc.roots().is_empty());
         assert!(doc.tree.children(TreeParentId::Root).unwrap().is_empty());
     }
+
+    #[test]
+    fn strokes_replaced_by_text_in_one_step_stay_in_order() {
+        use kurbo::Point;
+        let check = |doc: &Document| {
+            let fresh = Document::from_snapshot(&doc.snapshot()).unwrap();
+            assert_eq!(doc.objects(), fresh.objects());
+            for (i, o) in doc.objects().iter().enumerate() {
+                assert_eq!(doc.paint_order(o.id), Some(i));
+            }
+            let all = |d: &Document| -> Vec<ObjectId> {
+                d.objects_in(Rect::new(-1e4, -1e4, 1e4, 1e4))
+                    .iter()
+                    .map(|o| o.id)
+                    .collect()
+            };
+            assert_eq!(all(doc), all(&fresh));
+        };
+        let stroke = |x: f64| {
+            let points = [(Point::new(x, 5.0), 1.0), (Point::new(x + 10.0, 30.0), 0.5)];
+            let (ink, bounds) = Ink::from_world(&points).unwrap();
+            let mut data = rect(0.0, 0.0, 0.0, 0.0);
+            data.kind = ObjectKind::Ink(ink);
+            data.bounds = bounds;
+            data
+        };
+        for picked in [vec![1usize], vec![0, 1, 2], vec![2], vec![0]] {
+            let mut doc = Document::new();
+            let ids: Vec<_> = (0..4)
+                .map(|i| create(&mut doc, stroke(i as f64 * 20.0)))
+                .collect();
+            let chosen: Vec<_> = picked.iter().map(|&i| ids[i]).collect();
+            doc.begin_undo_group();
+            doc.apply(Command::Delete(chosen)).unwrap();
+            check(&doc);
+            doc.apply(Command::Create(vec![rect(0.0, 0.0, 30.0, 20.0).into()]))
+                .unwrap();
+            check(&doc);
+            doc.end_undo_group();
+            doc.undo().unwrap();
+            check(&doc);
+            doc.redo().unwrap();
+            check(&doc);
+        }
+    }
 }
