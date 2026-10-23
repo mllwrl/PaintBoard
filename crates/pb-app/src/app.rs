@@ -209,8 +209,8 @@ pub struct App {
     pen: crate::settings::PenSettings,
     /// Fingers that started on a panel while fingers move the board: they work the panel.
     ui_touches: Vec<u64>,
-    /// In the browser, which hands pens over as a mouse: whether the pen touches the
-    /// screen, and where it was last.
+    /// In the browser and on macOS, which hand pens over as a mouse: whether the pen
+    /// touches the screen, and where it was last.
     web_pen: (bool, winit::dpi::PhysicalPosition<f64>),
     text: TextRenderer,
     images: ImageCache,
@@ -364,7 +364,7 @@ pub struct App {
 
 impl App {
     pub fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
-        // The browser's pens: told apart from a mouse.
+        // The browser's and macOS's pens: told apart from a mouse.
         pb_platform::pen::listen();
         // A board file named on the command line (a double click on it) opens instead.
         #[cfg(not(target_arch = "wasm32"))]
@@ -6822,8 +6822,8 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 impl App {
-    /// The browser hands pens over as a mouse: its events for pen `id` go the way of a
-    /// pen's touches on Windows.
+    /// The browser and macOS hand pens over as a mouse: its events for pen `id` go the way
+    /// of a pen's touches on Windows.
     fn pen_as_touch(
         &mut self,
         event_loop: &ActiveEventLoop,

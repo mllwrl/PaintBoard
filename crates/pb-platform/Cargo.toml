@@ -44,6 +44,15 @@ features = [
 windows-collections = "0.3"
 windows-numerics = "0.3"
 
+# A tablet pen's pressure, eraser end and side buttons, which winit drops from its events.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "NSEvent",
+] }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
 wasm-bindgen = "0.2"

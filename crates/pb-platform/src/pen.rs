@@ -3,7 +3,9 @@
 //! On Windows the window gets pens and fingers as touches with the system's pointer id,
 //! which the system can be asked about while the touch is handled. In the browser fingers
 //! come as touches and pens as a mouse; a listener on the page notes each pointer event
-//! (its kind and buttons) just before the window gets it. Elsewhere nothing is known.
+//! (its kind and buttons) just before the window gets it. macOS also hands a tablet's pen
+//! over as a mouse, with its pressure in the mouse event, which winit drops; a monitor of
+//! the app's events notes it the same way. Elsewhere nothing is known.
 
 /// The kind of thing touching or hovering over the screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,13 +38,14 @@ pub fn info(id: u64) -> Option<PenInfo> {
     imp::info(id)
 }
 
-/// In the browser, which hands pens over as a mouse: the pen (its pointer id and state)
+/// In the browser and on macOS, which hand pens over as a mouse: the pen (its pointer id and state)
 /// behind the mouse event being handled, if it is one. `None` elsewhere.
 pub fn current() -> Option<(u64, PenInfo)> {
     imp::current()
 }
 
-/// Starts noting pointer events, in the browser; does nothing elsewhere.
+/// Starts noting pointer events, in the browser and on macOS (after the event loop is
+/// made); does nothing elsewhere.
 pub fn listen() {
     imp::listen();
 }
@@ -188,7 +191,119 @@ mod imp {
     }
 }
 
-#[cfg(not(any(windows, target_arch = "wasm32")))]
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod imp {
+    use super::{PenInfo, PointerKind};
+    use block2::RcBlock;
+    use objc2_app_kit::{
+        NSEvent, NSEventButtonMask, NSEventMask, NSEventSubtype, NSEventType, NSPointingDeviceType,
+    };
+    use std::cell::Cell;
+    use std::ptr::NonNull;
+
+    /// The id the pen's touches get: macOS names no pointer in mouse events.
+    const PEN_ID: u32 = 1;
+
+    thread_local! {
+        /// The last mouse or tablet event: what it said (a mouse's events say `Mouse`).
+        static LAST: Cell<Option<PenInfo>> = const { Cell::new(None) };
+        /// The pen's eraser end is the one near the tablet, as its last proximity event said.
+        static ERASER: Cell<bool> = const { Cell::new(false) };
+        static LISTENING: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub fn info(id: u32) -> Option<PenInfo> {
+        LAST.get().filter(|_| id == PEN_ID)
+    }
+
+    pub fn current() -> Option<(u64, PenInfo)> {
+        LAST.get()
+            .filter(|info| info.kind == PointerKind::Pen)
+            .map(|info| (u64::from(PEN_ID), info))
+    }
+
+    pub fn listen() {
+        if LISTENING.replace(true) {
+            return;
+        }
+        // The right and other buttons stay a mouse's: a pen's side button clicks the right
+        // one by default, which opens the context menu as it is.
+        let mask = NSEventMask::LeftMouseDown
+            | NSEventMask::LeftMouseUp
+            | NSEventMask::LeftMouseDragged
+            | NSEventMask::MouseMoved
+            | NSEventMask::RightMouseDown
+            | NSEventMask::OtherMouseDown
+            | NSEventMask::TabletPoint
+            | NSEventMask::TabletProximity;
+        let block = RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
+            // SAFETY: AppKit hands over a live event for the length of the call.
+            note(unsafe { event.as_ref() });
+            event.as_ptr()
+        });
+        // SAFETY: the handler gives back the event it gets, unchanged, as AppKit wants.
+        // The monitor sees events as they are taken from the queue, before the window
+        // (and winit) gets them.
+        let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &block) };
+        match monitor {
+            // Lives as long as the app.
+            Some(monitor) => std::mem::forget(monitor),
+            None => log::warn!("pens will act as a mouse: no event monitor"),
+        }
+    }
+
+    fn note(event: &NSEvent) {
+        let kind = event.r#type();
+        let subtype = event.subtype();
+        let proximity =
+            kind == NSEventType::TabletProximity || subtype == NSEventSubtype::TabletProximity;
+        if proximity {
+            ERASER.set(
+                event.isEnteringProximity()
+                    && event.pointingDeviceType() == NSPointingDeviceType::Eraser,
+            );
+            if kind == NSEventType::TabletProximity {
+                return;
+            }
+        }
+        let tablet = kind == NSEventType::TabletPoint || subtype == NSEventSubtype::TabletPoint;
+        let pen_button =
+            kind == NSEventType::RightMouseDown || kind == NSEventType::OtherMouseDown;
+        if !tablet || pen_button {
+            LAST.set(Some(PenInfo {
+                kind: PointerKind::Mouse,
+                contact: false,
+                eraser: false,
+                barrel: false,
+                pressure: 1.0,
+                tilt: (0, 0),
+            }));
+            return;
+        }
+        let contact = match kind {
+            NSEventType::LeftMouseDown | NSEventType::LeftMouseDragged => true,
+            NSEventType::LeftMouseUp | NSEventType::MouseMoved => false,
+            // A tablet point between mouse events: touching as the last one said.
+            _ => LAST.get().is_some_and(|last| last.contact),
+        };
+        let buttons = event.buttonMask();
+        let tilt = event.tilt();
+        // Tilt comes as -1 to 1 each way: a pen lying flat is 1.
+        let degrees = |t: f64| (t.clamp(-1.0, 1.0) * 90.0).round() as i32;
+        LAST.set(Some(PenInfo {
+            kind: PointerKind::Pen,
+            contact,
+            eraser: ERASER.get(),
+            barrel: buttons
+                .intersects(NSEventButtonMask::PenLowerSide | NSEventButtonMask::PenUpperSide),
+            pressure: f64::from(event.pressure()).clamp(0.0, 1.0),
+            tilt: (degrees(tilt.x), degrees(tilt.y)),
+        }));
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_arch = "wasm32")))]
 mod imp {
     pub fn info(_id: u32) -> Option<super::PenInfo> {
         None
