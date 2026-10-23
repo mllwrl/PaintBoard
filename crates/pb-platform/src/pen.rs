@@ -5,7 +5,7 @@
 //! come as touches and pens as a mouse; a listener on the page notes each pointer event
 //! (its kind and buttons) just before the window gets it. macOS also hands a tablet's pen
 //! over as a mouse, with its pressure in the mouse event, which winit drops; a monitor of
-//! the app's events notes it the same way. Elsewhere nothing is known.
+//! the app's events notes it the same way. On Linux see [`linux`].
 
 /// The kind of thing touching or hovering over the screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +49,39 @@ pub fn current() -> Option<(u64, PenInfo)> {
 pub fn listen() {
     imp::listen();
 }
+
+/// A pen's move over the window that the window itself did not get (under Wayland).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PenMove {
+    pub id: u64,
+    /// In logical pixels from the window's top left corner.
+    pub pos: (f64, f64),
+    pub info: PenInfo,
+}
+
+/// Starts noting pens for `window`, on Linux; does nothing elsewhere.
+pub fn attach(
+    window: &(impl raw_window_handle::HasDisplayHandle + raw_window_handle::HasWindowHandle),
+) {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    linux::attach(window);
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    let _ = window;
+}
+
+/// The next of the pen's moves that came since the last call, in order (under Wayland):
+/// [`info`] then says what it said. `None` elsewhere.
+pub fn next_move() -> Option<PenMove> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    return linux::next_move();
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    None
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+mod linux;
+#[cfg(all(unix, not(target_os = "macos")))]
+use linux as imp;
 
 #[cfg(windows)]
 #[allow(unsafe_code)]
@@ -245,7 +278,8 @@ mod imp {
         // SAFETY: the handler gives back the event it gets, unchanged, as AppKit wants.
         // The monitor sees events as they are taken from the queue, before the window
         // (and winit) gets them.
-        let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &block) };
+        let monitor =
+            unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &block) };
         match monitor {
             // Lives as long as the app.
             Some(monitor) => std::mem::forget(monitor),
@@ -268,8 +302,7 @@ mod imp {
             }
         }
         let tablet = kind == NSEventType::TabletPoint || subtype == NSEventSubtype::TabletPoint;
-        let pen_button =
-            kind == NSEventType::RightMouseDown || kind == NSEventType::OtherMouseDown;
+        let pen_button = kind == NSEventType::RightMouseDown || kind == NSEventType::OtherMouseDown;
         if !tablet || pen_button {
             LAST.set(Some(PenInfo {
                 kind: PointerKind::Mouse,
@@ -303,7 +336,7 @@ mod imp {
     }
 }
 
-#[cfg(not(any(windows, target_os = "macos", target_arch = "wasm32")))]
+#[cfg(not(any(windows, unix, target_arch = "wasm32")))]
 mod imp {
     pub fn info(_id: u32) -> Option<super::PenInfo> {
         None

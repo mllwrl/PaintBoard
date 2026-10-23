@@ -13,6 +13,8 @@ log.workspace = true
 web-time.workspace = true
 # The language the system is set to, for the UI's.
 sys-locale = "0.3"
+# The window's system handles, for its pens on Linux.
+raw-window-handle = "0.6"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd.workspace = true
@@ -43,6 +45,14 @@ features = [
 [target.'cfg(windows)'.dependencies]
 windows-collections = "0.3"
 windows-numerics = "0.3"
+
+# A tablet pen's pressure, eraser end and side buttons, which winit drops from its events:
+# raw XInput 2 events under X11, the tablet protocol (on winit's connection) under Wayland.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+x11rb = { version = "0.13", features = ["xinput"] }
+wayland-client = "0.31"
+wayland-backend = { version = "0.3", features = ["client_system", "dlopen"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
 
 # A tablet pen's pressure, eraser end and side buttons, which winit drops from its events.
 [target.'cfg(target_os = "macos")'.dependencies]

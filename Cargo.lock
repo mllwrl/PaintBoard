@@ -3631,17 +3631,22 @@ dependencies = [
  "js-sys",
  "log",
  "objc2-app-kit 0.3.2",
+ "raw-window-handle",
  "rfd",
  "sys-locale",
  "tungstenite",
  "ureq",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
  "web-sys",
  "web-time",
  "windows",
  "windows-collections",
  "windows-numerics",
+ "x11rb",
 ]
 
 [[package]]

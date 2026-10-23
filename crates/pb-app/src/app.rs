@@ -209,8 +209,9 @@ pub struct App {
     pen: crate::settings::PenSettings,
     /// Fingers that started on a panel while fingers move the board: they work the panel.
     ui_touches: Vec<u64>,
-    /// In the browser and on macOS, which hand pens over as a mouse: whether the pen
-    /// touches the screen, and where it was last.
+    /// In the browser, on macOS and on Linux, which hand pens over as a mouse (or, under
+    /// Wayland, apart from the window): whether the pen touches the screen, and where it
+    /// was last.
     web_pen: (bool, winit::dpi::PhysicalPosition<f64>),
     text: TextRenderer,
     images: ImageCache,
@@ -364,7 +365,8 @@ pub struct App {
 
 impl App {
     pub fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
-        // The browser's and macOS's pens: told apart from a mouse.
+        // The browser's and macOS's pens: told apart from a mouse (Linux's: when the
+        // window is made).
         pb_platform::pen::listen();
         // A board file named on the command line (a double click on it) opens instead.
         #[cfg(not(target_arch = "wasm32"))]
@@ -6625,6 +6627,8 @@ impl ApplicationHandler<UserEvent> for App {
                 .expect("failed to create window"),
         );
         self.window = Some(window.clone());
+        // Pens on Linux: their pressure under X11, all their events under Wayland.
+        pb_platform::pen::attach(&*window);
         self.ui = Some(Ui::new(&window));
         // The language and theme picked before, or the system's at first.
         let system_lang = pb_platform::locale().and_then(|l| crate::i18n::Lang::from_code(&l));
@@ -6674,6 +6678,15 @@ impl ApplicationHandler<UserEvent> for App {
         if self.quit {
             event_loop.exit();
             return;
+        }
+        // Under Wayland a pen's events come here instead of to the window.
+        while let Some(pen) = pb_platform::pen::next_move() {
+            let scale = self.scale();
+            let event = WindowEvent::CursorMoved {
+                device_id: winit::event::DeviceId::dummy(),
+                position: winit::dpi::PhysicalPosition::new(pen.pos.0 * scale, pen.pos.1 * scale),
+            };
+            self.pen_as_touch(event_loop, &event, pen.id, pen.info);
         }
         if !self.dropped.is_empty() {
             let paths = std::mem::take(&mut self.dropped);
@@ -6822,8 +6835,9 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 impl App {
-    /// The browser and macOS hand pens over as a mouse: its events for pen `id` go the way
-    /// of a pen's touches on Windows.
+    /// The browser, macOS and X11 hand pens over as a mouse, and under Wayland they come
+    /// from [`pb_platform::pen::next_move`]: their events for pen `id` go the way of a
+    /// pen's touches on Windows.
     fn pen_as_touch(
         &mut self,
         event_loop: &ActiveEventLoop,
