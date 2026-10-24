@@ -1901,7 +1901,7 @@ impl App {
                     self.accounts.delete_account();
                 }
             }
-            Action::CreateShared(server) => self.create_shared(&server),
+            Action::CreateShared(server, key) => self.create_shared(&server, &key),
             Action::SetName(name) => {
                 let name = name.trim();
                 if !name.is_empty() && name != &*self.me {
@@ -5409,14 +5409,15 @@ impl App {
         }
     }
 
-    /// Asks the server at `server` (as typed) to make a shared board of this one; it is
-    /// shared once the server answers ([`App::board_made`]).
-    fn create_shared(&mut self, server: &str) {
+    /// Asks the server at `server` (as typed) to make a shared board of this one, with
+    /// `key` if it asks for one; it is shared once the server answers ([`App::board_made`]).
+    fn create_shared(&mut self, server: &str, key: &str) {
         let Some(server) = crate::sharing::server_address(server) else {
             self.share_error = Some(tr("That is not a server address.").to_owned());
             return;
         };
         crate::settings::save_server(&server);
+        crate::settings::save_server_key(&server, key);
         self.making_shared = true;
         self.share_error = None;
         let proxy = self.proxy.clone();
@@ -5427,8 +5428,11 @@ impl App {
             .accounts
             .session_for(&server)
             .map(|s| format!("Bearer {s}"));
-        let headers: Vec<(&str, &str)> =
+        let mut headers: Vec<(&str, &str)> =
             auth.iter().map(|a| ("authorization", a.as_str())).collect();
+        if !key.is_empty() {
+            headers.push(("x-create-key", key));
+        }
         pb_platform::net::fetch("POST", &url, &headers, None, move |answer| {
             let _ = proxy.send_event(UserEvent::BoardMade(server, answer));
         });
@@ -5448,6 +5452,12 @@ impl App {
                     self.apply(Command::SetTitle(name.into()));
                 }
                 self.start_sharing(made.edit, Some(made.view), made.comment);
+            }
+            Err(err) if err.contains("a key is needed") => {
+                self.share_error = Some(
+                    tr("This server makes boards only with its key: type it in the Key field (ask whoever runs the server).")
+                        .to_owned(),
+                );
             }
             Err(err) => {
                 self.share_error = Some(trf("Could not share the board: {}", &[&err]));
@@ -5804,16 +5814,20 @@ impl App {
             }),
             error: accounts.error.clone(),
         };
-        let window = self.share_window.then(|| crate::ui::ShareView {
-            name: self.me.to_string(),
-            account,
-            shared,
-            server: Some(crate::settings::server())
+        let window = self.share_window.then(|| {
+            let server = Some(crate::settings::server())
                 .filter(|s| !s.is_empty())
                 .or_else(page_server)
-                .unwrap_or_default(),
-            making: self.making_shared,
-            error: self.share_error.clone(),
+                .unwrap_or_default();
+            crate::ui::ShareView {
+                name: self.me.to_string(),
+                account,
+                shared,
+                server_key: crate::settings::server_key(&server),
+                server,
+                making: self.making_shared,
+                error: self.share_error.clone(),
+            }
         });
         (window, badge)
     }

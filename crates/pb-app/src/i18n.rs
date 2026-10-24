@@ -374,6 +374,16 @@ const RU: &[(&str, &str)] = &[
     ),
     ("Making the board…", "Создаю доску…"),
     ("Share this board", "Поделиться этой доской"),
+    ("Key", "Ключ"),
+    (
+        "Only if the server asks for a key to make boards",
+        "Только если сервер требует ключ для создания досок",
+    ),
+    ("if the server asks for one", "если сервер его требует"),
+    (
+        "This server makes boards only with its key: type it in the Key field (ask whoever runs the server).",
+        "Этот сервер создаёт доски только с ключом: введите его в поле «Ключ» (спросите у того, кто держит сервер).",
+    ),
     (
         "Or open a board someone shared with you:",
         "Или откройте доску, которой с вами поделились:",

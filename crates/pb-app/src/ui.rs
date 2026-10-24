@@ -49,8 +49,9 @@ pub enum Action {
     ToggleLead,
     /// The name to go by on boards (pointers, comments, votes).
     SetName(String),
-    /// Makes a shared board of this one on the server at this address.
-    CreateShared(String),
+    /// Makes a shared board of this one on the server at this address, with the key it
+    /// asks for to make boards (empty if none).
+    CreateShared(String, String),
     /// Opens the shared board at this link (in place of this one).
     JoinShared(String),
     StopSharing,
@@ -1795,6 +1796,8 @@ fn board_menu(ctx: &Context, model: &Model, typed: Typed, actions: &mut Vec<Acti
 #[derive(Default)]
 struct ShareTexts {
     server: String,
+    /// The key for making boards; `None` until taken from what was remembered.
+    key: Option<String>,
     link: String,
     /// The name being typed, while it is.
     name: Option<String>,
@@ -1812,6 +1815,8 @@ pub struct ShareView {
     pub shared: Option<SharedView>,
     /// The server address last used.
     pub server: String,
+    /// The key remembered for making boards on that server; empty if none.
+    pub server_key: String,
     /// A board is being made on the server.
     pub making: bool,
     /// What went wrong last.
@@ -2187,10 +2192,24 @@ fn share_window(
                             .desired_width(260.0),
                     );
                 });
+                let key = texts.key.get_or_insert_with(|| view.server_key.clone());
+                ui.horizontal(|ui| {
+                    ui.label(tr("Key"))
+                        .on_hover_text(tr("Only if the server asks for a key to make boards"));
+                    ui.add(
+                        egui::TextEdit::singleline(key)
+                            .password(true)
+                            .hint_text(tr("if the server asks for one"))
+                            .desired_width(260.0),
+                    );
+                });
                 let can_make = !view.making && !texts.server.trim().is_empty();
                 let label = if view.making { tr("Making the board…") } else { tr("Share this board") };
                 if ui.add_enabled(can_make, Button::new(label)).clicked() {
-                    actions.push(Action::CreateShared(texts.server.trim().to_owned()));
+                    actions.push(Action::CreateShared(
+                        texts.server.trim().to_owned(),
+                        key.trim().to_owned(),
+                    ));
                 }
                 ui.separator();
                 ui.label(tr("Or open a board someone shared with you:"));

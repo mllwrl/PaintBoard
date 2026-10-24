@@ -204,6 +204,46 @@ pub fn save_server(server: &str) {
     }
 }
 
+/// File with the keys servers ask for to make boards, a line each: server, tab, key.
+const SERVER_KEYS_FILE: &str = "server-keys.txt";
+
+fn server_keys() -> Vec<(String, String)> {
+    pb_platform::fs::app_data_dir()
+        .and_then(|dir| pb_platform::fs::read(&dir.join(SERVER_KEYS_FILE)))
+        .map(|bytes| {
+            String::from_utf8_lossy(&bytes)
+                .lines()
+                .filter_map(|line| line.split_once('\t'))
+                .map(|(server, key)| (server.to_owned(), key.to_owned()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The key for making boards on `server`; empty if none was given.
+pub fn server_key(server: &str) -> String {
+    server_keys()
+        .into_iter()
+        .find(|(s, _)| s == server)
+        .map(|(_, key)| key)
+        .unwrap_or_default()
+}
+
+/// Remembers the key for `server`; an empty one forgets it.
+pub fn save_server_key(server: &str, key: &str) {
+    let mut keys = server_keys();
+    keys.retain(|(s, _)| s != server);
+    if !key.is_empty() {
+        keys.push((server.to_owned(), key.to_owned()));
+    }
+    let text: String = keys.iter().map(|(s, k)| format!("{s}\t{k}\n")).collect();
+    let saved = pb_platform::fs::app_data_dir()
+        .and_then(|dir| pb_platform::fs::write_atomic(&dir.join(SERVER_KEYS_FILE), text.as_bytes()));
+    if let Err(err) = saved {
+        log::warn!("server key not saved: {err}");
+    }
+}
+
 /// The theme picked last time: `Some(true)` for dark, `None` if never picked.
 pub fn dark_theme() -> Option<bool> {
     let dir = pb_platform::fs::app_data_dir().ok()?;
