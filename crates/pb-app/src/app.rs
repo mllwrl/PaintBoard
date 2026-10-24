@@ -6607,8 +6607,11 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let attributes = Window::default_attributes()
             .with_title("PaintBoard")
-            .with_window_icon(window_icon())
-            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0));
+            .with_window_icon(window_icon());
+        // In the browser the page's stylesheet sizes the canvas to the whole tab: a size
+        // given here would go into its inline style and win over that.
+        #[cfg(not(target_arch = "wasm32"))]
+        let attributes = attributes.with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0));
         #[cfg(target_arch = "wasm32")]
         let attributes = {
             use winit::platform::web::WindowAttributesExtWebSys;
